@@ -863,14 +863,29 @@
   [frame]
   (str/starts-with? (str (:type frame)) "REASONING"))
 
+(defn- text-content-frame?
+  "Is FRAME one of the per-token text frames? The second family the record does not keep as FRAMES
+  (ticket 03 of `.scratch/event-persistence`) -- the text is on `text/snapshot` rows instead, whole
+  rather than in pieces. Spelled here for the same reason `reasoning-frame?` is: a case that asked
+  the writer would agree with a writer that re-phrased the wrong family."
+  [frame]
+  (= "TEXT_MESSAGE_CONTENT" (:type frame)))
+
+(defn- snapshot-frame?
+  "Is FRAME a text snapshot -- the whole sentence so far, under a name of its own?"
+  [frame]
+  (and (= "CUSTOM" (:type frame)) (= "text/snapshot" (:name frame))))
+
 (deftest the-record-keeps-every-wire-frame-except-the-reasoning-family
   ;; TICKET 03 OF `.scratch/jsonl-two-kinds`, RE-STATED BY `.scratch/reasoning-out-of-the-record`. One
   ;; real run over a real socket. The record used to hold EVERY frame the client was handed; since
-  ;; that feature it holds every frame EXCEPT one family -- the per-token reasoning, whose text is on
-  ;; the run's own `message` row instead (those frames were 82% of a log's bytes). So the claim is
-  ;; exact now:
+  ;; that feature it holds every frame EXCEPT the two families it RE-PHRASES: the per-token reasoning
+  ;; (whose text is on the run's own `message` row; those frames were 82% of a log's bytes) and the
+  ;; per-token TEXT (whose text is on `text/snapshot` rows, whole, every ~75ms -- ticket 03 of
+  ;; `.scratch/event-persistence`). So the claim is exact now:
   ;;
-  ;;     the record's frames == the wire's frames MINUS the reasoning family, in order
+  ;;     the record's frames == the wire's frames MINUS the reasoning family MINUS the per-token text
+  ;;                             PLUS the snapshots that text became, in order
   ;;
   ;; and the wire really did carry that family (or the equality would hold vacuously). The rest of
   ;; the case says the record lost nothing else: the conversation the fold rebuilds out of the rows
@@ -905,7 +920,7 @@
                                        (get-in (replay/payload %) [:content])))
                               ls)))
           5000)
-         (testing "the record kept every frame the socket carried, except the one family it does not"
+         (testing "the record kept every frame the socket carried, except the two families it re-phrases"
            ;; THE TAG IS THE CARRIER'S: `mux-frame` adds `:threadId` to every frame so one socket
            ;; can route many conversations, and the record has no such field (only the AG-UI frames
            ;; that carry one themselves do). Removed from BOTH sides first.
@@ -914,11 +929,15 @@
                             (mapv replay/payload
                                   (filter replay/frame?
                                           (replay/lines->records (replay/read-lines log)))))]
-             (is (= (remove reasoning-frame? wire) kept)
-                 (str "the record is not the wire minus the reasoning family. wire-only: "
-                      (pr-str (remove (set kept) (remove reasoning-frame? wire)))
+             (is (= (remove text-content-frame? (remove reasoning-frame? wire))
+                    (remove snapshot-frame? kept))
+                 (str "the record is not the wire minus the two families it re-phrases. wire-only: "
+                      (pr-str (remove (set kept)
+                                      (remove text-content-frame? (remove reasoning-frame? wire))))
                       " record-only: "
-                      (pr-str (remove (set (remove reasoning-frame? wire)) kept))))))
+                      (pr-str (remove (set (remove text-content-frame?
+                                                   (remove reasoning-frame? wire)))
+                                      (remove snapshot-frame? kept)))))))
          (testing "and the record alone rebuilds the conversation the session held"
            (let [rebuilt (mapv #(select-keys % [:role :content])
                                (replay/lines->messages (replay/read-lines log)))
@@ -929,6 +948,76 @@
                  "and the SESSION's own memory still carries the thinking -- only the RECORD changed")
              (is (some #(= "reasoning" (:role %)) rebuilt)
                  "the fold gets it back off the record: the frames are gone, the run's own row is not"))))))))
+
+(deftest the-record-holds-the-answer-as-snapshots-not-as-tokens
+  ;; TICKET 03'S SECOND HALF. The WIRE is untouched -- the client still receives one frame per token
+  ;; -- and the RECORD holds the answer whole, so a log's text is a handful of lines instead of one
+  ;; per token: the 2% that was text, and all the envelope around each piece of it.
+  (with-server
+   "snapshots"
+   (fn []
+     (let [log (log-file "snapshots")]
+       (io/delete-file log true)
+       (let [sent (sse-frames (.body (post-run "snapshots")))
+             text (apply str (map :delta (filter text-content-frame? sent)))]
+         (is (> (count text) 1) "the run actually said something")
+         (is (>= (count (filter text-content-frame? sent)) 2)
+             "and the WIRE still carries it one frame at a time -- this case is about the RECORD")
+         (wait-for-recorded
+          log
+          (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+          5000)
+         (let [rows (replay/read-records log)]
+           (testing "and the RECORD keeps none of those frames"
+             (is (empty? (filter #(text-content-frame? (replay/payload %)) rows))))
+           (testing "the text is on the record as snapshots, and the last one IS the answer"
+             (let [snaps (filter #(snapshot-frame? (replay/payload %)) rows)]
+               (is (seq snaps))
+               (is (= text (get-in (replay/payload (last snaps)) [:value :content]))
+                   "the whole sentence, not the last piece of it")))))))))
+
+(deftest the-pace-is-what-decides-how-many-text-lines-there-are
+  ;; THE TWO ENDS OF THE 50-100ms BAND, which is what makes the band assertable without a clock inside
+  ;; a test. AT 0 every text frame is its own line -- and EVERY LINE IS THE SENTENCE AS OF THEN, which
+  ;; is the property a run cut off mid-answer lives on. At a period longer than the answer, exactly ONE
+  ;; line per message is written: the one its END forces. The default 75 sits between the two.
+  (testing "a period of 0 writes one snapshot per text frame, each the sentence so far"
+    (with-server
+     "snapshots-eager"
+     (fn []
+       (with-redefs [http/text-snapshot-ms 0]
+         (let [log (log-file "snapshots-eager")]
+           (io/delete-file log true)
+           (let [sent   (sse-frames (.body (post-run "snapshots-eager")))
+                 deltas (mapv :delta (filter text-content-frame? sent))]
+             (wait-for-recorded log
+                                (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+                                5000)
+             (let [texts (mapv #(get-in (replay/payload %) [:value :content])
+                               (filter #(snapshot-frame? (replay/payload %))
+                                       (replay/read-records log)))]
+               (is (>= (count deltas) 2) "the answer arrived in more than one frame")
+               (is (= (count deltas) (count texts))
+                   "one line per frame: the clock decided, not the message's end")
+               (is (= (vec (rest (reductions str "" deltas))) texts)
+                   "each snapshot is the sentence as of then -- what a cut-off run keeps"))))))))
+  (testing "and a period longer than the answer writes exactly one line per message"
+    (with-server
+     "snapshots-once"
+     (fn []
+       (with-redefs [http/text-snapshot-ms 600000]
+         (let [log (log-file "snapshots-once")]
+           (io/delete-file log true)
+           (let [sent   (sse-frames (.body (post-run "snapshots-once")))
+                 deltas (mapv :delta (filter text-content-frame? sent))]
+             (wait-for-recorded log
+                                (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+                                5000)
+             (let [texts (mapv #(get-in (replay/payload %) [:value :content])
+                               (filter #(snapshot-frame? (replay/payload %))
+                                       (replay/read-records log)))]
+               (is (= [(first deltas) (apply str deltas)] texts)
+                   "the first words and the last: a period longer than the answer adds nothing")))))))))
 
 (deftest a-run-that-stops-mid-thought-keeps-its-words-and-not-its-thinking
   ;; THE ACCEPTED COST OF TICKET 01, PINNED SO NOBODY READS IT AS A BUG. The reasoning rides the run's
@@ -958,7 +1047,11 @@
         (is (not-any? #(str/starts-with? (str %) "REASONING") kinds)
             (str "the record kept " (pr-str (filterv #(str/starts-with? (str %) "REASONING") kinds)))))
       (testing "and what the run had SAID is there -- the words are not the cost"
-        (is (= ["RUN_STARTED" "TEXT_MESSAGE_START" "TEXT_MESSAGE_CONTENT"] kinds)))
+        ;; THE TEXT IS A SNAPSHOT NOW (ticket 03), and a message's FIRST one goes down the moment it
+        ;; says anything: a run that never reaches a terminal still leaves the half sentence it had
+        ;; managed, which is the one thing this ticket refuses to trade away.
+        (is (= ["RUN_STARTED" "TEXT_MESSAGE_START" "CUSTOM"] kinds))
+        (is (= "half an answer" (get-in (replay/payload (last rows)) [:value :content]))))
       (testing "while the session's memory took every frame -- the live fold reads THAT, not the file"
         (is (= (mapv :type frames) (mapv :type (:frames @state)))))
       (testing "THE COST: the record alone folds to an answer with no thinking on it"
@@ -6412,8 +6505,10 @@
                                 (mapv replay/payload
                                       (filter replay/frame?
                                               (replay/lines->records (replay/read-lines log)))))]
-                 (is (= (remove reasoning-frame? wire) kept)
-                     "and the stall lost nothing: the record is still the wire minus the reasoning"))))
+                 (is (= (remove text-content-frame? (remove reasoning-frame? wire))
+                        (remove snapshot-frame? kept))
+                     (str "and the stall lost nothing: the record is still the wire minus the"
+                          " reasoning family minus the per-token text, plus that text's snapshots")))))
            (finally (record/reset-sink!))))))))
 
 ;; -------------------------------------------------------- the window (ticket 05)

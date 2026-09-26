@@ -88,6 +88,20 @@
          (= t "TEXT_MESSAGE_CONTENT")
          (patch-by-id msgs (:messageId f) #(update % :content str (:delta f)))
 
+         ;; A SNAPSHOT IS THE CONTENT, NOT A PIECE OF IT (ticket 03 of `.scratch/event-persistence`): a
+         ;; running answer reaches the record as whole-text snapshots every ~75ms rather than one line
+         ;; per token, so this REPLACES what it has instead of appending to it.
+         ;;
+         ;; AND IT MAY HAVE NOTHING, which is the other half of why a snapshot is worth having: a
+         ;; reader whose window opens ON a snapshot line still gets the sentence. A delta has to be
+         ;; preceded by every delta before it or it is a fragment.
+         (and (= t "CUSTOM") (= (:name f) "text/snapshot"))
+         (let [id   (get-in f [:value :messageId])
+               text (str (get-in f [:value :content]))]
+           (if (some #(= id (:id %)) msgs)
+             (patch-by-id msgs id #(assoc % :content text))
+             (conj msgs {:id id :role "assistant" :content text})))
+
          (= t "REASONING_MESSAGE_START")
          (conj msgs {:id (:messageId f) :role "reasoning" :content ""})
 

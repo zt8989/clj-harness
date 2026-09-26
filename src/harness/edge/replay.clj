@@ -100,7 +100,12 @@
   of, and an `event` carrying any OTHER CUSTOM is the harness speaking about itself (see
   `harness.edge.http/row-of`). A second wire name must be added here in the same commit that
   starts using it -- otherwise a fact and a frame would be read the same way."
-  #{ag/injected-part-name})
+  #{ag/injected-part-name
+    ;; AND THE RECORD'S OWN TEXT SNAPSHOT (ticket 03 of `.scratch/event-persistence`): it is not on
+    ;; the wire at all -- the wire carries one frame per token -- but it is A FRAME THE CONVERSATION
+    ;; IS MADE OF, which is exactly the question this set answers. Without it here the fold would
+    ;; read a snapshot as the harness talking about itself and lose the answer's text in silence.
+    "text/snapshot"})
 
 (defn- fact-frame?
   "Is FRAME the harness speaking about itself rather than a frame the conversation is made

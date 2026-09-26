@@ -803,6 +803,105 @@
   [frame]
   (contains? reasoning-frames (:type frame)))
 
+
+;; ------------------------------------------------------ the running text, snapshotted
+
+(def text-snapshot-ms
+  "HOW OFTEN A RUNNING ANSWER'S TEXT REACHES THE RECORD -- `.scratch/event-persistence` ticket 03's
+  'a snapshot every 50-100ms'. 75 sits in the middle of that band.
+
+  A `def` RATHER THAN A NUMBER AT THE CALL SITE because a case has to be able to move it to either
+  end of the band: at 0 every text frame is its own line, and at a huge value EXACTLY ONE line per
+  message is written -- the one the message's end forces. Those two ends are what makes the band
+  assertable without putting a clock inside a test."
+  75)
+
+(defn- text-snapshot
+  "The LINE a run's running text becomes: THE WHOLE TEXT SO FAR, under a name of its own.
+
+  NOT `TEXT_MESSAGE_CONTENT` CARRYING A WHOLE-TEXT `:delta`, which is the cheap way and the wrong
+  one: a `row-of` payload is VERBATIM what the vendor sent (`.scratch/jsonl-two-kinds`), and every
+  reader alive today appends a `:delta` to what it has. So the record's text is a family of its own
+  -- `CUSTOM text/snapshot`, the shape every fact the harness knows by itself already has
+  (`model/start`, `tools/*`, `session/rebuilt`) -- and THE FOLD IS WHAT KNOWS IT
+  (`harness.kernel.frames/apply-frames` replaces rather than appends).
+
+  THE FRAME'S NUMBER COMES ALONG where frames carry one (a subagent's do: `mux`'s record/bus
+  boundary is compared by it). A snapshot STANDS FOR the text frames up to this one, so it takes
+  that one's number: a reader that already holds the record up to N still drops exactly what it has
+  seen and no more."
+  [frame text]
+  (cond-> {:type "CUSTOM" :name "text/snapshot"
+           :value {:messageId (:messageId frame) :content text}}
+    (contains? frame :seq) (assoc :seq (:seq frame))))
+
+(defn- text-lines
+  "THE ONE PLACE A RUN'S STREAMING TEXT BECOMES RECORD LINES
+  (ticket 03 of `.scratch/event-persistence`): STATE is the sink's own atom (the messages still open
+  live in it under `:text`), and this answers the lines FRAME becomes, in order. Both frame sinks
+  call it once per frame.
+
+  THE WIRE IS UNTOUCHED, and that is the whole of why this change is small: `runner` and the
+  subagent route still broadcast every frame and still collect every frame for `settle!`, so a
+  client still receives one frame per token and the conversation a run leaves in memory does not
+  move. What this decides is WHICH LINES EXIST -- a log's text is 2% of its bytes and the per-frame
+  envelope the rest.
+
+  A SNAPSHOT AND NOT A BATCH OF DELTAS: the fold treats a snapshot as THE CONTENT, so a reader
+  holding only the last line still has the whole sentence -- which is exactly what a run cut off
+  mid-answer needs. A batch would leave every earlier line load-bearing, and a crash would leave a
+  prefix of a prefix.
+
+  A MESSAGE'S FIRST WORDS GO DOWN AT ONCE, and only then does the period apply -- a period alone
+  would leave a run cut off inside its first tick with nothing at all on the record, and 'a run cut
+  off mid-answer keeps the half sentence it had managed' is the one property this family is not
+  allowed to trade away.
+
+  AND A MESSAGE'S END AND THE RUN'S TERMINAL BOTH FORCE A FLUSH, before the frame that closes them
+  -- a record must read in the order the wire had. Nothing is written twice in a row: a snapshot
+  equal to the one already down is not a new fact."
+  [state frame]
+  (let [t   (:type frame)
+        id  (:messageId frame)
+        now (System/currentTimeMillis)]
+    (cond
+      (= t "TEXT_MESSAGE_CONTENT")
+      (let [{:keys [text at out]} (get-in @state [:text id])
+            text' (str text (:delta frame))
+            tick  (long (or at now))
+            ;; THE FIRST WORDS OF A MESSAGE GO DOWN AT ONCE, and only then does the period apply. A
+            ;; period alone would leave a run cut off INSIDE its first tick with nothing on the record
+            ;; at all -- which is the one thing this ticket refuses to trade away, and which
+            ;; `a-run-that-stops-mid-thought-keeps-its-words-and-not-its-thinking` measures: its
+            ;; whole answer arrives in one tick and its run never reaches a terminal.
+            due?  (or (nil? out)
+                      (>= (- now tick) (long (or text-snapshot-ms 0))))]
+        (swap! state assoc-in [:text id]
+               {:text text' :out (if due? text' out) :at (if due? now tick) :seq (:seq frame)})
+        (if due? [(text-snapshot frame text')] []))
+
+      (= t "TEXT_MESSAGE_END")
+      (let [{:keys [text out] :as open} (get-in @state [:text id])]
+        (swap! state update :text dissoc id)
+        (if (and (some? text) (not= text out))
+          [(text-snapshot (cond-> {:messageId id}
+                                    (some? (:seq open)) (assoc :seq (:seq open)))
+                          text)
+           frame]
+          [frame]))
+
+      (contains? terminal t)
+      (let [open (:text @state)]
+        (swap! state assoc :text {})
+        (into (vec (keep (fn [[mid {:keys [text out seq]}]]
+                           (when (and (some? text) (not= text out))
+                             (text-snapshot (cond-> {:messageId mid}
+                                                     (some? seq) (assoc :seq seq))
+                                            text)))
+                         (sort-by key open)))
+              [frame]))
+
+      :else [frame])))
 (defn- lifecycle-record
   "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
   becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
@@ -852,6 +951,10 @@
   frame for the moment the run ends, and BROADCAST them all to the downlink (`events.mux`, ADR 0004)
   -- which is the carrier a run has now. WHAT IS DROPPED IS A LINE, NOT A FRAME: `reasoning-frame?`
   is the one place that decides, and the session's memory and the wire take every frame as before.
+  ;;
+  ;; AND THE RUNNING TEXT IS WRITTEN AS SNAPSHOTS (ticket 03), by the same rule and in the same place:
+  ;; `text-lines` is the one thing that decides which LINES a run's text becomes, and the subagent
+  ;; route calls the same helper. The frames still flow; only the lines changed.
 
   WHERE THE RUN ENDS IS HERE and nowhere else: a terminal frame is the only fact that says so,
   and this is the one place that sees every frame exactly once. So the registry stops claiming
@@ -878,10 +981,11 @@
     ;; THE FRAME IS NOT DROPPED, ONLY ITS LINE: it still goes to the bus and into the session's
     ;; memory, and the run's own `message` row carries the same text back (`reasoning-frame?` says
     ;; which family, and why the WHOLE family and not just its CONTENT frames).
-    (when-not (reasoning-frame? frame)
-      (log! thread-id run-id "event" frame
-            (when (contains? terminal (:type frame))
-              (fn [offset] (sessions/land! thread-id run-id offset)))))
+    (doseq [row (text-lines state frame)]
+      (when-not (reasoning-frame? row)
+        (log! thread-id run-id "event" row
+              (when (contains? terminal (:type row))
+                (fn [offset] (sessions/land! thread-id run-id offset))))))
     ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
     ;; history is what this run was handed, and these frames are what came of it. Collected HERE
     ;; because this is the one place that sees every frame exactly once, and settled at the
@@ -2060,7 +2164,10 @@
         ;; THIS RUN'S FRAMES, collected for the one moment they become the
         ;; conversation. The agent route keeps the same atom for the same reason: it is
         ;; the one place that sees every frame exactly once.
-        frames   (atom [])]
+        frames   (atom [])
+        ;; AND THE ONE PLACE THE AGENT ROUTE ALSO USES for its text (`text-lines`): the messages
+        ;; still open live here, and what reaches the record is the snapshot, not the token.
+        text     (atom {})]
     (binding [hook/*sink* (sink-for thread-id run-id)]
         ;; THE PARENT LEARNS THE CHILD'S NAME FIRST, before the child writes a row of
         ;; its own: a card in the PARENT's conversation can then be clicked while the
@@ -2163,10 +2270,11 @@
                           ;; THE SAME ONE EXCEPTION AS THE AGENT ROUTE (`reasoning-frame?`): a
                           ;; subagent's reasoning frames are broadcast and kept in memory, and NOT
                           ;; recorded -- the delegation's own `message` rows carry the text back.
-                          (when-not (reasoning-frame? f)
-                            (log! thread-id run-id "event" f
-                                  (when (contains? terminal (:type frame))
-                                    (fn [offset] (sessions/land! thread-id run-id offset)))))
+                          (doseq [row (text-lines text f)]
+                            (when-not (reasoning-frame? row)
+                              (log! thread-id run-id "event" row
+                                    (when (contains? terminal (:type row))
+                                      (fn [offset] (sessions/land! thread-id run-id offset))))))
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)

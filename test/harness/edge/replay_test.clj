@@ -923,6 +923,46 @@
               (first (filter #(and (= "assistant" (:role %)) (:tool_calls %))
                               (ag/provider-messages (replay/records->messages new-way))))))))))
 
+(deftest a-run-written-as-text-snapshots-rebuilds-the-same-conversation
+  ;; THE SAME JUDGE, ONE FAMILY OVER (ticket 03 of `.scratch/event-persistence`). The record no longer
+  ;; holds one line per token -- `harness.edge.http/text-lines` writes the WHOLE text every ~75ms and
+  ;; the per-token frames never reach the file -- so THE SAME RUN, WRITTEN BOTH WAYS, HAS TO REBUILD
+  ;; THE SAME CONVERSATION. The fold REPLACES with a snapshot rather than appending it, which is what
+  ;; lets the last line stand for the whole sentence.
+  (let [run-id  "r1"
+        user    {:ts 1 :runId run-id :type "message" :source "client" :id "u1"
+                 :payload {:role "user" :content "hi"}}
+        start   {:ts 1 :runId run-id :type "event"
+                 :payload {:type "RUN_STARTED" :threadId "t" :runId run-id}}
+        open    {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TEXT_MESSAGE_START" :messageId "r1-m0" :role "assistant"}}
+        close   {:ts 1 :runId run-id :type "event"
+                 :payload {:type "TEXT_MESSAGE_END" :messageId "r1-m0"}}
+        tail    [{:ts 1 :runId run-id :type "event"
+                  :payload {:type "RUN_FINISHED" :threadId "t" :runId run-id}}]
+        delta   (fn [s] {:ts 1 :runId run-id :type "event"
+                         :payload {:type "TEXT_MESSAGE_CONTENT" :messageId "r1-m0" :delta s}})
+        snap    (fn [s] {:ts 1 :runId run-id :type "event"
+                         :payload {:type "CUSTOM" :name "text/snapshot"
+                                   :value {:messageId "r1-m0" :content s}}})
+        old-way (into [user start open (delta "the ") (delta "ans") (delta "wer") close] tail)
+        new-way (into [user start open (snap "the ans") (snap "the answer") close] tail)]
+    (testing "the entries are the same conversation"
+      ;; THE MESSAGES, NOT THEIR NUMBERS: the two records spend a different number of lines on the same
+      ;; answer, and an entry's `:seq` is the RECORD LINE it arrived in (ADR 0003 decision 9).
+      (is (= (mapv :message (replay/entries old-way))
+             (mapv :message (replay/entries new-way)))))
+    (testing "and so is what a provider is handed"
+      (is (= (replay/records->messages old-way) (replay/records->messages new-way)))
+      (is (= "the answer" (:content (last (replay/records->messages new-way))))))
+    (testing "and a reader that has ONLY a snapshot still has the whole sentence"
+      ;; THE WINDOW CASE: a page that opened past the message's start, or a record whose head was
+      ;; rotated away. A delta there is a fragment; a snapshot stands on its own -- which is the whole
+      ;; reason the ticket chose snapshots over batches of deltas.
+      (is (= "the answer"
+             (:content (last (replay/records->messages (into [start (snap "the answer") close]
+                                                             tail)))))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; TICKET 02 OF `.scratch/reasoning-out-of-the-record`: the match, made real
 
