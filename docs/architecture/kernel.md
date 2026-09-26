@@ -66,6 +66,15 @@ drive! :
 第 n 次调用）：序号不记进记录，那是同一件事实的第二份（见 [edge](edge.md) 的行表）。
 把两条包起来的是 `harness.kernel.loop/model-call!`，它是「失败也要闭合」这唯一一件事的落点。
 
+**一次调用空闲超过 `:llm :idle-timeout-ms`（默认 500ms）就当作断线**，`harness.kernel.loop/model-call-watched`
+在等这次调用的同时也在等这个 deadline：什么都没发过就重试（默认 3 次，即最多 4 次尝试），已经发过
+半截内容就结束这个 run——重试会把半截答案在客户端上再接一遍。真正的**断开**发生在读取层
+（`harness.kernel.llm/idle-guarded-lines` 关掉响应体）；kernel 这一侧的 deadline 覆盖的是「一个什么都
+不说的 provider」。**clock 由 `:model/start` 上弦**，不从这次尝试开始算：在那之前是 harness 自己的
+活（resolve 工具表会启动 MCP server）。每次超时都往会话里发一帧 CUSTOM `llm-timeout`（`attempt` /
+`limit` / `retrying` / `emitted`），**不落盘**——`harness.edge.http/wire-only-frame?` 让它只广播、不记行。
+见 `.scratch/llm-idle-timeout/spec.md`。
+
 **会话自己的东西在每次 `llm/stream!` 之前重算一次**，就在这一行，共两半：
 
 - **人的 `/name` 要的正文**：人打 `/name` 就是为了**这条消息**照着做，等下一轮等于白打；而它是**派生**的（从

@@ -713,3 +713,32 @@
             {:role "developer" :content "TWO"}
             {:role "user" :content "q"}]
            placed))))
+
+(deftest a-timeout-is-a-custom-frame-the-conversation-is-not-made-of
+  ;; THE IDLE GUARD'S FRAME, from the converter's side: one CUSTOM frame carrying what the
+  ;; loop decided -- the deadline, which attempt failed, the budget, and whether another
+  ;; attempt follows -- and NO `messageId`, because the adapter throws a CUSTOM frame's own
+  ;; id away (see `harness.edge.ag-ui/injected-frame`).
+  ;;
+  ;; AND THE SECOND ASSERTION IS THE FEATURE ITSELF: the fold that rebuilds a conversation
+  ;; out of frames has no case for this name, so a rebuild of a record containing one would
+  ;; draw nothing from it. The record never gets one in the first place
+  ;; (`harness.edge.http/wire-only-frame?`), and this is the other half of that agreement.
+  (let [frames (wire [(ev/run-start)
+                      (ev/model-timeout 500 1 3 true false)
+                      (ev/model-timeout 500 4 3 false false)
+                      (ev/run-end)])]
+    (is (= ["RUN_STARTED" "CUSTOM" "CUSTOM" "RUN_FINISHED"] (types frames)))
+    (is (= {:type  "CUSTOM"
+            :name  ag/timeout-part-name
+            :value {:idleMs 500 :attempt 1 :limit 3 :retrying true :emitted false}}
+           (second frames)))
+    (is (= {:idleMs 500 :attempt 4 :limit 3 :retrying false :emitted false}
+           (:value (nth frames 2)))
+        "the fourth attempt's own frame says the run is ending")
+    (is (not (contains? (second frames) :messageId))
+        "the adapter drops a CUSTOM frame's own id, so one here would be a field that lies")
+    (testing "and the fold that rebuilds a conversation makes nothing of it"
+      (is (empty? (frames/apply-frames [(second frames)])))
+      (is (empty? (frames/apply-frames (vec (take 3 frames))))
+          "nor of the pair of them, beside the run's own opening"))))

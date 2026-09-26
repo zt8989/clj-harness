@@ -93,6 +93,7 @@ import { SubagentViewContext, type RightPane, type SubagentView } from "@/compon
 import { RightPaneOpenButton, rightPaneIsDrawer } from "@/components/right-pane-toggle";
 import { TaskPane } from "@/components/task-pane";
 import { ContextCards } from "@/components/context-card";
+import { TimeoutCards } from "@/components/llm-timeout-card";
 import { RecordNotice } from "@/components/record-notice";
 import { readsOf, repositoryFrom } from "@/lib/thread-messages";
 import { newId } from "@/lib/id";
@@ -1217,6 +1218,10 @@ const SessionColumn: FC<{
               this provider (`AssistantRuntimeProvider` is above), because a
               registration is scoped to the runtime that resolves the parts. */}
           <ContextCards />
+          {/* AND THE IDLE GUARD'S, by the same mechanism and for the same reason: the
+              frame a model call that went quiet produces is a `data` part too, and
+              this is the line that says the conversation column knows how to draw it. */}
+          <TimeoutCards />
           {view === "conversation" ? (
             <Thread
               components={{ ...THREAD_COMPONENTS, ComposerStop: composerStop }}

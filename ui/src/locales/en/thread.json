@@ -32,5 +32,12 @@
     "messages_one": "{{count}} message",
     "messages_other": "{{count}} messages"
   },
-  "injection.name": "Injected context"
+  "injection.name": "Injected context",
+  "timeout.name": "Model timeout",
+  "timeout.idle": "no data for {{ms}}ms",
+  "timeout.retry": "retrying {{attempt}}/{{limit}}",
+  "timeout.stopped": "not retried",
+  "timeout.reason.retrying": "The model produced no data for {{ms}}ms, so the call was cut off as a dead connection. This is attempt {{attempt}}, and up to {{limit}} retries are allowed.",
+  "timeout.reason.partial": "The model went quiet for {{ms}}ms after it had already answered part of this turn. Retrying would show that half-written answer twice, so the run ended here instead.",
+  "timeout.reason.exhausted": "The model produced no data for {{ms}}ms on {{attempt}} attempts in a row, and the {{limit}} retries this session allows are spent. The run ended here."
 }

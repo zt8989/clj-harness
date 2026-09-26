@@ -149,7 +149,8 @@
   attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
   prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
   nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
-  [provider history emit thread-id {:keys [on-overflow recoveries halted? tool-signature]
+  [provider history emit thread-id {:keys [on-overflow recoveries halted? tool-signature
+                                          idle-timeout-ms]
                                     :or {recoveries 1}
                                     :as _opts}]
   (loop [attempt 0]
@@ -162,7 +163,16 @@
           _       (emit (ev/model-start provider ((or tool-signature tools/default-signature) specs)))
           outcome (try
                     (let [{:keys [message telemetry]}
-                          (llm/stream! (assoc provider :tools specs) @history emit thread-id)]
+                          ;; THE IDLE GUARD RIDES THE PROVIDER MAP, and this is the one
+                          ;; place that puts it there for a run: `harness.kernel.llm` guards
+                          ;; the reading of a stream it was told the deadline for, and a
+                          ;; provider map carrying no deadline is not guarded at all (see
+                          ;; `harness.kernel.llm/default-idle-timeout-ms`). Handed in with
+                          ;; the tool table, for the same reason: this is where the request
+                          ;; this call will send is assembled.
+                          (llm/stream! (assoc provider :tools specs
+                                                    :idle-timeout-ms idle-timeout-ms)
+                                       @history emit thread-id)]
                       (emit (ev/model-end telemetry))
                       {:message message})
                     (catch Throwable t
@@ -226,48 +236,246 @@
   than a fault, and the process log's `run/terminal` line carries it verbatim."
   [] (throw (ex-info (stop-sentence) {:stopped true})))
 
+(defn- timeout-sentence
+  "WHAT A MODEL CALL THAT WENT QUIET FOR TOO LONG IS REFUSED WITH -- the sentence the run
+  ends on, and it names WHICH of the two endings this was.
+
+  A TIMEOUT WITH NOTHING EMITTED IS RETRIABLE, and this is only read once the retries have
+  run out; a timeout AFTER the call had already put something on the wire is not, and the
+  second sentence says why rather than leaving a person to guess at the difference. The
+  reason is not tidiness: a client that has been shown half an answer would be shown the
+  whole thing twice if the call were made again -- the retry appends to the message the
+  first attempt opened."
+  [idle-ms attempt limit emitted?]
+  (if emitted?
+    (str "the model went quiet" (when idle-ms (str " for " idle-ms " ms"))
+         " (attempt " attempt ") after it had already answered part of this turn, so the"
+         " run was cut off: that half-written answer cannot be retried without the client"
+         " being shown it twice")
+    (str "the model produced no data" (when idle-ms (str " for " idle-ms " ms"))
+         " on " attempt " attempt" (when (< 1 attempt) "s") ", and the " limit " retr"
+         (if (= 1 limit) "y" "ies") " this session allows were spent, so the run was cut"
+         " off")))
+
+(defn- cut-off-call!
+  "Close the model-call SEGMENT of a call that was cut off while it was still running, and
+  nothing else.
+
+  THE RECORD PAIRS `:model/start` WITH `:model/end` BY ORDER -- the nth start of a run is
+  that run's nth call (`harness.kernel.event/model-start`) -- so an abandoned attempt that
+  never got to write its own end would leave the NEXT attempt's end paired with THIS
+  attempt's start, and the record would attribute one call's telemetry to another. An
+  empty telemetry is the honest end of a call that reported nothing, which is exactly what
+  a call cut off mid-stream is.
+
+  IT IS NOT ALWAYS NEEDED: a timeout that arrived as a THROWABLE from the provider layer
+  (the read side's own guard) went through `model-call!`'s catch, which already emitted the
+  end, and `end-seen?` is what keeps this from writing a second one."
+  [end-seen? emit]
+  (when-not @end-seen?
+    (emit (ev/model-end nil))))
+
 (defn- await-call
-  "Wait for one of PORTS (channels each carrying a call's answer) or for this run's
-  STOP SWITCH to be rung. Answers {:port .. :value .. :stopped? ..}.
+  "Wait for one of PORTS (channels each carrying a call's answer), or for this run's STOP
+  SWITCH to be rung, or -- when IDLE is given -- for the thing being waited on to go QUIET
+  for `:idle-ms`. Answers {:port .. :value .. :stopped? .. :idle? ..}.
 
   THE PORT IS THE ANSWER, not the value: a rung switch delivers nil, and so does a
   channel whose call reported nothing -- the port is the only thing that tells the two
   apart. `:wake` is nil for a run that was handed no switch (an offline replay, a
-  test), and then this is `alts!!` over the call channels and nothing else."
-  [ports cancel]
-  (let [wake (:wake cancel)
-        [value port] (async/alts!! (cond-> (vec ports) (some? wake) (conj wake)))]
-    {:value value
-     :port port
-     :stopped? (and (some? wake) (identical? port wake))}))
+  test), and then this is `alts!!` over the call channels and nothing else.
 
-(defn- model-call-stoppable
-  "Start one model call and answer the channel it will report on, so a run that gets
-  stopped does not have to WAIT for a vendor that is still streaming.
+  IDLE IS {:idle-ms ms :last-at <an atom of ms>}, A LIVE DEADLINE RATHER THAN A FIXED
+  TIMEOUT, and that is the whole reason the arithmetic is here instead of one call to
+  `async/timeout`: what is being watched is SILENCE, so the deadline moves with every
+  event the call emits (`:last-at` is what the emitting wrapper updates) and the remaining
+  time is recomputed each pass. A stream that answers every 400 ms runs forever under a
+  500 ms deadline; a fixed timeout would cut it off.
 
-  THE CALL RUNS ON ITS OWN THREAD and the loop listens to both it and the stop
-  switch. A call that is ABANDONED (the switch was rung) keeps its HTTP request until
-  the vendor finishes -- there is no process to kill for a vendor, which ticket 08
-  states as the boundary -- but WHAT IT SAYS IS DROPPED: every frame it emits goes
-  through a wrapper that stops forwarding once the switch is rung, so an abandoned
-  call cannot write frames into a run whose terminal has already been sent.
+  A TIMER THAT LOSES THE RACE IS ABANDONED, not cancelled -- core.async's timers cannot be
+  withdrawn, and a fired timer's value goes to a channel nobody holds. Nothing is lost by
+  it: the next pass arms a fresh one from `:last-at`.
 
-  A THROW IS CARRIED AS A VALUE (`t`) rather than escaping the thread: a go/thread's
-  exception goes nowhere, and the loop is what has to turn it into `:run/error` on the
-  one path that already does.
+  AN UNARMED CLOCK IS NOT A DEADLINE, which is what `@:last-at` being nil means: the call
+  has not reached the point where silence would be evidence of anything yet (see `alive`),
+  so there is nothing to measure. IT IS STILL WATCHED FOR, at `poll-ms`, because the clock
+  can arm LATER -- a wait that installed no timer at all while unarmed would sleep through
+  the arming and never fire (measured: it hung exactly there). The poll is a timer, not a
+  spin, and it runs only in the window before the request goes out; the moment the clock
+  arms, the next pass measures the real remaining silence from it."
+  ([ports cancel] (await-call ports cancel nil))
+  ([ports cancel idle]
+   (let [wake    (:wake cancel)
+         idle-ms (:idle-ms idle)
+         last-at (:last-at idle)
+         ;; HOW OFTEN AN UNARMED CLOCK IS LOOKED AT. Small enough that the deadline is
+         ;; met to within a few tens of milliseconds of the request going out, and it
+         ;; never exceeds the deadline itself (a session that asked for 20 ms gets 20).
+         poll-ms 50]
+     (loop []
+       ;; `some->` AND NOT A BARE `@`: a caller that handed in no IDLE at all (the drain
+       ;; over a turn's tool calls, which is not a model call) has no clock to read, and
+       ;; dereferencing nil is not 'no value' -- it is a NullPointerException out of
+       ;; `clojure.core/deref`'s future branch.
+       (let [seen-at (some-> last-at deref)
+             timer   (when idle-ms
+                       (async/timeout
+                        (if seen-at
+                          (max 1 (- (long idle-ms)
+                                    (- (System/currentTimeMillis) (long seen-at))))
+                          (min (long idle-ms) poll-ms))))
+             [value port] (async/alts!! (cond-> (vec ports)
+                                          (some? wake)  (conj wake)
+                                          (some? timer) (conj timer)))]
+         (cond
+           (and (some? timer) (identical? port timer))
+           ;; THE CLOCK IS READ AGAIN RATHER THAN KEPT: the call may have armed it (or
+           ;; said something) between the timer firing and this line, in which case this
+           ;; pass measured a window that no longer exists and the next one is the right
+           ;; one. An arm that happened mid-poll falls through here too, and the pass
+           ;; after it measures from the real one.
+           (let [seen-at (some-> last-at deref)]
+             (if (and seen-at
+                      (> (- (System/currentTimeMillis) (long seen-at)) (long idle-ms)))
+               {:value nil :port nil :idle? true}
+               (recur)))
+
+           :else
+           {:value    value
+            :port     port
+            :stopped? (and (some? wake) (identical? port wake))}))))))
+
+(def ^:private arrived
+  "The kernel events that mean THE VENDOR SAID SOMETHING -- the ones a client is handed a
+  frame for. This is the whole input to the idle guard's retry decision (`emitted?` in
+  `model-call-watched`), and it is spelled out rather than asked as 'any event at all'
+  because two of the events on this channel are emitted BY THE LOOP around the call:
+  `:model/start` before the request, and `:model/end` in its catch. Counting those would
+  make every silent call look like one that had already answered -- and an answer already
+  on the client's screen is exactly what forbids a retry."
+  #{:text/delta :reasoning/delta :tool/call})
+
+(def ^:private alive
+  "The kernel events that ARM AND RE-ARM the idle deadline: the call's own boundaries plus
+  everything the vendor says inside them.
+
+  THE DEADLINE MUST NOT START BEFORE THE CALL DOES, and that is not a detail -- it is the
+  difference between watching a vendor and watching the harness. `model-call!` resolves the
+  session's TOOL TABLE before it emits `:model/start`, and resolving that table is what
+  STARTS THE SESSION'S MCP SERVERS (`harness.cap.mcp`): a server whose command does not
+  exist takes as long as the OS needs to say so, which is over half a second on a slow
+  machine and has nothing to do with the vendor. Counting that window would cut off a call
+  that had not been made yet -- measured: a run whose broken MCP server took 600 ms to fail
+  ended on 'the model produced no data for 500 ms' before a single byte was sent.
+  (`mcp-wired-test/a-server-that-will-not-start-does-not-break-the-run`.)
+
+  SO AN UNARMED CLOCK IS NO CLOCK (`await-call`), and the arm is `:model/start` -- the
+  event that says the request is about to go out. From there the deadline covers exactly
+  what it is for: connection setup, the vendor's prefill, and every silence between two
+  tokens of the stream."
+  #{:model/start :model/end :text/delta :reasoning/delta :tool/call})
+
+(defn- model-call-watched
+  "One model call, watched from the outside: started on a thread of its own so a run that
+  gets stopped does not have to WAIT for a vendor that is still streaming, and so a vendor
+  that goes QUIET can be given up on and tried again.
+
+  THE CALL RUNS ON ITS OWN THREAD and the loop listens to it, to the stop switch and to the
+  idle deadline at once. A call that is ABANDONED -- the switch was rung, or the deadline
+  passed -- keeps its HTTP request until the vendor finishes; there is no process to kill
+  for a vendor, which ticket 08 of `.scratch/session-after-refresh` states as the boundary.
+  What this layer CAN do is stop listening, and that is what the gate below is: every frame
+  the call emits goes through a wrapper that stops forwarding the moment the attempt is
+  over, so an abandoned attempt cannot write frames into a run that has moved on to its
+  next try (or already sent its terminal).
+
+  A THROW IS CARRIED AS A VALUE (`t`) rather than escaping the thread: a thread's
+  exception goes nowhere, and the loop is what has to turn it into `:run/error` on the one
+  path that already does.
+
+  THE IDLE GUARD IS ASKED TWICE, DELIBERATELY, and the two answers are one fact seen from
+  two sides. The PROVIDER layer's own guard (`harness.kernel.llm/idle-guarded-lines`) is what
+  actually DISCONNECTS a real vendor -- it closes the response body and throws, and that
+  throwable arrives here through the reply channel. The deadline HERE is what covers a call
+  that says nothing at all (a scripted provider mid-step, a vendor whose stream is up but
+  silent): it wins the `alts!!`, so the attempt is abandoned rather than waited on forever.
+  Whichever side notices first the outcome is the same event and the same decision, so a
+  race between them is not a race at all.
+
+  AND THE DEADLINE IS ARMED BY THE CALL, NOT BY THE ATTEMPT: it starts counting at
+  `:model/start` and nowhere earlier, because everything before that line belongs to the
+  harness rather than to the vendor -- resolving the session's tool table is what starts
+  its MCP servers, and a server that takes 600 ms to fail would otherwise be read as a
+  vendor that had gone quiet (`alive`).
+
+  AND WHAT THE DECISION IS, in one place: a timeout that emitted NOTHING is retried while
+  the budget lasts; a timeout that emitted SOMETHING ends the run, because the half-written
+  answer is already on the client's screen (`timeout-sentence`); an ordinary failure is
+  rethrown untouched; and a stop still wins over all of it.
 
   OPTS carries the overflow recovery through to the call -- `:on-overflow` and the retry
-  ceiling -- while the run's own stop switch supplies `:halted?`, so a run a person stopped
-  is not prolonged by a retry that arrives after the press. `:on-pressure` rides the same way
-  and is asked before every call (see `drive!`)."
+  ceiling -- plus this guard's two knobs (`:idle-timeout-ms` and `:idle-timeout-retries`),
+  neither of which the kernel reads from anywhere: the edge resolves them from harness.edn,
+  and a run handed neither is not guarded at all. `:halted?` is supplied HERE from the run's
+  own stop switch, so a run a person stopped is not prolonged by a retry that arrives after
+  the press, and `:on-pressure` rides the same way (see `drive!`)."
   [provider history emit thread-id cancel opts]
-  (let [ch        (async/chan 1)
-        call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))
-        opts      (assoc opts :halted? #(stop/rung? cancel))]
-    (async/thread
-      (async/>!! ch (try (model-call! provider history call-emit thread-id opts)
-                         (catch Throwable t t))))
-    ch))
+  (let [idle-ms (:idle-timeout-ms opts)
+        limit   (long (or (:idle-timeout-retries opts) 0))]
+    (loop [attempt 1]
+      (let [ch        (async/chan 1)
+            ;; UNARMED UNTIL THE CALL BEGINS -- nil, and not 'now': see `alive`. The
+            ;; deadline must not count the vendor's own setup work.
+            last-at   (atom nil)
+            seen?     (atom false)
+            end-seen? (atom false)
+            ;; :open UNTIL THIS ATTEMPT IS OVER -- see the docstring. A closed gate keeps
+            ;; the LAST-AT it was handed, which nothing reads again.
+            gate      (atom :open)
+            call-emit (fn [e]
+                        (when (and (= :open @gate) (not (stop/rung? cancel)))
+                          (when (contains? alive (:type e))
+                            (reset! last-at (System/currentTimeMillis)))
+                          ;; WHAT COUNTS AS 'SAID SOMETHING' IS WHAT THE VENDOR SAID, not
+                          ;; what this layer says around it: `:model/start` and `:model/end`
+                          ;; are emitted HERE (before the request and in its catch) and the
+                          ;; one thing they must never do is make a silent call look like one
+                          ;; that had already answered -- a retry would then be refused for a
+                          ;; message the client never saw.
+                          (when (contains? arrived (:type e)) (reset! seen? true))
+                          (when (= :model/end (:type e)) (reset! end-seen? true))
+                          (emit e)))
+            _         (async/thread
+                        (async/>!! ch (try (model-call! provider history call-emit thread-id
+                                                        (assoc opts :halted? #(stop/rung? cancel)))
+                                           (catch Throwable t t))))
+            answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
+        (when (:stopped? answer) (stopped!))
+        (let [value    (:value answer)
+              timed?   (or (:idle? answer) (llm/idle-timeout? value))
+              emitted? @seen?]
+          (cond
+            ;; NOTHING WAS SAID AND THERE IS BUDGET LEFT: cut the attempt off and try
+            ;; again. Its end is written here because its thread is still running.
+            (and timed? (not emitted?) (< attempt (+ 1 limit)))
+            (do (reset! gate :closed)
+                (cut-off-call! end-seen? emit)
+                (emit (ev/model-timeout idle-ms attempt limit true false))
+                (recur (inc attempt)))
+
+            ;; EITHER the budget is spent or the answer had already begun: the run is over,
+            ;; and the frame says which of the two it was before the terminal does.
+            timed?
+            (do (reset! gate :closed)
+                (cut-off-call! end-seen? emit)
+                (emit (ev/model-timeout idle-ms attempt limit false emitted?))
+                (throw (ex-info (timeout-sentence idle-ms attempt limit emitted?)
+                                {:llm/idle-timeout true :idle-ms idle-ms
+                                 :attempt attempt :limit limit :emitted emitted?})))
+
+            (instance? Throwable value) (throw value)
+
+            :else value))))))
 
 (defn- relieve-pressure!
   "Before a call goes out: ask the edge's `:on-pressure` for a SHORTER history, and take it
@@ -377,7 +585,13 @@
   replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow
                                   overflow-retries on-tool-result tool-signature
-                                  on-pressure]
+                                  on-pressure
+                                  ;; THE IDLE GUARD'S TWO KNOBS, resolved by the EDGE from
+                                  ;; harness.edn (`harness.edge.llm-timeout`) and handed in
+                                  ;; exactly the way `:overflow-retries` is -- the kernel
+                                  ;; reads no configuration, and a run handed neither is
+                                  ;; not guarded at all.
+                                  idle-timeout-ms idle-timeout-retries]
                             :as _opts}]
   (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
@@ -479,18 +693,16 @@
                       ;; THE MODEL CALL IS THE LONG ONE, so it runs on a thread of its own
                       ;; and this waits on BOTH it and the switch: a stop does not have to
                       ;; wait for a vendor that is still talking.
-                      reply     (model-call-stoppable provider history emit thread-id cancel
-                                                                     {:on-overflow   on-overflow
-                                                                      :recoveries    retries
-                                                                      :tool-signature tool-signature})
-                      answer    (await-call [reply] cancel)
-                      _         (when (:stopped? answer) (stopped!))
-                      assistant (let [v (:value answer)]
-                                  ;; A DEAD CALL IS AN ERROR, not a value: it is
-                                  ;; rethrown here so the run ends on `:run/error`
-                                  ;; through the one path that already does that.
-                                  (when (instance? Throwable v) (throw v))
-                                  v)
+                      ;; THE MODEL CALL IS THE LONG ONE, and `model-call-watched` is
+                      ;; what makes the idle guard and the stop switch both able to cut it
+                      ;; short -- it owns the attempt loop, the abandoned attempt's gate and
+                      ;; the stop check, so this stays one line.
+                      assistant (model-call-watched provider history emit thread-id cancel
+                                                    {:on-overflow         on-overflow
+                                                     :recoveries          retries
+                                                     :idle-timeout-ms     idle-timeout-ms
+                                                     :idle-timeout-retries idle-timeout-retries
+                                                     :tool-signature      tool-signature})
                       calls     (:tool_calls assistant)]
                   (added! history added assistant)
                   (if (seq calls)
@@ -562,7 +774,7 @@
                           outcome (loop [left (count chs)]
                                     (if (zero? left)
                                       :answered
-                                      (let [{:keys [value stopped?]} (await-call chs cancel)]
+                                      (let [{:keys [value stopped?]} (await-call chs cancel nil)]
                                         (if stopped?
                                           :stopped
                                           (do (when (nil? (:parked value))
