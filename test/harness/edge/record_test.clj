@@ -26,12 +26,14 @@
   (fn [f]
     (record/reset-writer!)
     (record/reset-sink!)
+    (record/reset-forcer!)
     (record/reset-prepare!)
     (record/start!)
     (try (f)
          (finally
            (record/reset-writer!)
            (record/reset-sink!)
+           (record/reset-forcer!)
            (record/reset-prepare!)
            (doseq [tid (keys (sessions/live))] (sessions/drop! tid))))))
 
@@ -304,3 +306,114 @@
     (is (nil? (record/degraded "pinned")) "and the thread is healthy again")
     (is (= 1 (record/flushed-seq "pinned")) "one line in the file, at offset 0")
     (is (= {:pending 0 :degraded {}} (record/flush! 10000)))))
+
+;; ------------------------------------------------- 7. the promise (ticket 04)
+
+(defn- counting-forcer!
+  "A forcer that touches no disk and REMEMBERS every file it was asked about. The promise leaves
+  no trace a file can show -- the bytes are in the page cache either way -- so the seam
+  (`set-forcer!`) is the only place the THREE MOMENTS can be told apart." []
+  (let [asked (atom [])]
+    (record/set-forcer! (fn [^java.io.File f] (swap! asked conj (.getAbsolutePath f)) nil))
+    asked))
+
+(deftest the-write-asks-for-the-promise-every-n-lines
+  ;; MOMENT ONE (ADR 0007 decision 2). `fsync-every` is moved DOWN rather than writing 64 lines:
+  ;; what is under test is WHEN the promise is asked for, not the number.
+  (let [f     (log-file-in "every")
+        asked (counting-forcer!)]
+    (with-redefs [record/fsync-every 3]
+      (dotimes [i 7] (record/append! "every" f (line {:n i}))))
+    (testing "one promise per three lines, and none for the tail that is not due yet"
+      (is (= 2 (count @asked)))
+      (is (every? #(= (.getAbsolutePath f) %) @asked)
+          "the promise is about the FILE, which is what an fsync has always been about"))
+    (testing "and the promise is not the write: all seven lines are in the record"
+      (is (= 7 (count (written f)))))))
+
+(deftest the-session-going-away-is-when-the-promise-is-asked-for-by-hand
+  ;; MOMENT TWO: the verb the `:put-away!` seam calls -- what the sweeper and `drop!` reach. THAT THE
+  ;; SEAM IS REACHED IS `harness.edge.sessions-test`'s case; this is what the verb does.
+  (let [f     (log-file-in "put-away")
+        asked (counting-forcer!)]
+    (record/append! "away" f (line {:n 1}))
+    (is (empty? @asked) "nothing was asked for yet: the pace is N lines, not every line")
+    (is (true? (record/fsync! "away")) "the promise is asked for, and answered")
+    (is (= [(.getAbsolutePath f)] @asked))
+    (testing "a thread this process wrote nothing for is not a failure -- there is nothing to promise"
+      (is (true? (record/fsync! "never-written")))
+      (is (= 1 (count @asked))))))
+
+(deftest the-process-leaving-promises-every-file-it-wrote
+  ;; MOMENT THREE: `shutdown!`. Two threads, a file each -- and each file asked about ONCE, because a
+  ;; file is what a promise is about rather than a thread.
+  (let [a     (log-file-in "exit-a")
+        b     (log-file-in "exit-b")
+        asked (counting-forcer!)]
+    (record/append! "a" a (line {:n 1}))
+    (record/append! "b" b (line {:n 2}))
+    (is (empty? @asked))
+    (is (= {:pending 0 :degraded {}} (record/shutdown!)))
+    (is (= #{(.getAbsolutePath a) (.getAbsolutePath b)} (set @asked)))))
+
+(deftest a-refused-promise-does-not-fail-the-line-and-is-not-forgotten
+  ;; THE PROMISE IS A SECOND, WEAKER FACT, and these are the two answers it must not be confused
+  ;; with: the line IS in the record (a reader sees it, the file's length says so) and the file would
+  ;; not survive a crash. `:fsync` carries the second and the LEVEL stays at L0 -- the record is
+  ;; complete, and 'complete' is what the levels are about.
+  (let [f (log-file-in "unforced")]
+    (record/set-forcer! (fn [_] "the platter said no"))
+    (is (some? (record/append! "unforced" f (line {:n 1}))) "the line landed")
+    (is (= 1 (count (written f))))
+    (is (false? (record/fsync! "unforced")) "and the promise was refused, by name")
+    (let [h (record/health "unforced")]
+      (is (= 0 (:level h)) "the record is complete: nothing is held")
+      (is (= "the platter said no" (get-in h [:fsync :why])))
+      (is (= 1 (get-in h [:fsync :failures]))))))
+
+(deftest the-four-levels-and-the-sentence-each-one-says
+  ;; TICKET 04's GRADED ANSWER, walked from L0 to L3 in one thread. A hiccup is not an incident (L1
+  ;; vs L2), and L3 is not an age at all: it is the moment the lines stop being recoverable, which is
+  ;; why it can only be said on the way out.
+  (let [f (log-file-in "levels")]
+    (testing "L0 -- nothing is held, so there is nothing to say about it"
+      (record/append! "lvl" f (line {:n 1}))
+      (is (= 0 (:level (record/health "lvl"))))
+      (is (= :ok (:state (record/health "lvl")))))
+    (testing "L1 -- behind, and the sentence names the reason the disk gave"
+      (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+      (record/append! "lvl" f (line {:n 2}))
+      (let [h (record/health "lvl")]
+        (is (= 1 (:level h)))
+        (is (= :behind (:state h)))
+        (is (= 1 (:pending h)))
+        (is (str/includes? (:says h) "disk is full"))))
+    (testing "L2 -- the door was used and the disk refused AGAIN"
+      (record/retry! "lvl")
+      (let [h (record/health "lvl")]
+        (is (= 2 (:level h)))
+        (is (= :stuck (:state h)))
+        (is (= 1 (:retries h)))
+        (is (str/includes? (:says h) "stuck"))))
+    (testing "L3 -- torn down with the lines still held"
+      (record/shutdown!)
+      (let [h (record/health "lvl")]
+        (is (= 3 (:level h)))
+        (is (= :lost (:state h)))
+        (is (str/includes? (:says h) "SHORTER THAN THE CONVERSATION"))))))
+
+(deftest a-retry-that-goes-through-clears-the-incident
+  ;; THE OTHER SIDE OF L2: the door was used, the disk took the lines, and the thread is not merely
+  ;; behind again -- it is well. A level that only ever went up would be a level nobody could act
+  ;; on.
+  (let [f (log-file-in "recovers")]
+    (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+    (record/append! "recovers" f (line {:n 1}))
+    (record/retry! "recovers")
+    (is (= 2 (:level (record/health "recovers"))))
+    (working-sink!)
+    (record/retry! "recovers")
+    (let [h (record/health "recovers")]
+      (is (= 0 (:level h)))
+      (is (= 0 (:retries h)) "a thread that caught up is not on its second strike")
+      (is (= [1] (mapv :n (written f)))))))

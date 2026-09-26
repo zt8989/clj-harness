@@ -39,7 +39,8 @@
   `spit :append true` paid on EVERY line (open, write, close); flushing per line is not a
   leftover -- THE WINDOW READS THE RECORD WHILE A RUN IS IN FLIGHT (`harness.edge.replay/entries`
   is that reader), so a byte sitting in this buffer is a byte the reader cannot see."
-  (:require [clojure.java.io :as io])
+  (:require [clojure.java.io :as io]
+            [harness.infra.log :as log])
   (:import (java.io File FileOutputStream OutputStreamWriter Writer)))
 
 ;; -------------------------------------------------------------------- the seams
@@ -125,6 +126,10 @@
   ;;         :held    <vector>      {:file :line :lands} of lines that could NOT be written, in
   ;;                                the order they were handed over -- see the namespace note
   ;;         :failed  <map|nil>     the first of them, and why
+  ;;         :retries <long>        times the door was used and the disk refused AGAIN (L2 below)
+  ;;         :since-force <long>    lines written since the last promise (`fsync-every` is the pace)
+  ;;         :fsync   <map|nil>     {:at :failures :why} -- the promise, and whether it was kept
+  ;;         :lost    <bool|nil>    torn down with lines still held -- L3, and no reader can tell
   ;;         }
   (atom {}))
 
@@ -139,9 +144,86 @@
 (defn- entry-for [tid]
   (get (swap! threads
               (fn [m] (if (contains? m tid) m (assoc m tid {:path nil :base nil :written 0
-                                                             :held [] :failed nil}))))
+                                                             :held [] :failed nil
+                                                             :since-force 0 :fsync nil
+                                                             :retries 0 :lost nil}))))
        tid))
 
+;; ------------------------------------------------------------------ the promise
+
+(def fsync-every
+  "HOW MANY LINES THE WRITER PUTS DOWN BEFORE IT ASKS THE DISK TO PROMISE THEM -- ADR 0007 decision
+  2's 'every N batches', and the N ticket 04 of `.scratch/event-persistence` had to name.
+
+  IT IS A `def` RATHER THAN A NUMBER AT THE CALL SITE, because a case has to be able to move it: at
+  64, a test that wants to watch the promise happen would write 64 lines -- a test about the number
+  rather than about the promise. NIL OR 0 TURNS THIS MOMENT OFF, which is how a case isolates the
+  other two."
+  64)
+
+(defonce ^:private forcer
+  ;; (fn [^File f]) -> nil when the bytes are promised, a reason when they are not.
+  (atom nil))
+
+(defn set-forcer!
+  "Replace the PROMISE itself. FOR TESTS, and the twin of `set-sink!`: that seam sees every byte
+  that goes in, this one sees every fsync ASKED FOR -- and asking is the only thing a promise has
+  to show without a crash to measure against."
+  [f]
+  (reset! forcer f))
+
+(defn reset-forcer! []
+  (reset! forcer nil))
+
+(defn- force-file!
+  "Ask the OS to put F's bytes past a crash, answering NIL when they are promised and the reason
+  they are not otherwise.
+
+  IT OPENS A HANDLE FOR THE LENGTH OF THIS CALL, deliberately: ADR 0007 decision 3 bought a held
+  handle for one syscall per line and had to give it back -- WINDOWS REFUSES TO RENAME A FILE THAT
+  HAS A HANDLE ON IT, and a log's life includes being renamed and moved (see `real-sink!`). An
+  fsync every `fsync-every` lines is not worth reopening that decision.
+
+  A FILE THAT IS NOT THERE IS NOT A FAILURE, and neither is a file no line of this process's ever
+  reached: there is nothing to promise."
+  [^File f]
+  (try
+    (if-some [f' @forcer]
+      (f' f)
+      (when (.exists f)
+        (with-open [raf (java.io.RandomAccessFile. f "rw")]
+          (.force (.getChannel raf) true))
+        nil))
+    (catch Throwable t (or (ex-message t) (str (class t))))))
+
+(defn- force-now!
+  "Ask for F's promise for THREAD-ID and WRITE DOWN WHAT HAPPENED. A failed fsync is a fact about
+  the record that a later reader has to be able to meet (`health`): the bytes ARE in the file and
+  will not survive a crash, and the file's LENGTH says nothing about the difference."
+  [tid ^File f]
+  (if-some [why (force-file! f)]
+    (swap! threads update-in [tid :fsync]
+           (fn [m] (-> (or m {}) (assoc :why why) (update :failures (fnil inc 0)))))
+    (swap! threads update-in [tid :fsync]
+           (fn [m] (-> (or m {})
+                       (assoc :at (System/currentTimeMillis) :failures 0)
+                       (dissoc :why))))))
+
+(defn- force-due!
+  "MOMENT ONE OF THREE (ADR 0007 decision 2): every `fsync-every` lines.
+
+  CALLED INSIDE THE WRITE LOCK, right behind the line that landed, because 'how many lines since
+  the last promise' is the same fact as 'how many lines this file holds' -- the two move together
+  or neither of them is true. A REFUSAL DOES NOT FAIL THE LINE: the bytes are written, and the
+  promise is a second, weaker fact that `health` carries apart."
+  [tid ^File f]
+  (let [every (long (or fsync-every 0))]
+    (when (pos? every)
+      (let [n (long (get-in (swap! threads update-in [tid :since-force] (fnil inc 0))
+                          [tid :since-force]))]
+        (when (>= n every)
+          (swap! threads assoc-in [tid :since-force] 0)
+          (force-now! tid f))))))
 (defn- file-lines
   "How many lines F already holds -- 0 when it is not there yet."
   [^File f]
@@ -215,6 +297,7 @@
                             (re-base! tid file)))
                         ((or @sink real-sink!) file line)
                         (swap! threads update-in [tid :written] (fnil inc 0))
+                        (force-due! tid file)
                         (reset! landed (offset-of tid))
                         true)
                       (catch Throwable t
@@ -265,6 +348,77 @@
   (when-some [f (:failed (get @threads (str thread-id)))]
     (assoc f :pending (pending-count thread-id))))
 
+
+(defn fsync!
+  "MOMENT TWO OF THREE (ADR 0007 decision 2), and the verb a test asks for a promise by hand: put
+  what THREAD-ID's record holds on the platter NOW.
+
+  THE MOMENT IS 'THE SESSION IS PUT AWAY' -- the sweeper puts an idle conversation away and `drop!`
+  is the explicit door (`harness.kernel.session`, which reaches this through its `:put-away!` seam).
+  That is when this process stops being the one that would flush it: an entry gone from the table
+  has nobody left to promise its tail."
+  ([thread-id]
+   (let [tid (str thread-id)]
+     (locking lock
+       (if-some [p (:path (get @threads tid))]
+         (do (force-now! tid (io/file p))
+             (nil? (:why (:fsync (get @threads tid)))))
+         ;; NOTHING THIS PROCESS WROTE, SO NOTHING TO PROMISE -- which is true rather than absent.
+         true)))))
+
+(defn health
+  "HOW TRUSTWORTHY THREAD-ID'S RECORD IS RIGHT NOW, as one of FOUR LEVELS, each with the criterion
+  that puts a thread there and THE SENTENCE a surface may say (ticket 04 of
+  `.scratch/event-persistence`):
+
+    L0  :ok      nothing is held: every line this process wrote is in the file.
+    L1  :behind  a line could not be written, so it and everything handed over behind it are HELD,
+                 and the disk has not been asked to take them again. NOTHING IS LOST -- `retry!`
+                 resumes AT that line, never after it.
+    L2  :stuck   the door was used and the disk refused AGAIN. The backlog is still there and the
+                 disk is not coming back on its own.
+    L3  :lost    the writer was TORN DOWN (the process is exiting) with lines still held, so the
+                 record is now SHORTER THAN THE CONVERSATION -- and no later read can tell.
+
+  LEVELS 1 AND 2 ARE ONE FAILURE AT TWO AGES, and splitting them is the whole point of a graded
+  answer: a hiccup is not an incident, and a surface that says one word for both teaches its
+  reader to ignore it. Level 3 is not an age at all -- it is the moment those lines stop being
+  recoverable.
+
+  THE LEVELS ARE ABOUT WHAT THE FILE CONTAINS, NOT ABOUT WHETHER IT WILL SURVIVE A CRASH. A failed
+  fsync does not move the level: the bytes ARE in the record, a reader sees them, and the only
+  thing in doubt is a crash -- which `:fsync` carries apart, because the two facts rest on
+  different evidence (a line count and a syscall).
+
+  `:says` IS THE SENTENCE, spelled here rather than at every surface, so that the page, the log
+  and a test say the same thing about the same fact."
+  [thread-id]
+  (let [tid  (str thread-id)
+        e    (get @threads tid)
+        held (count (:held e))
+        why  (:reason (:failed e))
+        left (when-some [w why] (str " (" w ")"))]
+    (cond
+      (:lost e)
+      {:level 3 :state :lost :pending held :retries (long (or (:retries e) 0)) :fsync (:fsync e)
+       :says (str "this conversation's record is SHORTER THAN THE CONVERSATION: " held
+                  " line(s) were still held when the writer was torn down" left
+                  ", and no later read can tell")}
+
+      (and (pos? held) (pos? (long (or (:retries e) 0))))
+      {:level 2 :state :stuck :pending held :retries (long (:retries e)) :fsync (:fsync e)
+       :says (str "this conversation's record is stuck: the disk refused again when the held lines"
+                  " were handed back" left ", so " held " line(s) are still not in it")}
+
+      (pos? held)
+      {:level 1 :state :behind :pending held :retries 0 :fsync (:fsync e)
+       :says (str "this conversation's record is behind by " held " line(s): the disk refused a"
+                  " write" left ". Nothing is lost -- the lines are held in order, and the next"
+                  " write that goes through resumes at the first of them")}
+
+      :else
+      {:level 0 :state :ok :pending 0 :retries 0 :fsync (:fsync e)
+       :says "everything this process wrote is in the record"})))
 (defn retry!
   "Write THREAD-ID's held lines, in order, and let later ones through again.
 
@@ -282,7 +436,12 @@
           ;; RE-ENTRANT (Clojure's `locking` is a monitor): the drain calls `append!`, which takes
           ;; this same lock, and that is deliberate -- one writer, one order.
           (doseq [item held]
-            (append! tid (:file item) (:line item) (:lands item)))))
+            (append! tid (:file item) (:line item) (:lands item)))
+          ;; WHETHER THE DOOR WAS TRIED AND THE DISK REFUSED AGAIN -- the difference between a
+          ;; hiccup and an incident (`health`). The clear above already said 'trying'.
+          (if (:failed (get @threads tid))
+            (swap! threads update-in [tid :retries] (fnil inc 0))
+            (swap! threads assoc-in [tid :retries] 0))))
       nil)))
 
 (defn flush!
@@ -310,11 +469,32 @@
   (.addShutdownHook (Runtime/getRuntime)
                     (Thread. ^Runnable r "harness-record-shutdown")))
 
+
+(defn- force-all!
+  "MOMENT THREE OF THREE (ADR 0007 decision 2): the process is going away, so every file this
+  process wrote gets its promise -- ONCE EACH, because a file is what a promise is about, not a
+  thread (two threads of one conversation write to one file)." []
+  (doseq [p (distinct (keep :path (vals @threads)))]
+    (force-file! (io/file p))))
+
+(defn- give-up!
+  "The writer is being torn down, so lines that are still held WILL NOT BE WRITTEN. This is the
+  moment ticket 04's L3 exists for, and the only moment it can be said: once the process is gone
+  the record is simply shorter than the conversation, and no later read can tell the difference." []
+  (doseq [tid (keys @threads)
+          :when (pos? (pending-count tid))]
+    (swap! threads assoc-in [tid :lost] true)
+    (log/error! :record/lost
+                (ex-info "the record writer is going away with lines still held"
+                         {:thread-id tid :pending (pending-count tid)})
+                {:says (:says (health tid))})))
 (defn shutdown!
-  "The exit path: flush what can be flushed, then close every handle. A process that exits
-  normally must not lose its tail."
-  []
+  "The exit path, in the order those facts have to be said: NAME WHAT WILL NOT SURVIVE (L3), flush
+  what can be flushed, promise every file this process wrote, then close every handle. A process
+  that exits normally must not lose its tail." []
   (let [state (flush! 1000)]
+    (give-up!)
+    (force-all!)
     (close-handles!)
     state))
 

@@ -6340,6 +6340,71 @@
          (is (= 0 (:pending (record/flush! 10000))))
          (is (nil? (:record (read-json (sofar tid))))))))))
 
+(deftest a-stalled-record-write-holds-the-run-instead-of-buffering-it
+  ;; TICKET 02 OF `.scratch/event-persistence`. The record's queue is gone (ADR 0007): the
+  ;; write happens on the caller's thread, and the caller is the run's frame loop -- which reads an
+  ;; UNBUFFERED channel the kernel's producer blocks on (`harness.kernel.loop/run-chan`). So when
+  ;; the disk stops taking bytes the RUN stops too; it does not race ahead into memory while a
+  ;; writer works through a backlog. That is the whole of what the ticket asked for ('the queue has
+  ;; a ceiling; full means back-pressure on the vendor SSE consumer, not growth'), and it is a fact
+  ;; about the COMPOSITION rather than about either half, so it is pinned where the composition is
+  ;; real: over the socket, with a real run behind it.
+  ;;
+  ;; THE CONTRAST THAT MAKES IT A TEST. With the old writer an unbounded queue stood between the
+  ;; run and the disk, so a parked write left the run free to finish -- the producer would have
+  ;; handed over every frame and the POST would have been answered while the file sat still. Here
+  ;; the parked line is the one being written, and the run cannot end behind it: the terminal
+  ;; frame's own line goes through this same call.
+  ;;
+  ;; NO SLEEP DECIDES THE ANSWER: the sink parks on a promise, so 'the writer is busy' is an
+  ;; observable state rather than a duration. The one wait is a deadline for the happy path.
+  (let [tid        (str "backpressure-" (java.util.UUID/randomUUID))
+        release    (promise)
+        first-line (promise)
+        asked      (atom [])]
+    (with-server
+     {tid [{:content (apply str (repeat 200 "x"))}]}
+     (fn []
+       (let [log  (log-file tid)
+             path (.getAbsolutePath ^java.io.File log)]
+         ;; PARK THE WRITE, and count only THIS thread's lines: a line another session of the
+         ;; same process writes must not read as this run running ahead of its own record.
+         (record/set-sink!
+          (fn [^java.io.File f line]
+            (when (= path (.getAbsolutePath f))
+              (swap! asked conj line)
+              (deliver first-line true)
+              (deref release 10000 nil))
+            (spit f line :append true :encoding "UTF-8")))
+         (try
+           (let [run (future (post-run tid))]
+             (is (true? (deref first-line 5000 false))
+                 "the run's record write reached the disk and parked there")
+             (Thread/sleep 400)
+             (testing "while a write is parked nothing else is handed over, and the run cannot finish"
+               (is (= 1 (count @asked))
+                   (str "a queue behind the writer would show up here as lines waiting to be"
+                        " written: " (count @asked) " were handed over"))
+               (is (not (realized? run))
+                   (str "the run is held by the write: its terminal frame is written through"
+                        " this same call, so it cannot have been answered yet")))
+             (deliver release true)
+             (let [sent (sse-frames (.body @run))]
+               (is (= "RUN_FINISHED" (:type (last sent)))
+                   "once the disk takes bytes again the run finishes normally")
+               (wait-for-recorded
+                log
+                (fn [ls] (some #(= "RUN_FINISHED" (:type (replay/payload %))) ls))
+                5000)
+               (let [wire (mapv #(dissoc % :threadId) sent)
+                     kept (mapv #(dissoc % :threadId)
+                                (mapv replay/payload
+                                      (filter replay/frame?
+                                              (replay/lines->records (replay/read-lines log)))))]
+                 (is (= (remove reasoning-frame? wire) kept)
+                     "and the stall lost nothing: the record is still the wire minus the reasoning"))))
+           (finally (record/reset-sink!))))))))
+
 ;; -------------------------------------------------------- the window (ticket 05)
 
 (defn- fill-live-window!

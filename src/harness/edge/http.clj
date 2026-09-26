@@ -3518,11 +3518,20 @@
   the file is BEHIND (or, here, unwritable), so a reader that asked the file could
   learn nothing; `harness.edge.record` is where the failure lives."
   [thread-id]
-  (when-some [d (record/degraded thread-id)]
-    {:state   "degraded"
-     :reason  (:reason d)
-     :pending (:pending d)
-     :at      (:at d)}))
+  (let [h (record/health thread-id)
+        d (record/degraded thread-id)]
+    ;; ABSENCE IS THE CLIENT'S 'fine', so a healthy record carries no field at all -- and the WORD
+    ;; stays the one the page already draws ("degraded") because a finer fact is not a new
+    ;; contract: `:level` and `:says` are what ticket 04 added (L1 behind / L2 stuck / L3 lost), and
+    ;; a surface that has learned to read them says the writer's own sentence instead of guessing
+    ;; one.
+    (when (pos? (long (:level h)))
+      {:state   "degraded"
+       :level   (:level h)
+       :says    (:says h)
+       :reason  (:reason d)
+       :pending (:pending h)
+       :at      (:at d)})))
 
 (defn- ambiguous-stem
   "The locator's refusal when a stem names MORE THAN ONE log, or nil when it does not.

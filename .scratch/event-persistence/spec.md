@@ -181,3 +181,36 @@ assistant 消息 ↔ 这一 run 写下的第 k 条 assistant 行」配对，把�
   吃到；脚本每次都会把这个数报出来（`would lose their reasoning`）。
 - **文本 delta（2%）不在此列**，它照旧逐条写——被掐断的 run 靠它才留得住半句答案；合并成快照那一半
   （票面写的 50–100ms）**还没做**。
+
+## 票 02 落地：背压是组合的性质，不是新代码（2026-09-26）
+
+票面要的「队列有上限、满了顶回上游」**已经由票 01 消解**：无界队列没了，写一行就是一次同步写，而写
+它的那条线程读的是 `harness.kernel.loop/run-chan` 的**无缓冲**通道（生产者 `>!!` 阻塞），所以磁盘一
+停，消费 vendor SSE 的那一处就停。**它不是一段新代码，是一条要证明的性质**，所以判据落在真实路径上：
+`harness.edge.http-test/a-stalled-record-write-holds-the-run-instead-of-buffering-it` 把 sink 卡在
+promise 上，断言「只有 1 行被交出去」（异步队列那版会是几十行）与「那一发 POST 还没被答复」
+（那版会让 run 先跑完），松手之后记录仍等于线上去掉推理族——不丢、不重、不乱序。ADR 0007 的「落地」
+一节记的是同一段。
+
+## 票 04 落地：fsync 的三个时机 + 降级四级（2026-09-26）
+
+**三个时机都成了动作**：每 `record/fsync-every`（**64 行**）在写锁里 force 一次；**会话被放下**时
+`harness.kernel.session` 新开的 `:put-away!` 缝（`sweep!` 与 `drop!` 两个门都敲）接到
+`record/fsync!`；**进程退出**时 `shutdown!` 对每个写过的文件 force 一次（一个文件一次——承诺是对
+文件许的，不是对线程）。
+
+**降级分四级**（`record/health`，每级带 `:says` 那句原话）：**L0 `:ok`** 什么都没扣住；
+**L1 `:behind`** 有行被扣住、还没再敲过门；**L2 `:stuck`** 门敲过了、磁盘又拒了；**L3 `:lost`**
+写手被拆掉时还有行扣着——**记录此刻比对话短，而此后没有任何一次读能分辨**。1 与 2 是同一场故障的两个
+年龄，分开是为了让人不必对一句话脱敏；L3 不是年龄，所以它只能在退出的路上说出来（`give-up!` 一行
+`ERROR :record/lost`）。
+
+**fsync 失败不进级别**：字节**在**记录里（读者看得见），悬的只有「崩溃会不会留住它」——那半挂在
+`health` 的 `:fsync` 上，因为两件事的证据不同（一个行数、一个 syscall）。**读侧**：`GET /sofar` /
+`POST /rebuild` 的 `:record` 多 `:level` / `:says` 两个字段，`:state` 仍是页面认识的那个词。
+
+**判据**：`harness.edge.record-test` + `harness.edge.sessions-test` 合跑 **45 用例 / 204 断言全绿**，
+其中 7 条是新的（三个时机各一条、四级一条、一次被拒的承诺、一次重试成功后回到 L0、`:put-away!` 从表那
+一侧看的一条）。**承诺的缝**（`set-forcer!`）与 `set-sink!` 同形，理由也一样：fsync 在文件上留不下
+痕迹，缝是唯一能把三个时机分开的地方。**要一起核的读侧调用点**（`stats-get` 的 `:behind`、
+`evictable?` 的 `pending?`）照旧踩在 `pending-count` 上，一个字没动。

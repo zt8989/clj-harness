@@ -157,6 +157,12 @@
 ;;                    `harness.cap.jobs` (this namespace must not grow a second opinion about
 ;;                    what a command is), and because 'put away' and 'stop the commands it
 ;;                    left running' are two facts that only move together -- see `drop!`.
+;;   :put-away!       (fn [thread-id] -> nil): TOLD THE MOMENT A SESSION LEAVES THIS PROCESS, on both
+;;                    doors (`sweep!` and `drop!`). A seam for the same reason `:stop-jobs!` is one:
+;;                    what has to happen then belongs to whoever owns what is left -- the RECORD
+;;                    writer promises the tail of the bytes here (ticket 04 of
+;;                    `.scratch/event-persistence`), and this namespace must not grow an opinion
+;;                    about file handles.
 ;;
 ;; A DEFAULT IS INSTALLED FOR EACH, so this namespace loads and behaves with no adapter at
 ;; all: the walk is empty, nothing is claimed, the raw entries ARE the model's messages, and
@@ -177,7 +183,8 @@
    :claim          {:take!      (fn [_thread-id] {:token nil})
                     :release!   (fn [_thread-id _token] nil)
                     :hand-over! (fn [_thread-id _from _to] nil)}
-   :stop-jobs!     (fn [_thread-id] nil)})
+   :stop-jobs!     (fn [_thread-id] nil)
+   :put-away!      (fn [_thread-id] nil)})
 
 (defonce ^:private seams (atom default-seams))
 
@@ -1105,6 +1112,9 @@
     ;; from here too, because nothing ever looked at them again. The RECORDS stay: see
     ;; `harness.cap.jobs/stop-session!` for what is kept and what is stopped.
     ((:stop-jobs! @seams) id)
+    ;; AND THE BYTES GET THEIR PROMISE (ticket 04): this process is the only one holding the tail of
+    ;; that conversation's record, and an entry gone from the table has nobody left to flush it.
+    ((:put-away! @seams) id)
     (ring! id {:kind :gone :reason :put-away})
     nil))
 
@@ -1151,6 +1161,9 @@
       ;; The same door `drop!` uses, one session at a time -- an idle conversation is not a
       ;; reason to leave its commands running either.
       ((:stop-jobs! @seams) tid)
+      ;; The same promise as `drop!`: swept away is still away, and the tail is still this
+      ;; process's alone.
+      ((:put-away! @seams) tid)
       (ring! tid {:kind :gone :reason :idle}))
     gone))
 

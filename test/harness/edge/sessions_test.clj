@@ -224,6 +224,27 @@
                  " its own: one call per session put away, never one per session in the table")))
       (finally (session/install! {:stop-jobs! (fn [_tid] nil)})))))
 
+(deftest putting-a-session-away-promises-the-tail-of-its-record
+  ;; TICKET 04's SECOND MOMENT, seen from the table's side. A session leaving this process is the
+  ;; moment nobody here can flush the tail of its record any more, so the kernel TELLS whoever owns
+  ;; those bytes -- both doors, once, with the id. `harness.edge.sessions` wires the seam to
+  ;; `record/fsync!`; what the writer then does with the ask is `record-test`'s case, and this is the
+  ;; joint between them (the same shape as the `:stop-jobs!` case just above).
+  (let [asked (atom [])]
+    (session/install! {:put-away! (fn [tid] (swap! asked conj tid))})
+    (try
+      (testing "the idle door"
+        (sessions/touch! "t-promise-idle")
+        (let [touched (:touched-at (get (sessions/live) "t-promise-idle"))]
+          (is (= ["t-promise-idle"] (sessions/sweep! (+ touched sessions/idle-ttl-ms))))
+          (is (= ["t-promise-idle"] @asked) "the sweep asks about the session it just put away")))
+      (testing "and the explicit one"
+        (sessions/touch! "t-promise-drop")
+        (sessions/drop! "t-promise-drop")
+        (is (= ["t-promise-idle" "t-promise-drop"] @asked)
+            "an explicit put-away is asked about too, and only about its own session"))
+      (finally (session/install! {:put-away! (fn [_tid] nil)})))))
+
 ;; ------------------------------------------------------------ the running ceiling
 
 (deftest the-running-ceiling-is-refused-by-name
