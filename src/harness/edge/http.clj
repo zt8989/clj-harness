@@ -3286,10 +3286,12 @@
     (when-some [ctx (sessions/fold-value stem :context)]
       (assoc (stats/stats-answer st)
              :context (context/state->context ctx)
-             ;; THE BAND IS THE THIRD FOLD and it takes the conversation as its walk has it
-             ;; (`harness.edge.pressure/band-pressure`), which is memory for a session held
-             ;; here -- the same call the compaction trigger makes mid-run.
-             :pressure (pressure/band-pressure stem (sessions/messages stem)
+             ;; THE BAND IS THE THIRD FOLD, and the surface it is asked about is the REQUEST the
+             ;; next call would carry -- the conversation PLUS the system message in force
+             ;; (`harness.edge.pressure/live-surface`; `sessions/messages` alone is the smaller
+             ;; array, and the meter subtracts one surface from the other). Memory for a session
+             ;; held here, and the same shape the compaction trigger measures mid-run.
+             :pressure (pressure/band-pressure stem (pressure/live-surface stem)
                                                (compaction/config stem))))))
 
 (defn- trajectory-get
@@ -5199,8 +5201,10 @@
         (let [ratios (compaction/config stem)
               ;; 1. THE CHEAP CHECK (ticket 03): the meter band answers 'how full is the next
               ;;    request' WITHOUT reading the record, so a session nowhere near the
-              ;;    threshold never touches the file -- which is almost every run.
-              quick  (pressure/band-pressure stem (sessions/messages stem) ratios)]
+              ;;    threshold never touches the file -- which is almost every run. THE SURFACE
+              ;;    IS THE REQUEST the next call would carry, system message and all
+              ;;    (`harness.edge.pressure/live-surface`), not the conversation.
+              quick  (pressure/band-pressure stem (pressure/live-surface stem) ratios)]
           (when (and (:thresholdTokens quick)
                      (>= (:pressureTokens quick) (:thresholdTokens quick)))
             ;; 2. AT OR OVER THE THRESHOLD, and only now is the record worth reading: the
@@ -5210,7 +5214,7 @@
                   pruned  (prune-results! stem records)
                   records (or (:records pruned) records)
                   ;; 3. RE-MEASURE over what the model would now be handed.
-                  answer  (pressure/records->pressure records (sessions/messages stem) ratios)]
+                  answer  (pressure/records->pressure records (pressure/live-surface stem) ratios)]
               (when (and (:thresholdTokens answer)
                          (>= (:pressureTokens answer) (:thresholdTokens answer))
                          (not (compaction/lock-active? records)))

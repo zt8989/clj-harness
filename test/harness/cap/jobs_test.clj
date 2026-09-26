@@ -351,6 +351,22 @@
       (is (= [(:id ja)] (map :id (jobs/listing a))))
       (is (= [(:id jb)] (map :id (jobs/listing b)))))))
 
+(deftest a-commands-own-bytes-are-what-the-registry-and-the-notice-hold
+  ;; THE LINE THE SPAWN-SIDE FIX MUST NOT CROSS (harness.infra.shell does the escaping,
+  ;; and only on the way INTO a command line). What a caller sent is what the registry
+  ;; holds and what a notice names, byte for byte: a model recognises the job it is
+  ;; being told about BY the command it wrote, so an escaped or re-quoted spelling here
+  ;; would name a command nobody ran.
+  (let [t "jt-verbatim"
+        command "printf '[%s]' ONE \"TWO THREE\" FOUR; exit 0"
+        {:keys [path]} (jobs/start! t {:command command})]
+    (record-until path #(re-find #"\[exit" %) 10000)
+    (let [[row] (jobs/listing t)]
+      (is (= command (:command row)) "the registry row is the caller's own bytes"))
+    (let [[notice] (jobs/take-notices! t)]
+      (is (str/includes? (:content notice) (str "<command>" command "</command>"))
+          "and so is the command the notice names the job by"))))
+
 (deftest the-process-going-away-takes-its-jobs-and-not-its-records
   ;; `shutdown!` is what the exit hook runs, and it is asserted by CALLING it: a
   ;; forked JVM against this repo's config home hangs (harness.cap.mcp-test records

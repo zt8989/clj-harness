@@ -138,6 +138,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { exitOf, run, stopTree } from "./proc.mjs";
+import { LISTENING } from "./backend.mjs";
 
 // THE REPOSITORY IS THIS FILE'S PARENT, and that is what makes the script movable: it is
 // invoked from wherever a reader is standing (`node scripts/dev.mjs`, at the root or
@@ -418,10 +419,9 @@ const logPath = path.join(tmp, "backend.log");
 
 /// The line each backend announces itself on, and the port it names: the e2e
 /// server's is machine-readable on purpose, `start!`'s is its own banner with the
-/// BOUND port on it (which is the whole reason `--port 0` is usable at all).
-const READY = scripted
-  ? /PRINT-READY \{:port (\d+)\}/
-  : /harness listening on http:\/\/localhost:(\d+)/;
+/// BOUND port on it (which is the whole reason `--port 0` is usable at all). That
+/// banner is spelled in `scripts/backend.mjs`, where both launchers read it.
+const READY = scripted ? /PRINT-READY \{:port (\d+)\}/ : LISTENING;
 
 let backendArgv;
 let backendEnv = { ...process.env };

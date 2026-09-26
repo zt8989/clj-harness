@@ -184,6 +184,24 @@
       (is (false? error))
       (is (str/includes? content "[exit 3]")))))
 
+(deftest a-double-quoted-word-survives-the-trip-into-the-shell
+  ;; THE TOOL'S OWN HALF of the quoting bug (`harness.infra.shell` has the rule, and
+  ;; the seam's own cases have the rest). A caller that writes "TWO THREE" means ONE
+  ;; word, and a shell handed anything else runs a DIFFERENT command -- whose answer is
+  ;; merely wrong, which the caller cannot tell from a result it did not expect. The
+  ;; trailing marker is the other face of the same failure: a bare quote ends the
+  ;; receiving parser's quoted run, so what follows it is read as arguments to the shell
+  ;; rather than as part of the command, and the rest of the line is simply gone.
+  (let [{:keys [content error]}
+        (call "bash" {:command "printf '[%s]' ONE \"TWO THREE\" FOUR; echo; echo END-MARKER"})]
+    (is (false? error))
+    (is (str/includes? content "[ONE][TWO THREE][FOUR]")
+        (str "the quoted word arrived as one word: " (pr-str content)))
+    (is (str/includes? content "END-MARKER")
+        "and the command after it on the same line ran too")
+    (is (not (re-find #"(?i)unexpected (end of file|EOF)|unmatched" content))
+        (str "and no quote the caller did write was reported unclosed: " (pr-str content)))))
+
 (deftest eval-captures-stdout-and-value
   (let [{:keys [content error]} (call "eval" {:code "(println \"hi\") (+ 1 2)"})]
     (is (false? error))

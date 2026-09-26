@@ -1,0 +1,25 @@
+{
+  "turns": [
+    {
+      "reasoning": "走查 bash 吞双引号那个 bug：命令里带一段被双引号包起来的词，看它到 shell 手里还剩几个 token。",
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "bash",
+          "arguments": {
+            "command": "printf '[%s]' ONE \"TWO THREE\" FOUR; echo; echo END-MARKER"
+          }
+        }
+      ]
+    },
+    {
+      "content": "四个词各自成段（[ONE][TWO THREE][FOUR]），同一行后面的 END-MARKER 也跑到了 —— 命令是原样到达 shell 的。",
+      "usage": {
+        "prompt_tokens": 1234,
+        "completion_tokens": 42,
+        "total_tokens": 1276
+      }
+    }
+  ]
+}

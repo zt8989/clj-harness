@@ -100,9 +100,11 @@ expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder`
 先红后绿（edge 侧编译即失败，loop 侧 3 处断言失败）。
 
 ## 已知、未修（本 spec 之外）
-- **HEAD 上本来就红的一条**：`pressure_test.clj:344`
-  （`the-endpoint-answers-the-pressure-section-and-the-run-leaves-it-on-the-record`，
-  49087 < 50000），与本分支无关，修之前就在红。
+- ~~**HEAD 上本来就红的一条**：`pressure_test.clj:344`~~ —— **已修**（`bash-quoted-args` 那条线收尾
+  时查清的）：不是估算器的错，是**量错了面**。端点与自动压缩那两处递进去的是
+  `sessions/messages`（**对话**），而锚点那一侧从记录折回来时带**系统消息** —— `state->pressure`
+  拿两边相减，差的 913 就是它。现在 `harness.edge.pressure/live-surface` 把那一层前置补上
+  （与记录侧的 `messages-of` 同一条拼法），三处改用它：49087 -> 50000，正是那条断言的写法。
 - `case-insensitivity-is-optional`（`harness.cap.hashline.grep-test`）在本机（Windows/rg）红，
   同样与本分支无关。
 - **本机的全量套件本来就摇**：`harness.edge.http-test` 单独跑要 184–280s（上限 300s），全量那一轮它

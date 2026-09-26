@@ -437,11 +437,38 @@
 ;;
 ;; ONE STEP, TWO SEAMS, ONE OFFLINE CALLER (`meter-of-records`): three callers of one rule.
 
+(defn live-surface
+  "THREAD-ID's conversation AS A REQUEST CARRIES IT: the system message in force, then the
+  conversation, then this run's own injections -- the array `messages-of` rebuilds from a
+  record, rebuilt here out of what this process holds instead.
+
+  WHY THE CALLER CANNOT SPELL IT ITSELF. `sessions/messages` is the CONVERSATION, and the
+  system message is not a conversation entry -- the client never holds the prompt, and
+  `messages-in`'s own note calls it 'the single largest fixed cost in every request'. A
+  reading taken over the conversation alone is therefore measured against an ANCHOR that
+  does carry it, and `state->pressure` SUBTRACTS one from the other: the endpoint answered
+  49087 for a request the vendor had just priced at 50000, and the difference was the
+  system message, to the token.
+
+  IT IS THE LIVE SPELLING OF THAT PRELUDE, exactly as `messages-of` is the record's: the
+  offline reading (`records->pressure` over a log) and the live one (`band-pressure` of
+  this) have to describe the same array, or the meter's arithmetic compares two different
+  questions -- the failure `estimate-message`'s docstring tells the story of."
+  [thread-id]
+  (let [band (or (sessions/fold-value thread-id :pressure) (empty-band))]
+    (into [] (concat (when-let [system (:system band)] [system])
+                     (sessions/messages thread-id)
+                     (:injections band)))))
+
 (defn band-pressure
   "THREAD-ID's band + MESSAGES + RATIOS -> the same answer `records->pressure` gives, WITHOUT
   reading the record: the band was folded when the session was built and is advanced as rows
   are written. A session this process does not hold has no band, and the answer is then the
-  estimate over MESSAGES -- the honest reading of 'nothing is held here'."
+  estimate over MESSAGES -- the honest reading of 'nothing is held here'.
+
+  MESSAGES IS THE REQUEST'S OWN SURFACE and not the conversation: `live-surface` is what
+  builds it for a session this process holds. Handing `sessions/messages` alone measures a
+  smaller array than the anchor was priced against, and `state->pressure` subtracts the two."
   [thread-id messages ratios]
   (state->pressure (or (sessions/fold-value thread-id :pressure) (empty-band)) messages ratios))
 

@@ -398,3 +398,130 @@
         (shell/reset-resolution!)
         (is (= :bash (:kind (shell/require-posix! "`git`, which"))))))
     (finally (shell/reset-resolution!))))
+
+;; ------------------------------------------- what a shell does with a command
+;;
+;; THE LINE, NOT THE ARGV. On Windows the JVM builds ONE command line out of the argv
+;; vector and Git Bash reads it back by rules of its own, so a command's bytes arrive
+;; only if the two agree about the one character a shell command cannot do without
+;; (harness.infra.shell's own section says which rule, and why). These cases are that
+;; agreement, asserted where it matters -- by running the command and reading what the
+;; shell says it received.
+
+(def ^:private q
+  "ONE double quote -- the character this whole subject is about, named rather than
+  spelled inside a literal: a case that writes it has to quote its own source twice,
+  and the second quoting is where a reader stops reading."
+  (str (char 34)))
+
+(def ^:private bs
+  "ONE backslash, named for the same reason: it is what the escape is made of."
+  (str (char 92)))
+
+(deftest a-windows-command-line-carries-the-word-the-shell-will-read-back
+  (testing "off Windows the command is the command: there the argv IS what is run"
+    (is (= (str "printf 'a b' " q "c d" q)
+           (shell/command-word :bash (str "printf 'a b' " q "c d" q) false)))
+    (is (= "echo %CD%" (shell/command-word :cmd "echo %CD%" false))))
+  (testing "on Windows a quote is escaped, and a backslash with it"
+    (is (= (str "echo " bs q "a b" bs q)
+           (shell/command-word :bash (str "echo " q "a b" q) true)))
+    (is (= (str "echo a" bs bs "b")
+           (shell/command-word :bash (str "echo a" bs "b") true))))
+  (testing "and a command the JVM would not quote at all is given a leading blank"
+    ;; The blank is what makes the JVM quote the word, and only a quoted word is read
+    ;; back by the rule above. A shell skips it, so the command is unchanged.
+    (is (= (str " a=" bs q "b" bs q)
+           (shell/command-word :bash (str "a=" q "b" q) true)))
+    (is (= "npm test" (shell/command-word :bash "npm test" true))
+        "a command that already holds a blank needs nothing added"))
+  (testing "cmd is handed its command exactly as the caller wrote it"
+    ;; cmd reads no MSVCRT rule -- it takes a quote as a quote -- so escaping for it
+    ;; would put backslashes IN the command instead of taking them out.
+    (is (= (str "echo " q "a b" q " & echo c")
+           (shell/command-word :cmd (str "echo " q "a b" q " & echo c") true)))))
+
+(def ^:private quoted-word-probes
+  "kind -> [what to run, the words its answer holds when the shell received the quoted
+  word AS ONE WORD]. One row per shell this harness can name, each written in the
+  language that shell's own `argv-prefix` promises a caller."
+  {:git-bash   ["printf '[%s]' ONE \"TWO THREE\" FOUR" "[ONE][TWO THREE][FOUR]"]
+   :bash       ["printf '[%s]' ONE \"TWO THREE\" FOUR" "[ONE][TWO THREE][FOUR]"]
+   :pwsh       ["Write-Output \"ONE TWO\"" "ONE TWO"]
+   :powershell ["Write-Output \"ONE TWO\"" "ONE TWO"]
+   :cmd        ["echo \"ONE TWO\"" "\"ONE TWO\""]})
+
+(deftest a-quoted-word-reaches-every-shell-this-machine-has-whole
+  ;; THE BUG THIS PINS DOWN, as a caller meets it: a command that writes "TWO THREE"
+  ;; means ONE word. If the quotes are eaten on the way in, the shell runs a DIFFERENT
+  ;; command and the answer is merely wrong -- which the caller cannot tell from a
+  ;; result it did not expect. Measured on this machine before the fix: a printf of
+  ;; four words answered two of them and then stopped, with the rest of the line gone.
+  ;;
+  ;; EVERY SHELL THIS MACHINE HAS, because what is under test is the seam and not one
+  ;; kind's way through it: the machine's own shell (the unnamed call) and every named
+  ;; kind that resolves here. A kind this machine has not got is not run -- it cannot
+  ;; be -- but the machine's own kind is asserted to be among the ones that were.
+  (let [machine (:kind (shell/resolution))
+        kinds   (->> (cons machine [:git-bash :bash :pwsh :powershell :cmd])
+                     distinct
+                     (filter #(some? (shell/resolution %))))]
+    (is (some? machine) "this machine resolves a shell at all")
+    (is (contains? (set kinds) machine)
+        "and it is one of the kinds run below, not a kind skipped for being absent")
+    (doseq [kind kinds
+            :let [[command expected] (get quoted-word-probes kind)]]
+      (testing (str "under " (name kind))
+        (let [{:keys [exit out err]} (shell/run {:command command :kind kind :timeout-ms 30000})]
+          (is (= 0 exit) (str (name kind) " ran it (stderr: " (str/trim (str err)) ")"))
+          (is (str/includes? (str out) expected)
+              (str (name kind) " answered " (pr-str out) ", which does not hold "
+                   (pr-str expected) " -- the quotes a caller wrote did not arrive")))))))
+
+(deftest the-rest-of-the-line-runs-after-a-quoted-word
+  ;; THE OTHER TWO FACES OF THE SAME BUG. A bare quote ends the receiving parser's
+  ;; quoted run, so what follows the next one is read as ARGV rather than as part of
+  ;; the command: the commands after a `|` never ran, and a quote left open came back
+  ;; as the SHELL's own complaint -- `unexpected EOF while looking for matching` about
+  ;; a line the caller never wrote. Both are asserted here, on one line, because that
+  ;; is how a caller met them.
+  (let [{:keys [exit out err]} (shell/run
+                                {:command (str "printf '[%s]' ONE \"TWO THREE\" FOUR; echo;"
+                                               " echo END-MARKER; echo one | cat")
+                                 :timeout-ms 20000})]
+    (is (= 0 exit) (str "the command ran (stderr: " (str/trim (str err)) ")"))
+    (is (str/includes? (str out) "[ONE][TWO THREE][FOUR]"))
+    (is (str/includes? (str out) "END-MARKER") "and so did what followed on the same line")
+    (is (str/includes? (str out) "one") "and what a pipe fed to the next command")
+    (is (not (re-find #"(?i)unexpected (end of file|EOF)|unmatched" (str err)))
+        (str "and the shell reported no quote it never saw closed: " (pr-str err)))))
+
+(deftest the-shapes-a-command-is-built-out-of-still-mean-what-they-mean
+  ;; The escaping between the caller's bytes and the shell is one more thing that can
+  ;; be got wrong, so the four things a command is built out of besides a word -- a
+  ;; single-quoted word, a redirection, a pipe, and stdin -- are asserted beside it.
+  (let [dir (support/temp-dir "shell-command-shapes")]
+    (testing "a single-quoted word is still one word"
+      (let [{:keys [exit out]} (shell/run {:command "printf '[%s]' ONE 'TWO THREE' FOUR"
+                                           :timeout-ms 20000})]
+        (is (= 0 exit))
+        (is (str/includes? (str out) "[ONE][TWO THREE][FOUR]"))))
+    (testing "a redirection still writes the file it names"
+      (let [target (io/file dir "redirected.txt")
+            {:keys [exit]} (shell/run
+                            {:command (str "echo written > "
+                                           (shell/quote-arg (support/shell-path (.getAbsolutePath target))))
+                             :timeout-ms 20000})]
+        (is (= 0 exit))
+        (is (= "written" (str/trim (slurp target :encoding "UTF-8"))))))
+    (testing "a pipe still feeds what follows it"
+      (let [{:keys [exit out]} (shell/run {:command "printf 'a\\nb\\nc\\n' | wc -l"
+                                           :timeout-ms 20000})]
+        (is (= 0 exit))
+        (is (str/includes? (str/trim (str out)) "3"))))
+    (testing "and stdin still reaches the command that reads it"
+      (let [{:keys [exit out]} (shell/run {:command "cat"
+                                           :stdin "sent-through-stdin"
+                                           :timeout-ms 20000})]
+        (is (= 0 exit))
+        (is (str/includes? (str out) "sent-through-stdin"))))))
