@@ -207,6 +207,7 @@
     (swap! threads update-in [tid :fsync]
            (fn [m] (-> (or m {})
                        (assoc :at (System/currentTimeMillis) :failures 0)
+                       (update :promises (fnil inc 0))
                        (dissoc :why))))))
 
 (defn- force-due!
@@ -457,6 +458,48 @@
      {:pending  (reduce + 0 (map (fn [[_ e]] (count (:held e))) @threads))
       :degraded (into {} (keep (fn [[tid e]] (when (:failed e) [tid (:failed e)])) @threads))})))
 
+;; -------------------------------------------------------------------- the table
+
+(defn metrics
+  "THE WRITER'S OWN TABLE (ticket 05 of `.scratch/event-persistence`), as of NOW: one row per
+  conversation this process has written, plus the totals.
+
+    {:totals  {:threads n :lines n :bytes n :pending n :promises n :fsync-failures n}
+     :threads {<tid> {:file \"..\" :lines n :bytes n :pending n
+                     :level 0..3 :state :ok|:behind|:stuck|:lost
+                     :promises n :fsync-failures n :says \"..\"}}}
+
+  IT IS THE TABLE, NOT A MEASUREMENT OF ONE: every number here is a fact the writer already keeps.
+  THE ONE THING IT ASKS THE FILESYSTEM FOR IS THE FILE'S LENGTH, and that is deliberate -- a byte
+  count kept per line would mean encoding every line a second time, on the frame loop, for a number
+  nobody reads during a run. A meter may not tax the thing it measures (the pressure meter has its
+  own version of this rule, and it is the same rule).
+
+  A SNAPSHOT IS NOT A FACT ABOUT A LATER MOMENT (`docs/rules/concurrency.md`): a caller reads this
+  to say what was true when it was taken. THE COUNTERS ARE MONOTONIC AND THE LEVELS ARE NOT -- one
+  answer, two kinds of claim." []
+  (let [rows (into (sorted-map)
+                   (map (fn [[tid e]]
+                          (let [h     (health tid)
+                                p     (:path e)
+                                fsync (:fsync e)]
+                            [tid {:file           p
+                                  :lines          (long (or (:written e) 0))
+                                  :bytes          (if (some? p) (.length (io/file p)) 0)
+                                  :pending        (:pending h)
+                                  :level          (:level h)
+                                  :state          (:state h)
+                                  :says           (:says h)
+                                  :promises       (long (or (:promises fsync) 0))
+                                  :fsync-failures (long (or (:failures fsync) 0))}])))
+                   @threads)]
+    {:totals  {:threads        (count rows)
+               :lines          (reduce + 0 (map :lines (vals rows)))
+               :bytes          (reduce + 0 (map :bytes (vals rows)))
+               :pending        (reduce + 0 (map :pending (vals rows)))
+               :promises       (reduce + 0 (map :promises (vals rows)))
+               :fsync-failures (reduce + 0 (map :fsync-failures (vals rows)))}
+     :threads rows}))
 ;; ------------------------------------------------------------ the process hooks
 
 (defn install-hook!
@@ -496,6 +539,10 @@
     (give-up!)
     (force-all!)
     (close-handles!)
+    ;; AND THE TABLE GOES OUT WITH THE PROCESS (ticket 05): the numbers a run leaves behind are the
+    ;; only ones nobody can ask for afterwards, and one line at exit is what a person reads when
+    ;; they come looking for what happened.
+    (log/info! :record/metrics (:totals (metrics)))
     state))
 
 (defonce ^:private exit-hook-installed (atom false))

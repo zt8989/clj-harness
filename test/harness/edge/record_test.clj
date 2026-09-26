@@ -417,3 +417,37 @@
       (is (= 0 (:level h)))
       (is (= 0 (:retries h)) "a thread that caught up is not on its second strike")
       (is (= [1] (mapv :n (written f)))))))
+
+(deftest the-table-says-what-this-process-put-in-the-record
+  ;; TICKET 05's TABLE. Each number is asserted where it comes from rather than as one whole-map
+  ;; equality: the shape may grow, the facts may not drift.
+  (let [f (log-file-in "metrics")]
+    (dotimes [i 3] (record/append! "m" f (line {:n i})))
+    (let [t   (record/metrics)
+          row (get-in t [:threads "m"])]
+      (is (= 3 (:lines row)))
+      (is (= 3 (get-in t [:totals :lines])))
+      (is (= (.length f) (:bytes row))
+          "the file's own length: the table asks the filesystem, not the frame loop")
+      (is (= 0 (:level row)))
+      (is (= 0 (:pending row)))
+      (is (= (.getAbsolutePath f) (:file row))))
+    (testing "a held line is in the same table, at the level it puts the thread at"
+      (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+      (record/append! "m" f (line {:n 9}))
+      (let [row (get-in (record/metrics) [:threads "m"])]
+        (is (= 1 (:pending row)))
+        (is (= 1 (:level row)))
+        (is (= 3 (:lines row)) "a line that was never written is not counted as written")))
+    (testing "and a promise that went through is counted, apart from one that was refused"
+      (record/set-forcer! (fn [_] nil))
+      (record/fsync! "m")
+      (record/set-forcer! (fn [_] "the platter said no"))
+      (record/fsync! "m")
+      (let [row (get-in (record/metrics) [:threads "m"])]
+        (is (= 1 (:promises row)))
+        (is (= 1 (:fsync-failures row)))))
+    (testing "and every thread this process wrote has a row"
+      (record/append! "other" (log-file-in "metrics-other") (line {:n 1}))
+      (is (= #{"m" "other"} (set (keys (:threads (record/metrics))))))
+      (is (= 2 (get-in (record/metrics) [:totals :threads]))))))
