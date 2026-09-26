@@ -146,6 +146,43 @@
   [telemetry]
   (merge {:type :model/end} telemetry))
 
+(defn model-timeout
+  "One model call produced NO DATA for IDLE-MS and was cut off -- the idle guard's own
+  fact, emitted by `harness.kernel.loop` at the moment it decides what to do about it.
+  A SECOND EVENT BESIDE THE `:model/start` / `:model/end` PAIR rather than a field on
+  either: those two say a call happened and what it reported, and this says the call was
+  KILLED for silence -- a reading neither of them can carry, and one a reader holding
+  only the pair would have to infer from an empty telemetry.
+
+  ATTEMPT IS THE ONE THAT JUST FAILED, counting from 1, and LIMIT is the RETRY BUDGET
+  for that call (`harness.edn`'s `:llm :idle-timeout-retries`, 3 by default): the two
+  together are what a person is told -- 'the 2nd try'. RETRYING? says whether another
+  attempt follows THIS one; false with a budget left over is not a bug, it is `emitted?`
+  doing its job (see below), and false with the budget spent is the end of the road --
+  the run dies on the same failure the frame just announced.
+
+  EMITTED? IS THE REASON THERE IS SOMETIMES NO RETRY, and it is the honest half of this
+  event: a call that had ALREADY put text or reasoning on the wire cannot be retried,
+  because the client has seen a half-written answer and a second attempt would append
+  to it -- two answers where the model gave one. A timeout with nothing emitted is
+  retried; a timeout AFTER something was emitted ends the run. The line is the user's
+  (question 1 of `.scratch/llm-idle-timeout/spec.md`).
+
+  THE WIRE TURNS THIS INTO A CUSTOM FRAME THE CLIENT DRAWS AND THE RECORD NEVER KEEPS
+  (`harness.edge.ag-ui`): a stall is a fact about a call in flight, and the record is
+  what a reload rebuilds a conversation from.
+
+  ONE KEY PER THING SAID, AND `:limit` COUNTS RETRIES RATHER THAN TRYING TO COUNT
+  ATTEMPTS: the edge hands this layer the same number it hands `harness.edn`, so a
+  frame and the config that produced it cannot disagree about what the budget was."
+  [idle-ms attempt limit retrying? emitted?]
+  {:type     :model/timeout
+   :idle-ms  idle-ms
+   :attempt  attempt
+   :limit    limit
+   :retrying retrying?
+   :emitted  emitted?})
+
 (defn run-end [] {:type :run/end})
 
 (defn run-interrupt

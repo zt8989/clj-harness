@@ -442,3 +442,84 @@
     (testing "nothing, and a throwable with no status, are not refusals"
       (is (false? (llm/context-overflow? nil)))
       (is (false? (llm/context-overflow? (ex-info "maximum context length" {})))))))
+
+;; --------------------------------------------------------------- the idle guard
+
+(defn- stalling-sse-server
+  "A REAL server that writes FIRST, FLUSHES, says nothing for STALL-MS, and then writes
+  SECOND and hangs up -- a vendor that answers and then goes quiet, which is the shape the
+  guard exists for.
+
+  CHUNKED ON PURPOSE (`sendResponseHeaders 200 0`): with a length the JDK would buffer the
+  whole body and hand it over at once, and there would be no silence to guard. Answers
+  [base-url stop]."
+  [first second stall-ms]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/"
+                    (reify HttpHandler
+                      (handle [_ ex]
+                        (let [^java.io.OutputStream body (.getResponseBody ex)]
+                          (.sendResponseHeaders ex 200 0)
+                          (try
+                            (.write body (.getBytes first StandardCharsets/UTF_8))
+                            (.flush body)
+                            (Thread/sleep (long stall-ms))
+                            (.write body (.getBytes second StandardCharsets/UTF_8))
+                            (.flush body)
+                            ;; THE GUARD MAY HAVE HUNG UP ALREADY, and that is the case the
+                            ;; other test is about: writing to a closed connection is the
+                            ;; fixture's expected weather, not a failure to report.
+                            (catch java.io.IOException _ nil)
+                            (finally (try (.close body) (catch Throwable _ nil))))))))
+    (.start server)
+    [(str "http://127.0.0.1:" (.getPort (.getAddress server)) "/v1")
+     (fn [] (.stop server 0))]))
+
+(def ^:private hello-frame
+  "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"one\"}}]}\n")
+
+(def ^:private goodbye-frame
+  (str "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"two\"}}]}\n"
+       "data: [DONE]\n"))
+
+(deftest a-stream-that-goes-quiet-is-cut-off-with-the-guards-own-failure
+  ;; THE READ SIDE OF `.scratch/llm-idle-timeout`. The vendor said one thing and then went
+  ;; silent for 300 ms with a 100 ms deadline, so the call is cut off -- and what comes back
+  ;; is the GUARD's failure rather than the socket's: an `IOException("closed")` would name
+  ;; nothing a caller could act on, and every caller of `stream!` would have to know that
+  ;; the close was ours.
+  (let [[base-url stop] (stalling-sse-server hello-frame goodbye-frame 300)]
+    (try
+      (let [t (try (llm/stream! {:protocol :openai-completions :base-url base-url :model "m"
+                                 :idle-timeout-ms 100}
+                                [{:role "user" :content "hi"}] (fn [_]) "t-idle")
+                     nil
+                     (catch Throwable t t))]
+        (is (some? t) "the call did not come back")
+        (is (llm/idle-timeout? t) "and it came back as the guard's own failure")
+        (is (= 100 (:idle-ms (ex-data t))))
+        (is (str/includes? (ex-message t) "100 ms")))
+      (finally (stop)))))
+
+(deftest the-guard-leaves-an-answering-vendor-alone
+  ;; THE OTHER HALF, and the one that matters in production: the same server, the same
+  ;; 300 ms of silence, and NO deadline -- because a provider map that carries none is not
+  ;; guarded (`harness.kernel.llm/default-idle-timeout-ms`). What is being pinned is that
+  ;; the guard is a deadline between LINES and not a cap on how long a call may take: this
+  ;; stream is slower than the deadline below and still completes.
+  (let [[base-url stop] (stalling-sse-server hello-frame goodbye-frame 300)]
+    (try
+      (let [out (llm/stream! {:protocol :openai-completions :base-url base-url :model "m"}
+                             [{:role "user" :content "hi"}] (fn [_]) "t-slow")]
+        (is (= "onetwo" (:content (:message out)))
+            "both frames arrived -- the silence was waited out, not cut off"))
+      (finally (stop)))))
+
+(deftest a-zero-deadline-is-no-deadline
+  ;; `0` IS A VALUE AND NOT A TYPO (`harness.edge.llm-timeout` says the same about the
+  ;; knob): it turns the guard off, which is what a session with a slow vendor sets. The
+  ;; predicate is asserted directly because the branch is in `idle-guarded-lines`, and the
+  ;; slow server above already proves the reading end of it.
+  (is (false? (llm/idle-timeout? (ex-info "something else" {}))))
+  (is (false? (llm/idle-timeout? nil)))
+  (is (true? (llm/idle-timeout? (ex-info "quiet" {:llm/idle-timeout true :idle-ms 500})))))

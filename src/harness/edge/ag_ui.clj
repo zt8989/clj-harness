@@ -109,6 +109,20 @@
   spelling on this side would be a card that draws nowhere."
   "injected-context")
 
+(def timeout-part-name
+  "The name of the `data` part A MODEL CALL THAT WENT QUIET is carried by, on both ends:
+  the CUSTOM frame a run emits the moment the idle guard cuts a call off, and the card the
+  UI draws for it (`ui/src/lib/llm-timeout.ts`). `harness.kernel.frames/apply-frames`
+  drops it on the floor for the same reason it drops every CUSTOM name it does not know,
+  which is exactly the behaviour this frame wants.
+
+  THE WIRE ONLY, AND THAT IS THE FEATURE: `harness.edge.http/wire-only-frame?` is what
+  keeps this name out of the record. It is spelled once, there, because there are two
+  frame sinks -- the agent route and a subagent's -- and a second spelling would be a
+  second rule. The name is deliberately NOT in `harness.edge.replay/wire-custom-names`
+  either: that list is the CUSTOM names A ROW MAY CARRY, and nothing about this frame ever
+  becomes a row."
+  "llm-timeout")
 (defn- injection-value
   "One injected message -> the value both readers of `injected-part-name` take: what the
   card says (the role it arrived with and its text). Built here rather than at each
@@ -246,6 +260,27 @@
     (-> s (update :n inc)
           (update :frames conj (injected-frame (str (:run-id s) "-ctx" (:n s))
                                                {:role (:role ev) :content (:text ev)})))
+
+    :model/timeout
+    ;; A CUSTOM FRAME THE OTHER WAY ROUND: the injection card above is about what the MODEL
+    ;; was handed, and this is about the CALL -- a vendor that stopped answering, and what
+    ;; the harness is doing about it. Same extension point, same rules, one difference that
+    ;; is the feature: THIS FRAME IS NEVER RECORDED (`harness.edge.http/wire-only-frame?`).
+    ;; The record is what a reload rebuilds a conversation from, and a stall is not part of
+    ;; the conversation -- it is a fact about a call that was in flight, which a person
+    ;; watching wants and a reader of the log has no use for.
+    ;;
+    ;; NO `messageId`, AND ONE WOULD BE THROWN AWAY ANYWAY: the adapter hangs a CUSTOM frame
+    ;; on the message being streamed and drops the frame's own id on the way in (see
+    ;; `injected-frame` above, where the same measurement is written down) -- so an id here
+    ;; would be a field that lies about being used.
+    (update s :frames conj {:type  "CUSTOM"
+                            :name  timeout-part-name
+                            :value {:idleMs   (:idle-ms ev)
+                                    :attempt  (:attempt ev)
+                                    :limit    (:limit ev)
+                                    :retrying (:retrying ev)
+                                    :emitted  (:emitted ev)}})
 
     ;; A `:run/cut-off-result` IS THE SAME FRAME (`harness.kernel.event`), because the
     ;; RECORD does not distinguish an answer that arrived from one written at a stop -- it

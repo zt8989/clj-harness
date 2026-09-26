@@ -103,6 +103,7 @@
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.compaction :as compaction]
+            [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
             [harness.edge.turn :as turn]
@@ -803,6 +804,28 @@
   [frame]
   (contains? reasoning-frames (:type frame)))
 
+(def ^:private wire-only-frames
+  "The CUSTOM frames the WIRE carries and the RECORD does not. SPELLED OUT rather than
+  matched by prefix, for the reason `reasoning-frames` above is: a name nobody meant to add
+  here would otherwise be dropped from the record in silence."
+  #{ag/timeout-part-name})
+
+(defn- wire-only-frame?
+  "Is FRAME one the wire carries and the record never keeps?
+
+  THE IDLE GUARD'S FRAME IS THE WHOLE LIST TODAY, and it is a different animal from the
+  reasoning family above: those leave no line because their text comes back on the run's
+  own `message` row, while this one leaves no line because it is NOT PART OF THE
+  CONVERSATION AT ALL -- nothing a later rebuild, window or replay reader should see.
+  The frame still reaches the client: it is broadcast (`mux-broadcast!`) and kept for the
+  session's fold, where `harness.kernel.frames/apply-frames` drops the name exactly as it
+  drops every CUSTOM name it does not know.
+
+  THE PREDICATE IS SPELLED ONCE because there are two frame sinks -- the agent route and a
+  subagent's -- and a second spelling would be a second rule."
+  [frame]
+  (and (= "CUSTOM" (:type frame)) (contains? wire-only-frames (:name frame))))
+
 (defn- lifecycle-record
   "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
   becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
@@ -861,7 +884,13 @@
 
   IT IS HANDS-OFF ABOUT WHO IS LISTENING. The broadcast writes to whatever connections declared
   this conversation; one that declared it and then went away costs nothing (the write is caught
-  in `mux-send!`)."
+  in `mux-send!`).
+
+  AND ONE FAMILY IS NEITHER RECORDED NOR FOLDED INTO THE CONVERSATION AT EITHER SINK: the
+  idle guard's CUSTOM frame (`wire-only-frame?`). A vendor that went quiet for too long is
+  a fact about a call IN FLIGHT -- the client is told, and the record is not, because a
+  reload that rebuilt a conversation out of it would be carrying a card about something
+  that is not in the conversation at all."
   [thread-id run-id state]
   (fn [frame]
     ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
@@ -878,7 +907,7 @@
     ;; THE FRAME IS NOT DROPPED, ONLY ITS LINE: it still goes to the bus and into the session's
     ;; memory, and the run's own `message` row carries the same text back (`reasoning-frame?` says
     ;; which family, and why the WHOLE family and not just its CONTENT frames).
-    (when-not (reasoning-frame? frame)
+    (when-not (or (reasoning-frame? frame) (wire-only-frame? frame))
       (log! thread-id run-id "event" frame
             (when (contains? terminal (:type frame))
               (fn [offset] (sessions/land! thread-id run-id offset)))))
@@ -1557,6 +1586,13 @@
                                                              :on-pressure (fn [history]
                                                                             (relieve-pressure! thread-id provider history))
                                                              :overflow-retries (compaction/overflow-retries thread-id)
+                                                             ;; THE IDLE GUARD'S TWO KNOBS, read from the same harness.edn
+                                                             ;; and on the same terms: how long a model call may sit silent,
+                                                             ;; and how many times a call that went silent is tried again.
+                                                             ;; `harness.edge.llm-timeout` is the reader and the kernel is
+                                                             ;; handed the answer -- it reads no configuration of its own.
+                                                             :idle-timeout-ms (llm-timeout/idle-timeout-ms thread-id)
+                                                             :idle-timeout-retries (llm-timeout/retries thread-id)
                                                              ;; A JUST-PRODUCED TOOL RESULT THAT IS
                                                              ;; HUGE IS MOVED OUT OF THE CONVERSATION
                                                              ;; (`harness.cap.spill`): the model reads
@@ -2128,7 +2164,12 @@
             (let [events (loop/run-chan provider messages {:thread-id  thread-id
                                                            :resume     []
                                                            :before-llm project/before-llm
-                                                           :tool-signature context/tool-signature})]
+                                                           :tool-signature context/tool-signature
+                                                           ;; A DELEGATION INHERITS THE PARENT'S TIER, so it inherits
+                                                           ;; the parent's idle guard with it -- read on the parent's
+                                                           ;; thread, which is the session harness.edn was composed for.
+                                                           :idle-timeout-ms (llm-timeout/idle-timeout-ms parent-thread-id)
+                                                           :idle-timeout-retries (llm-timeout/retries parent-thread-id)})]
               (loop []
                 (if-let [ev (async/<!! events)]
                   (if (= :run/done (:type ev))
@@ -2163,7 +2204,7 @@
                           ;; THE SAME ONE EXCEPTION AS THE AGENT ROUTE (`reasoning-frame?`): a
                           ;; subagent's reasoning frames are broadcast and kept in memory, and NOT
                           ;; recorded -- the delegation's own `message` rows carry the text back.
-                          (when-not (reasoning-frame? f)
+                          (when-not (or (reasoning-frame? f) (wire-only-frame? f))
                             (log! thread-id run-id "event" f
                                   (when (contains? terminal (:type frame))
                                     (fn [offset] (sessions/land! thread-id run-id offset)))))
@@ -4910,7 +4951,11 @@
                     (log! stem nil kind payload))
         summarize (fn [messages]
                     (let [specs []
-                          p     (assoc provider :tools specs)]
+                          ;; AND THIS SUMMARY IS A MODEL CALL TOO, so it carries the same
+                          ;; idle guard the run path carries -- read off the session whose
+                          ;; conversation is being summarized.
+                          p     (assoc provider :tools specs
+                                       :idle-timeout-ms (llm-timeout/idle-timeout-ms stem))]
                       (put "model/start" (dissoc (ev/model-start p specs) :type))
                       (try
                         (let [{:keys [message telemetry]}

@@ -29,5 +29,12 @@
     "calls_other": "{{count}} 次工具调用",
     "messages_other": "{{count}} 条消息"
   },
-  "injection.name": "注入的上下文"
+  "injection.name": "注入的上下文",
+  "timeout.name": "模型超时",
+  "timeout.idle": "{{ms}}ms 没有数据",
+  "timeout.retry": "重试 {{attempt}}/{{limit}}",
+  "timeout.stopped": "不再重试",
+  "timeout.reason.retrying": "模型已经 {{ms}}ms 没有吐任何数据，服务端按连接断开处理，把这次调用掐掉了。这是第 {{attempt}} 次尝试，最多允许重试 {{limit}} 次。",
+  "timeout.reason.partial": "模型在已经吐出半截内容之后卡了 {{ms}}ms。重试会让这半截答案再说一遍，所以这次不再重试，本 run 到此结束。",
+  "timeout.reason.exhausted": "模型连续 {{attempt}} 次都在 {{ms}}ms 内没有吐任何数据，本会话允许的 {{limit}} 次重试已经用完，本 run 到此结束。"
 }

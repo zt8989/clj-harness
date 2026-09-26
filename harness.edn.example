@@ -5,7 +5,7 @@
 ;; two compose: the project wins for what it says, the user level answers for
 ;; the rest.
 ;;
-;; EXCEPT FOR :editing AND :compaction, which compose KEY BY KEY -- see below. Every
+;; EXCEPT FOR :editing, :compaction AND :llm, which compose KEY BY KEY -- see below. Every
 ;; other top-level key is replaced WHOLE by the project level, so a project that
 ;; mentions :approval decides all of it.
 ;;
@@ -73,6 +73,21 @@
 {:threshold-ratio  0.7
  :retain-ratio     0.16
  :overflow-retries 1}
+
+;; THE IDLE GUARD, and it is deliberately tight. A model call that says nothing for
+;; `:idle-timeout-ms` is treated as a dead connection: the response body is closed, the
+;; call is abandoned, and -- when it had not yet produced a single frame -- tried again,
+;; up to `:idle-timeout-retries` times. `0` for either turns it off (no deadline / no
+;; retry), which is what a session talking to a vendor that thinks for a long time
+;; before its first token wants. The retries are PER CALL and reset on every call, so a
+;; long turn is not spending one budget across its rounds. See
+;; .scratch/llm-idle-timeout/spec.md; the two knobs are read by harness.edge.llm-timeout.
+;;
+;; A timeout is shown in the conversation as a custom frame and is NEVER written to the
+;; record: it is a fact about a call in flight, not part of the conversation.
+:llm
+{:idle-timeout-ms      500
+ :idle-timeout-retries 3}
 
  ;; The project fence. When a session is bound to a project directory, a file
  ;; tool whose path resolves outside the project directory AND the configuration
