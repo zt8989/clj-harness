@@ -1022,7 +1022,9 @@
                       (dissoc payload :point)))})
 
 ;; Defined below with the compaction route; `run-agent!` calls it at the start of every run,
-;; BEFORE it derives the request (ticket 04).
+;; BEFORE it derives the request (ticket 04), and `relieve-pressure!` is the same question asked
+;; again before EVERY model call (ticket 04 of `.scratch/compaction-shape`).
+(declare compact-if-pressured! recover-overflow! relieve-pressure!)
 (declare compact-if-pressured! recover-overflow!)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
@@ -1516,6 +1518,15 @@
                                                              ;; nil (the vendor's refusal then stands).
                                                              :on-overflow (fn [history t]
                                                                             (recover-overflow! thread-id provider history t))
+                                                             ;; THE SAME QUESTION, ASKED BEFORE EVERY CALL INSTEAD OF
+                                                             ;; AFTER THE REFUSAL: is this the request to send? A run
+                                                             ;; that grows between calls (one tool result can be
+                                                             ;; enormous) used to fly blind from its start reading to
+                                                             ;; the vendor's 400 -- measured on a real session: 62% at
+                                                             ;; the run's start, 97% thirteen seconds later, over 100%
+                                                             ;; twelve minutes in (`.scratch/compaction-shape` 04).
+                                                             :on-pressure (fn [history]
+                                                                            (relieve-pressure! thread-id provider history))
                                                              :overflow-retries (compaction/overflow-retries thread-id)
                                                              ;; A JUST-PRODUCED TOOL RESULT THAT IS
                                                              ;; HUGE IS MOVED OUT OF THE CONVERSATION
@@ -4980,6 +4991,46 @@
               after   (sessions/messages stem)]
           (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
             (into system (ag/provider-messages after))))))
+    (catch Throwable _ nil)))
+
+(defn- relieve-pressure!
+  "MID-RUN AUTO COMPACTION (ticket 04 of `.scratch/compaction-shape`): the run-start trigger's
+  question -- is the window about to run out? -- asked before EVERY model call instead of once
+  per run, and answered with a SHORTER model view when it is.
+
+  HISTORY IS THE ARRAY ABOUT TO GO OUT, which is the point: the meter is handed a REQUEST
+  rather than a record it hopes agrees with one (`log-pressure`'s own contract), and this run's
+  own last call is what anchors it -- the freshest number there is.
+
+  NIL IS ALMOST EVERY CALL AND COSTS NO FILE READ: the meter's band is kept in memory and its
+  window is the provider's. The record is read, and the compaction lock taken, only once the
+  threshold is actually crossed -- and nothing is written when it is not (the one
+  `context/pressure` row a run leaves is the line `run-agent!` writes before its first call).
+
+  THE VIEW IS REBUILT FROM THE SESSION rather than spliced into the array it was handed: a
+  provider message carries no id (`harness.edge.ag-ui/absorbed` takes the envelope off), so the
+  messages a compaction shadowed cannot be found in that array. Same shape
+  `recover-overflow!` answers with -- and the loop re-applies its own per-call step to it,
+  because what comes back is the CONVERSATION and not this run's decorations.
+
+  IT NEVER THROWS AND NEVER SHORTENS NOTHING: a failure answers nil, and so does a view the
+  estimator says is not shorter. The run then carries on with the array it had."
+  [stem provider history]
+  (try
+    (let [ratios (compaction/config stem)
+          window (:context-window provider)
+          answer (pressure/log-pressure stem history window)]
+      (when (and (:thresholdTokens answer)
+                 (>= (:pressureTokens answer) (:thresholdTokens answer)))
+        (locking compaction-lock
+          (when-some [f (replay/find-log (home/projects-dir) stem)]
+            (let [records (vec (replay/read-records f))
+                  before  (pressure/estimate-messages history)]
+              (when (run-compaction! stem provider records window ratios nil)
+                (let [system (vec (take-while #(= "system" (:role %)) history))
+                      view   (into system (ag/provider-messages (sessions/messages stem)))]
+                  (when (< (pressure/estimate-messages view) before)
+                    view))))))))
     (catch Throwable _ nil)))
 
 (defn- compact-if-pressured!

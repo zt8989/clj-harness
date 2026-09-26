@@ -492,3 +492,65 @@
                                :overflow-retries 1})]
     (is (= 0 @called) "an unrelated refusal is not the one recovery is for")
     (is (= :run/error (:type (last seen))))))
+
+;; ----------------------------- the question asked BEFORE every call (ticket 04)
+
+(defn- short-view
+  "A seam that answers a two-message view the FIRST time it is asked, and nil after -- a
+  compaction with nothing left to relieve."
+  [asked]
+  (fn [history]
+    (swap! asked conj history)
+    (when (< 2 (count history))
+      [{:role "system" :content "s"}
+       {:role "assistant" :content "SUMMARY"}])))
+
+(deftest a-call-the-pressure-seam-shortened-is-the-one-that-goes-out
+  ;; `:on-overflow` is asked AFTER the vendor refused. `:on-pressure` is the same relief
+  ;; asked BEFORE the request exists -- which is the whole point of it
+  ;; (`.scratch/compaction-shape` ticket 04).
+  (let [asked (atom [])
+        start [{:role "system" :content "s"}
+               {:role "user" :content "u1"}
+               {:role "user" :content "u2"}]
+        {:keys [history]} (drive (fake/scripted [{:content "done"}])
+                                 start
+                                 {:on-pressure (short-view asked)})]
+    (testing "the seam saw the array that was about to go out"
+      (is (= [start] @asked)))
+    (testing "and the run went on with the shorter one -- plus what the call returned"
+      (is (= [{:role "system" :content "s"}
+              {:role "assistant" :content "SUMMARY"}
+              {:role "assistant" :content "done"}]
+             history)))))
+
+(deftest a-pressure-answer-that-is-not-shorter-is-ignored
+  ;; Shorter is the edge's measurement -- only it has a token estimator. The kernel refuses
+  ;; to swap an array for itself (or for a bigger one), which is what an edge that answered
+  ;; about some other array would look like from here.
+  (let [called (atom 0)
+        {:keys [history]} (drive (fake/scripted [{:content "done"}])
+                                 [{:role "user" :content "u1"}]
+                                 {:on-pressure (fn [h] (swap! called inc) h)})]
+    (is (= 1 @called))
+    (is (= [{:role "user" :content "u1"}
+            {:role "assistant" :content "done"}]
+           history))))
+
+(deftest a-pressure-answer-that-would-leave-a-call-unanswered-is-refused
+  ;; A view rebuilt from the record can be a beat behind the turn in flight, and a history
+  ;; whose `tool_calls` have no results is refused by every OpenAI-shaped vendor. The kernel
+  ;; would rather send the big request than one it knows the vendor will reject.
+  (let [provider (fake/scripted [{:content ""
+                                  :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
+                                 {:content "after the tool"}])
+        broken   [{:role "assistant" :content ""
+                   :tool_calls [{:id "c9" :type "function"
+                                 :function {:name "read" :arguments "{}"}}]}]
+        {:keys [history]} (drive provider
+                                 [{:role "user" :content "u1"}]
+                                 {:on-pressure (fn [_h] broken)})]
+    (is (= "after the tool" (:content (last history)))
+        "the run carried on with its own array, tool result and all")
+    (is (some #(= "tool" (:role %)) history)
+        "and the call the broken view would have cut off was answered")))

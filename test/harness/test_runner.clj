@@ -123,6 +123,7 @@
     harness.edge.pressure-test
     harness.edge.compaction-test
     harness.edge.compaction-run-test
+    harness.edge.relieve-pressure-test
     harness.edge.prune-test
     harness.edge.ui-test
     harness.edge.http-test

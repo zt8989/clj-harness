@@ -258,7 +258,8 @@
 
   OPTS carries the overflow recovery through to the call -- `:on-overflow` and the retry
   ceiling -- while the run's own stop switch supplies `:halted?`, so a run a person stopped
-  is not prolonged by a retry that arrives after the press."
+  is not prolonged by a retry that arrives after the press. `:on-pressure` rides the same way
+  and is asked before every call (see `drive!`)."
   [provider history emit thread-id cancel opts]
   (let [ch        (async/chan 1)
         call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))
@@ -267,6 +268,40 @@
       (async/>!! ch (try (model-call! provider history call-emit thread-id opts)
                          (catch Throwable t t))))
     ch))
+
+(defn- relieve-pressure!
+  "Before a call goes out: ask the edge's `:on-pressure` for a SHORTER history, and take it
+  or keep the one we have. True when it was taken, so the caller can re-apply its own
+  pre-LLM step to it.
+
+  SYMMETRIC WITH `:on-overflow`, and for the same reason -- the kernel knows neither what
+  `harness.edge.pressure` measures nor what a compaction does to a record. `:on-overflow` is
+  the relief the VENDOR's refusal triggers; this is the same relief, asked BEFORE the refusal
+  instead of after it (`.scratch/compaction-shape` ticket 04: a run grew from 62% of its
+  window to over 100% in twelve minutes, and nothing looked again until the vendor said no).
+
+  WHAT IT IS HANDED IS THE ARRAY ABOUT TO GO OUT, so an edge that measures it measures a
+  REQUEST rather than a record it hopes agrees with one.
+
+  TWO REFUSALS OF ITS OWN, because a shorter array is a CLAIM and this is where it would be
+  lived with:
+    * UNCHANGED OR LONGER -> nothing is taken. Shorter is the edge's measurement -- only it
+      has a token estimator -- and swapping an array for itself is noise.
+    * A CALL LEFT UNANSWERED -> nothing is taken. A view rebuilt from the record can be a
+      beat behind the turn in flight, and a history whose `tool_calls` have no results is
+      refused by every OpenAI-shaped vendor: a self-inflicted 400 is worse than a big request.
+  AND A METER MUST NEVER KILL A RUN: anything the edge throws is swallowed and the call goes
+  out as it stood."
+  [history on-pressure]
+  (boolean
+   (when on-pressure
+     (when-some [shorter (try (on-pressure @history) (catch Throwable _ nil))]
+       (let [now @history
+             new (vec shorter)]
+         (when (and (not= new now)
+                    (empty? (llm/unanswered-tool-calls new)))
+           (reset! history new)
+           true))))))
 (defn- drive!
   "Run one run, calling EMIT with each harness.kernel.event value as it is produced.
   Returns the final history. The producer side of run-chan; all run behaviour
@@ -302,6 +337,11 @@
   terminal would be a line that lies. Without a switch (an offline replay, a test)
   there is no cancellation path at all and the loop behaves exactly as it did before.
 
+  OPTS may carry :on-pressure -- a question asked BEFORE EVERY MODEL CALL, not only at the
+  run's start: 'is this the request to send, or is there a shorter one?'. It is handed the
+  array about to go out and answers a shorter history or nil (`relieve-pressure!`), which is
+  the same contract as `:on-overflow` -- the relief a vendor's refusal triggers, asked one
+  step EARLIER. Without it nothing is asked and the loop behaves exactly as it did before.
   OPTS may carry :resume, the decisions a human handed back for this thread's
   parked calls; they are replayed at the top of the run, before the first LLM
   call, so the provider sees a complete turn again.
@@ -336,7 +376,8 @@
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow
-                                  overflow-retries on-tool-result tool-signature]
+                                  overflow-retries on-tool-result tool-signature
+                                  on-pressure]
                             :as _opts}]
   (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
@@ -424,6 +465,17 @@
                       ;; A STOP THAT ARRIVED BETWEEN STEPS IS HONOURED HERE, before anything
                       ;; new is asked of a provider.
                       _         (when (stop/rung? cancel) (stopped!))
+                      ;; IS THIS THE REQUEST TO SEND? Asked before EVERY call -- not only at
+                      ;; the run's start -- because a conversation grows BETWEEN calls (one tool
+                      ;; result can be enormous), and the vendor's refusal for length arrives
+                      ;; only after a request was assembled and paid for. What the edge hands
+                      ;; back is the CONVERSATION and not this run's per-call decorations, so the
+                      ;; step is applied to it again; `prepare` derives what is missing (a skill
+                      ;; body, a job's ending) rather than duplicating what is there, and
+                      ;; NOTHING is re-reported: these messages are already in `added` and their
+                      ;; `context/injected` frames have already gone out.
+                      _         (when (relieve-pressure! history on-pressure)
+                                  (swap! history prepare thread-id))
                       ;; THE MODEL CALL IS THE LONG ONE, so it runs on a thread of its own
                       ;; and this waits on BOTH it and the switch: a stop does not have to
                       ;; wait for a vendor that is still talking.
