@@ -80,8 +80,8 @@
 | `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
 | `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那两条行（工程目录 / 这台机器）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这些行要它，也要 `kernel.hooks.dispatch` |
-| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：技能正文 + 作业结束的通知两半，一处组装） |
-| `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（两个来源：`skill` 工具与人的 `/name`）、以及**技能列表**（`/` 弹出的那张表）的数据 |
+| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：人的 `/name` 要的技能正文 + 作业结束的通知两半，一处组装） |
+| `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（只剩人的 `/name` 那一半——模型那条路是 `skill` 工具自己的结果，没有东西可派生）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
 | `cap.mcp` | **外部服务器作为工具来源**：读两级 `mcp.edn`、按（项目身份 × server × 声明形状）缓存连接、两种 transport（stdio 子进程 / HTTP）、把 `tools/list` 桥成工具表里的行、elicitation（服务器反过来问人）与会话级启停。工具是**动态来源**（`:tools-for`），所以它经 `install!` 装上而不是写死在表里 |
@@ -113,7 +113,7 @@
 5. **[providers](architecture/providers.md)** — 厂商与 model、三档解析、api-key 纪律
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的两条行、eval 与晋升
-8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、派生的正文、`skill` 工具、围栏里的技能根
+8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、`skill` 工具（结果即正文）、人的 `/name` 的派生正文、围栏里的技能根
 9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
 10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 

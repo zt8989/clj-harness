@@ -18,8 +18,7 @@
   and a require back would be a cycle Clojure refuses at load. Each caller
   therefore supplies what it already has in hand: the fence has the binding, a
   tool body has its thread-id, a test has neither and passes nil."
-  (:require [clojure.data.json :as json]
-            [clojure.java.io :as io]
+  (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.infra.home :as home]))
 
@@ -279,11 +278,11 @@
                 (concat [(str "## Skills")
                          ""
                          "A skill is a set of instructions for a kind of task. Load one with the `skill`"
-                         " tool when its description matches what you are about to do; its full text then"
-                         " joins this conversation, and it stays available for the rest of the session."
+                         " tool when its description matches what you are about to do; its instructions"
+                         " come back as that call's result, together with the directory they live in."
                          " A PERSON can load one too, by starting a message with `/name ` -- when that"
-                         " happens the message keeps the `/name` as typed and the full text is the"
-                         " message right after it, so it is already in this conversation."]
+                         " happens the message keeps the `/name` as typed and the full text arrives as"
+                         " the message right after it."]
                         (map (fn [{:keys [name description]}] (str "- " name ": " description))
                              usable))))))
 
@@ -365,56 +364,20 @@
     {:missing (str "skill " (pr-str name) " is no longer in any skill root;"
                    " its instructions cannot be read, and it should not be assumed")}))
 
-;; ------------------------------------------------------------------ injection
-
-(def loaded-prefix
-  "The opening of the confirmation the `skill` tool answers with, and therefore
-  also the TEST OF WHETHER A LOAD HAPPENED. One string, two users: the tool
-  writes it and derived-injections looks for it.
-
-  The reason it is shared rather than duplicated is that the second use is a
-  JUDGEMENT ABOUT THE FIRST. A call that was vetoed, disabled, or made with a
-  missing argument never reaches the tool body and so never writes this line --
-  and reconstructing that fact anywhere else would mean re-deriving which of
-  those happened, in a second place, from a log."
-
-  "[skill-loaded]")
-
-(defn loaded-summary
-  "NAME + CHARS -> what the tool answers with. It reads as a statement about the
-  SESSION rather than about the call -- after this the instructions are in the
-  conversation -- because that is what the model needs to know, and because it
-  is what the derivation below then looks for."
-  [name chars]
-  (str loaded-prefix " " name
-       " is now in this conversation and stays available for the rest of the session"
-       " (" chars " chars). Follow it unless a later instruction supersedes it."))
-
-(defn- load-confirmations
-  "A message vector -> the tool results that ARE skill loads, as a
-  {tool-call-id result} map.
-
-  A tool result is a load when its content starts with loaded-prefix. The result
-  carries no tool name of its own -- only the id of the call that produced it --
-  so the name comes from the assistant message's tool_calls; matching those two
-  up is what makes this work on any provider-shaped history."
-  [messages]
-  (let [ids (into #{}
-                  (comp (filter #(= "assistant" (:role %)))
-                        (mapcat :tool_calls)
-                        (filter #(= "skill" (get-in % [:function :name])))
-                        (map :id))
-                  messages)]
-    (into {}
-          (comp (filter #(= "tool" (:role %)))
-                (filter #(contains? ids (:tool_call_id %)))
-                (filter #(str/starts-with? (str (:content %)) loaded-prefix))
-                (map (juxt :tool_call_id :content)))
-          messages)))
+;; ------------------------------------------------------------------ the body
+;;
+;; THE ONE SOURCE LEFT IS A PERSON'S `/name`. The MODEL'S path used to arrive here too
+;; -- the tool answered with a confirmation line and this namespace turned that line
+;; into a body -- and it does not any more: `skill`'s result IS the body, so it
+;; rides the tool call and nothing is derived for it. That also retired the shared
+;; `[skill-loaded]` prefix, which existed only to judge 'did a load really happen'.
+;; See `.scratch/skill-body-in-result`.
 
 (defn- loaded-names
   "The skill names a message vector already carries as injected bodies, in the
-  order they appear. Used for idempotency and for the one-load-per-name rule."
+  order they appear. Used for idempotency and for the one-load-per-name rule --
+  among the bodies this derivation wrote, which is only ever a person's `/name` --
+  a body that arrived as a tool result carries no tag to be found."
   [messages]
   (into []
         (keep (fn [m]
@@ -433,13 +396,18 @@
 
 ;; ------------------------------------------------------------ the slash form
 ;;
-;; THE HUMAN'S WAY IN. A skill is loaded by the model through the `skill` tool,
-;; and by a person by typing "/name ..." in the composer -- and those are the only
-;; two ways. They are not two mechanisms: both are SOURCES for the same
-;; derivation, both end as a `<skill name=..>` user message appended at the end of the
-;; history (see derived-injections), and both obey the same one-load-per-name rule. Keeping them
-;; one derivation is what stops the two paths from drifting apart.
+;; THE HUMAN'S WAY IN. A skill is loaded by the model with the `skill` tool -- whose
+;; RESULT is the body, so nothing about that path is derived -- and by a person by
+;; typing "/name ..." in the composer. A person's message carries no result of its
+;; own, so this is the ONE source left for the derivation below: the ask ends as a
+;; `<skill name=..>` user message appended at the end of the history.
 ;;
+;; A NAME BOTH PATHS ASK FOR ARRIVES TWICE, and that is the decision rather than an
+;; oversight: `loaded-names` recognises a body by the tag this namespace writes, and
+;; a body that came back as a tool result carries no tag to be found. A person typing
+;; `/alpha` after the model already loaded alpha is asking for it again, and inventing
+;; a judgement about which tool results count as loads is exactly the second derivation
+;; the shared `[skill-loaded]` prefix existed to avoid.
 ;; The trigger lives in the conversation rather than in a side record, which is the
 ;; same line the whole design draws: what a person SAID is part of the conversation
 ;; (so the "/name" is still there to be re-read on every turn, and survives a
@@ -461,9 +429,9 @@
   "TEXT -> the skill name TEXT asks to load by slash, or nil when it asks for
   nothing.
 
-  It answers only WHICH NAME was asked for. Everything after that is the
-  derivation the tool path shares, so a second copy of 'how a body gets injected'
-  does not exist.
+  It answers only WHICH NAME was asked for. Everything after that is the same body
+  (and the same missing-body notice) every ask gets, so a second copy of 'how a body
+  gets injected' does not exist.
 
   THE TEXT IS NOT REWRITTEN, and that is a decision rather than an omission: what
   the model reads as this message's own words is what the person typed, slash and
@@ -549,17 +517,23 @@
       (or (:body (body entry)) (:missing (body entry))))))
 
 (defn derived-injections
-  "MESSAGES + ROOTS -> MESSAGES with the skill bodies this conversation has
-  loaded appended AT THE END.
+  "MESSAGES + ROOTS -> MESSAGES with the skill bodies a person's `/name` asked for,
+  appended AT THE END.
+
+  THE MODEL'S PATH IS NOT HERE. `skill` answers with the body itself, so a load by
+  the model is an ordinary tool result the conversation already carries and this
+  derivation has nothing to add -- and because the body IS one of the tool results,
+  the vendor rule below cannot be broken by that path at all. What is left is the
+  person's `/name`: the trigger is a user message, there is no result to carry the
+  body, and this is what puts it beside them.
 
   WHERE A BODY GOES, AND WHY IT MOVED. It used to be spliced directly behind the
-  message that asked for it -- right after the tool result, or right after a person's
-  `/name`. It is now the LAST thing in the history, and that is the same order the
-  rest of a session's injections took: the system prompt, the question, the material
-  for it, and the skill body closest to the end (see `harness.edge.ag_ui/inbound`,
-  which puts the instruction files and the catalog just after the client's messages).
-  A model reads what it asked for beside the question it is answering, which is where
-  a person would put it.
+  message that asked for it. It is now the LAST thing in the history, and that is the
+  same order the rest of a session's injections took: the system prompt, the question,
+  the material for it, and the skill body closest to the end (see
+  `harness.edge.ag_ui/inbound`, which puts the instruction files and the catalog just
+  after the client's messages). A model reads what it asked for beside the question it
+  is answering, which is where a person would put it.
 
   THE VENDOR'S RULE IS WHY IT CANNOT GO ANYWHERE IT LIKES, and appending satisfies it
   by construction: an OpenAI-shaped vendor refuses a request whose assistant message
@@ -579,17 +553,10 @@
     - IDEMPOTENT. Applying this to its own output changes nothing, because the
       body is already in place where it belongs. That is what lets the kernel
       apply it before every LLM call with no bookkeeping at all.
-    - FIRST LOAD WINS, ACROSS SOURCES. A name contributes one body however many
-      times it is asked for, and it does not matter whether the ask was the
-      model's tool call or a person's slash -- they are two ways to ask the same
-      question, not two gets of the same instructions.
-
-  TWO SOURCES, and keeping them here together is the point:
-
-    - a tool result that IS a skill load -- judged by the shared confirmation
-      prefix, never by re-deriving which of veto/disabled/missing-argument
-      happened (see load-confirmations);
-    - a user message opening with `/name` -- the human's path (see slash-request).
+    - ONE LOAD PER NAME, AMONG THE ASKS THIS DERIVATION SEES. A name contributes one
+      body however many times a person asks for it. TWO PATHS ARE TWO ASKS: a name the
+      MODEL already loaded is not recognised here, because its body carries no tag --
+      the note above the slash form is where that call is written down.
 
   A name that can no longer be read plants a one-line notice instead of vanishing,
   and an unknown name gets the same treatment: instructions the model believes it
@@ -601,32 +568,17 @@
   `harness.edge.ag_ui/injected-frame`), not here -- a derivation that talked to a wire
   would be a derivation that could not be tested without one."
   [messages roots]
-  (let [confirmations (load-confirmations messages)
-        name-of       (into {}
-                            (for [m messages
-                                  :when (= "assistant" (:role m))
-                                  tc    (:tool_calls m)
-                                  :when (= "skill" (get-in tc [:function :name]))
-                                  :let  [args (try (json/read-str (str (get-in tc [:function :arguments]))
-                                                                  :key-fn keyword)
-                                                   (catch Throwable _ {}))]
-                                  :when (contains? confirmations (:id tc))]
-                              [(:id tc) (str (:name args))]))]
-    (if (and (empty? confirmations) (not-any? slash-of messages))
-      messages
-      ;; WHAT WAS ASKED FOR, IN ORDER, AND ONLY WHAT IS NOT ALREADY THERE. The walk
-      ;; is over the whole history because the ask can come from either source (a
-      ;; tool result and a person\'s `/name` are two ways to ask the same question),
-      ;; and `loaded-names` is what makes the step idempotent: a body already in the
-      ;; history contributes nothing, however many times it was asked for.
-      (let [present (set (loaded-names messages))
-            asked   (distinct
-                     (keep (fn [m]
-                             (or (get name-of (:tool_call_id m)) (slash-of m)))
-                           messages))
-            missing (remove (conj present nil) asked)]
-        (if (empty? missing)
-          messages
-          (into (vec messages)
-                (map (fn [nm] (skill-message nm (load-text roots nm))))
-                missing))))))
+  (if (not-any? slash-of messages)
+    messages
+    ;; WHAT WAS ASKED FOR, IN ORDER, AND ONLY WHAT IS NOT ALREADY THERE. The walk is
+    ;; over the whole history because the person's ask is in it, and `loaded-names` is
+    ;; what makes the step idempotent: a body already in the history contributes
+    ;; nothing, however many times it was asked for.
+    (let [present (set (loaded-names messages))
+          asked   (distinct (keep slash-of messages))
+          missing (remove (conj present nil) asked)]
+      (if (empty? missing)
+        messages
+        (into (vec messages)
+              (map (fn [nm] (skill-message nm (load-text roots nm))))
+              missing)))))

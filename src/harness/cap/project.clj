@@ -839,9 +839,10 @@
 ;; ---------------------------------------------------------------- the pre-LLM step
 
 (defn before-llm
-  "HISTORY with this session's loaded skill bodies folded back in, for THREAD-ID --
-  the loop's pre-LLM step, as a function the kernel is handed rather than one it
-  requires (see harness.kernel.loop).
+  "HISTORY with the skill bodies a person's `/name` asked for folded back in, for
+  THREAD-ID -- the loop's pre-LLM step, as a function the kernel is handed rather than
+  one it requires (see harness.kernel.loop). A skill the MODEL loaded does not come
+  through here at all: `skill` answers with the body, so it is an ordinary tool result.
 
   IT IS ASSEMBLED HERE because this is where the two halves already meet: the roots
   are this namespace's business (skill-roots), the folding is

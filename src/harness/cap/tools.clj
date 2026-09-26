@@ -433,10 +433,20 @@
                (pr-str v)))))
 
 (defn- t-skill
-  "Load a skill into the conversation. Answers with the confirmation that
-  harness.cap.skills/derived-injections then looks for -- that string is the ONLY
-  record that a load happened, which is why it is shared rather than written
-  twice (see harness.cap.skills/loaded-prefix).
+  "Load a skill: answer with its instructions.
+
+  THE RESULT IS THE SKILL'S OWN TEXT -- the whole SKILL.md, however long -- and then one
+  line naming the directory it lives in, because a skill's instructions routinely say
+  'read references/x.md' and that path is relative to the SKILL, not to the session's
+  project. That directory is also what the project fence already allows; see
+  harness.cap.project.
+
+  IT USED TO ANSWER WITH A CONFIRMATION INSTEAD ('... is now in this conversation') and
+  left the body to harness.cap.skills/derived-injections, which looked for that line in
+  the history and spliced a `<skill name=\"..\">` user message behind it. Three costs
+  retired at once: the client never held the bytes, the screen drew a second card for
+  what was one call, and the tool and the deriver had to share a string to agree on
+  'did a load really happen'. See `.scratch/skill-body-in-result`.
 
   The name never becomes a path: harness.cap.skills/skill-for looks it up among the
   names an actual directory listing produced, so '../../etc/passwd' is refused
@@ -448,7 +458,8 @@
   what harness.cap.skills/frontmatter-keys skipping `disable-model-invocation`
   amounts to -- so the only thing left to differ is how a MISS is reported: a
   refusal here, a notice spliced into the conversation there
-  (harness.cap.skills/load-text).
+  (harness.cap.skills/load-text). A miss is always a refusal and never a result: an
+  instructions-shaped answer that is not instructions is worse than an error.
 
   NOT marked :requires-approval. Reading instructions is not a side effect, and
   everything the body goes on to ask for is gated by its own seam: the fence
@@ -477,8 +488,9 @@
       (let [{:keys [body missing]} (skills/body entry)]
         (if missing
           (throw (ex-info missing {:name name :path (:path entry)}))
-          (str (skills/loaded-summary name (count body))
-               "\n" (:dir entry) " is the skill's directory; read files under it by absolute path."))))))
+          (str body
+               "\n\n"
+               (:dir entry) " is the skill's directory; read files under it by absolute path."))))))
 
 ;; -------------------------------------------------------------- the built-ins
 
@@ -1127,11 +1139,11 @@
 ;; of the request on every call, and a per-session catalog would make it differ
 ;; between sessions for a reason that has nothing to do with the tool's shape.
 (register! "skill"
-  (tool (str "Load a skill -- a set of instructions for a kind of task -- into this conversation. "
+  (tool (str "Load a skill -- a set of instructions for a kind of task. "
              "The skills available to this session are listed in the message tagged <skills> at the "
              "start of the conversation; call this with one of those names when its description "
-             "matches what you are about to do. The full text is added to the conversation and "
-             "stays available for the rest of the session.")
+             "matches what you are about to do. The result is the skill's instructions, followed by "
+             "the directory they live in -- a path any file they name is relative to.")
         {"name" {:type "string" :description "The skill's name, as listed in <skills>."}}
         [:name] t-skill))
 

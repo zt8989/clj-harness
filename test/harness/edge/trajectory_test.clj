@@ -234,19 +234,34 @@
           "three injected blocks -- and the kind says nothing about where they sat")
       (is (= "<skills>a catalog</skills>" (:text (second (filter #(= "context" (:kind %)) (:items turn))))))))
 
-  (testing "a skill body the model asked for mid-run is context too, where it landed"
+  (testing "a skill body a PERSON asked for mid-run is context too, where it landed"
+    ;; THE MODEL'S PATH NO LONGER PRODUCES THIS SHAPE -- the body IS the tool result now
+    ;; (see the case below). A person's `/name` still does: the trigger is a user
+    ;; message they typed and the body is appended beside it.
+    (let [[turn] (turns-of
+                  [(client 0 (user "u1" "/tdd go"))
+                   (system-prompt 10 "S")
+                   finished
+                   (message 20 (user "" "<skill name=\"tdd\">red green refactor</skill>"))
+                   (message 21 (assistant "got it"))])]
+      (is (= ["system" "user" "context" "assistant"] (kinds turn)))
+      (is (str/starts-with? (:text (item-of turn "context")) "<skill name=\"tdd\">")
+          "the body, as the bytes it is")))
+
+  (testing "and a body the MODEL asked for rides the TOOL row -- no context item at all"
     (let [[turn] (turns-of
                   [(client 0 (user "u1" "load it"))
                    (system-prompt 10 "S")
                    finished
                    (message 20 {:role "assistant" :content ""
                                 :tool_calls [(tool-call "c1" "skill" "{\"name\":\"tdd\"}")]})
-                   (message 21 (tool-msg "c1" "loaded"))
-                   (message 22 (user "" "<skill name=\"tdd\">red green refactor</skill>"))
-                   (message 23 (assistant "got it"))])]
-      (is (= ["system" "user" "assistant" "tool" "context" "assistant"] (kinds turn)))
-      (is (str/starts-with? (:text (item-of turn "context")) "<skill name=\"tdd\">")
-          "the body, as the bytes it is"))))
+                   (message 21 (tool-msg "c1" "red green refactor"))
+                   (message 22 (assistant "got it"))])]
+      (is (= ["system" "user" "assistant" "tool" "assistant"] (kinds turn)))
+      (is (not-any? #(= "context" (:kind %)) (:items turn))
+          "nothing was spliced for it, so there is no context row to draw")
+      (is (str/includes? (str (:result (item-of turn "tool"))) "red green refactor")
+          "the body IS the result -- the row a reader already opens for a call"))))
 
 (deftest a-job-ending-is-injected-context-too
   ;; THE OTHER SHAPE A TAIL USER MESSAGE COMES IN. A skill body is one; the ending of a
