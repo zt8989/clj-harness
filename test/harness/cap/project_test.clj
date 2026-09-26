@@ -876,3 +876,30 @@
       (is (= [["把侧边栏的标题改成会话标题"]]
              (foreign-rows (str "SELECT title FROM sessions WHERE id = '" id "'"))))
       (is (some? (first (foreign-rows (str "SELECT last_sent_at FROM sessions WHERE id = '" id "'"))))))))
+
+(deftest the-startup-cleanup-clears-every-running-row
+  ;; `clear-startup-run-state!` -- the half of the run-state contract that closes the
+  ;; crash gap. A process killed mid-run never reaches `run-finished!`, so its column
+  ;; says `running` forever; the process that comes back starts with NO runs of its
+  ;; own, so every `running` it finds was left by someone gone, and the honest state
+  ;; at startup is that nothing is running. Called once by `harness.edge.http/start!`.
+  ;;
+  ;; The readback is through `run-states`, the listing's own read, so the test asks
+  ;; the question the sidebar asks rather than trusting a writer's echo.
+  (let [running "killed-mid-run"
+        idle    "finished-normally"
+        never   "never-ran"]
+    (project/register-session! running)
+    (project/register-session! idle)
+    (project/register-session! never)
+    (project/set-run-state! running "running")
+    (project/set-run-state! idle "idle")
+    (testing "the store carries the states as they were written"
+      (is (= "running" (get (project/run-states) running)))
+      (is (= "idle"    (get (project/run-states) idle)))
+      (is (= "idle"    (get (project/run-states) never)) "NULL reads as idle"))
+    (project/clear-startup-run-state!)
+    (testing "and startup clears exactly the running ones"
+      (is (= "idle" (get (project/run-states) running)))
+      (is (= "idle" (get (project/run-states) idle)) "an idle row is not rewritten")
+      (is (= "idle" (get (project/run-states) never))))))

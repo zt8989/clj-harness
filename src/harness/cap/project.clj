@@ -355,9 +355,10 @@
 
 (def ^:private session-columns
   "The columns a session reader asks for, so two queries over one table cannot drift
-  into handing out two shapes."
-  "id, project_id, path, archived, created_at, title, last_sent_at, parent_id, subagent")
-
+  into handing out two shapes. `run_state` is the LAST KNOWN run state (NULL reads
+  as idle -- see the migration `sessions-remember-their-run-state` in
+  harness.infra.db), and it is the column the sidebar's `running` reads."
+  "id, project_id, path, archived, created_at, title, last_sent_at, parent_id, subagent, run_state")
 (defn sessions
   "Every session this home knows: {:id :project-id :path :archived? :created-at
   :parent-id :subagent}, oldest first.
@@ -415,6 +416,70 @@
         (db/select (str "SELECT " session-columns " FROM sessions"
                         " WHERE project_id IS NULL AND last_project_path IS NULL"
                         " ORDER BY created_at, id"))))
+
+;; ------------------------------------------------------------- the run state
+;;
+;; THE COLUMN'S TWO WRITERS AND ONE READER live beside the entity, like every
+;; other query over `sessions`. The writers are called from the run edge's
+;; register/unregister pair, so the store's word moves with the registry's -- see
+;; harness.edge.sessions, whose adapter wires the two together. The reader is the
+;; listing's.
+
+(defn- run-state
+  "A row's run_state column as a WORD: `running` or `idle`, with NULL (a session
+  that has never run, or any row the column predates) read as `idle` rather than
+  as a third thing. ONE conversion, in one place, for every reader -- the same
+  discipline `as-session`'s archived 0/1 conversion argues for."
+  [row]
+  (or (:run-state row) "idle"))
+
+(defn run-states
+  "THREAD-ID -> run_state, for each id the store knows -- ids it has never heard
+  of are absent. THE LISTING'S BULK READ: one SELECT answers the column for every
+  row, so the sidebar draws it from the same snapshot as everything else.
+  Per-session asks go through `set-run-state!`'s callers instead; this is the one
+  read the listing makes."
+  []
+  (reduce (fn [m row]
+            (assoc m (str (:id row)) (run-state row)))
+          {}
+          (db/select "SELECT id, run_state FROM sessions")))
+
+(defn set-run-state!
+  "Record that THREAD-ID's LAST KNOWN run state is now STATE (`running` or `idle`),
+  and answer nothing -- a state write is not a question. A session this home has
+  never heard of is left alone rather than created: the row is made by the session
+  registration (`register-session!` / `bind!`), and a run-state write never
+  certifies that a conversation exists (that is the same line `archive!` refuses
+  to cross in the other direction -- it refuses, rather than creating, because an
+  archive is a command; a state note is an observation, so it is simply dropped)."
+  [thread-id state]
+  (db/with-transaction
+    (fn [^Connection c]
+      (db/execute! c "UPDATE sessions SET run_state = ? WHERE id = ?"
+                   (str state) (str thread-id))))
+  nil)
+
+(defn clear-startup-run-state!
+  "Set every `running` row back to `idle` -- THE STARTUP CLEANUP, called once when
+  a process begins serving, before it can start any run of its own.
+
+  WHY THIS EXISTS AND WHERE IT DRAWS THE LINE: `run_state` is last known, and the
+  last process to write it may have died mid-run -- a kill -9 never reaches
+  `run-finished!`, so the column can carry a `running` nothing will ever take
+  back. This process is the authority on ITS runs, and it starts with none: every
+  `running` it finds was left by someone else (a dead process, or one still
+  serving another home's copy of this store -- which the store open refuses
+  anyway). Clearing here is therefore not a guess, it is the same honesty the
+  migration states: the column says what the store was last TOLD, and at startup
+  the truth is that nothing is running in this process yet. A process that is
+  STILL ALIVE and serving this same store is refused at the open by the claims
+  table's own machinery (harness.cap.claims) -- so no live writer's word is
+  wiped."
+  []
+  (db/with-transaction
+    (fn [^Connection c]
+      (db/execute! c "UPDATE sessions SET run_state = 'idle' WHERE run_state = 'running'"))))
 
 (defn remember-send!
   "THE PERSON PRESSED SEND in THREAD-ID's conversation: stamp the time, and let

@@ -13,6 +13,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [harness.cap.project :as project]
             [harness.infra.db :as db]
             [harness.cap.providers :as providers]
             [harness.infra.home :as home]
@@ -953,7 +954,14 @@
                ;; same as any other session's (see harness.cap.project/begin-subagent!
                ;; and .scratch/subagents issue 03).
                "sessions"           #{"id" "project_id" "path" "archived" "created_at"
-                                      "last_project_path" "title" "last_sent_at" "parent_id" "subagent"}
+                                      "last_project_path" "title" "last_sent_at" "parent_id" "subagent"
+                                      ;; `run_state` is the LAST KNOWN run state, rewritten in
+                                      ;; place on every run start/end -- never appended, no
+                                      ;; history (the jsonl's own `run/start` and terminal
+                                      ;; lines are the story). It is what the sidebar's
+                                      ;; `running` reads across a restart; see
+                                      ;; harness.infra.db/sessions-remember-their-run-state.
+                                      "run_state"}
                ;; The anchor store (harness.cap.hashline.store).
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
                                       "anchors" "line_checksums" "served" "updated_at"}
@@ -1082,3 +1090,30 @@
           (is (= (inc before) (count (db/recoveries)))
               (str "one store was lost, so one fact -- not one per thread: "
                    (pr-str (drop before (db/recoveries))))))))))
+
+(deftest a-store-written-before-run-states-has-none
+  ;; `sessions-remember-their-run-state`, and the contract the migration's own
+  ;; docstring argues: THE COLUMN ARRIVES EMPTY. There is no backfill and cannot be
+  ;; -- a store that predates the column says nothing about any run, and guessing
+  ;; 'a log without a terminal frame means running' would revive every process that
+  ;; ever died mid-flight as a live run. NULL is the honest answer, and the readers
+  ;; (`harness.cap.project/run-states`) read it as `idle`, never as a third thing.
+  (let [dir   (fresh-root)
+        older (chain-up-to "sessions-remember-their-run-state")
+        id    "ran-before-run-states"]
+    (with-root
+      dir
+      (fn []
+        (is (= (count older) (db/migrate! older)) "a store one step behind")
+        (with-open [c (raw-connection (home/db-file))]
+          (with-open [st (.createStatement c)]
+            (.execute st (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                                 VALUES ('" id "', NULL, NULL, 0, 1)"))))
+        (is (= (db/target-version) (db/migrate!)) "today's harness walks it up")
+        (testing "the column is there"
+          (is (some #(= "run_state" (:name %))
+                    (db/select "PRAGMA table_info(sessions)"))))
+        (testing "and the session that predates it carries no state rather than a guess"
+          (is (nil? (:run_state (first (db/select "SELECT run_state FROM sessions WHERE id = ?" id)))))
+          (testing "and the readers read that NULL as idle, not as a third thing"
+            (is (= {"ran-before-run-states" "idle"} (project/run-states)))))))))

@@ -6918,3 +6918,42 @@
                         (get-in (replay/payload (last sys-rows)) [:content]))
                   "message[0] IS the new text instead")
               (is (= "replace" (:instruction-updates (last sys-rows)))))))))))
+
+(deftest the-run-state-column-moves-with-the-registry-and-the-restart-clears-it
+  ;; Ticket 01 of `.scratch/sidebar-ws-and-run-state`, end to end through the row the
+  ;; sidebar reads: the store's `run_state` column is written at the same two moments
+  ;; the registry moves (`register-run!` / terminal), so the LISTING says running and
+  ;; stops saying it -- and a RESTARTED process clears whatever `running` a dead
+  ;; process left behind, because no run is alive in a process that has not started
+  ;; one. The first half uses the held-open window (a run is asserted alive, not
+  ;; raced); the second half seeds the column directly and calls the startup cleanup
+  ;; the server's own `start!` calls.
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-runstate"
+   (fn []
+     (bind! "alive-runstate" alive-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "alive-runstate")]
+       (try
+         (testing "while the run is going, the store's column says so"
+           (is (until #(row-running? alive-dir "alive-runstate") 5000))
+           (is (= "running"
+                  (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                "alive-runstate"))))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and the terminal frame takes it back to idle"
+       (is (until #(false? (row-running? alive-dir "alive-runstate")) 5000))
+       (is (= "idle"
+              (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                            "alive-runstate"))))))
+     (testing "a crash mid-run leaves the word standing -- until the next startup"
+       (project/set-run-state! "alive-runstate" "running")
+       (is (= "running" (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                      "alive-runstate")))))
+       ;; THE SERVER'S OWN STARTUP STEP, exactly as `start!` calls it: the process that
+       ;; comes back starts with no runs of its own, so every `running` was left by a
+       ;; process that is gone.
+       (sessions/clear-startup-run-state!)
+       (is (= "idle" (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                   "alive-runstate")))))))))

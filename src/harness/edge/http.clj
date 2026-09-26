@@ -2863,12 +2863,20 @@
   A refresh of the sidebar is now one SELECT and one registry lookup instead of forty
   stat calls, which is what the panel's own frame rate was paying for.
 
-  `:running` IS THE ONE FIELD NOT IN THE STORE, and it is not an oversight: whether a
-  run is alive right now is a question about THIS PROCESS, and a file cannot answer it
-  -- a log that stops without a terminal frame belongs equally to a run still going and
-  to a process that was killed. It is asked of the run set the server keeps with the
-  session (`harness.edge.sessions`' `running?`, ADR 0002's authority) rather than of
-  disk, and read per request because the answer moves.
+  `:running` IS A STORE FACT NOW, and the rule it rode in on is the owner's own
+  sentence, completed: everything the left panel shows comes from the store -- full
+  stop. `sessions.run_state` is the LAST KNOWN run state, written by the same two
+  verbs that move the in-process registry (`harness.edge.sessions/run-started!` /
+  `run-finished!`), so inside this process the column and the registry move
+  together; across a restart the column is what SURVIVES, and the registry is gone.
+  The startup cleanup (`harness.cap.project/clear-startup-run-state!`) turns a
+  `running` the previous process died holding back into `idle`, so the honest
+  reading of a fresh process's listing is exactly what happened here -- nothing is
+  running in it yet. Within one process the two sources stay consistent because
+  they are written at the same two moments; there is deliberately no third thing
+  that ORs a live registry against a stale column (see ticket 01 of
+  `.scratch/sidebar-ws-and-run-state` for why a column that only ever says 'last
+  known' beats two answers that can disagree).
 
   A TASK AND A PROJECT'S SESSION ARE THE SAME ROW, which is why there is no
   `task-row` any more: the two differed only in where their disk facts were asked
@@ -2879,10 +2887,10 @@
   nil `:lastSentAt` is a conversation nothing has been sent to -- registered and never
   used, or a log deleted by hand. The client draws that in words rather than
   inventing a time."
-  [{:keys [id archived? title last-sent-at]}]
+  [{:keys [id archived? title last-sent-at run-state]}]
   {:threadId     id
    :archived     (boolean archived?)
-   :running      (running? id)
+   :running      (= "running" run-state)
    :lastSentAt   last-sent-at
    ;; THE NAME, from the store, nil for a session that has not been named yet (it
    ;; never ran, or it ran before the column existed and has not run since).
@@ -5654,9 +5662,15 @@
     (sessions/watch-unflushed! record/pending?)
     ;; AND THE SWEEPER, because the table holds conversations now: without it, every
     ;; session this process has ever been asked about would be held until it exits.
+    ;; AND THE SWEEPER, because the table holds conversations now: without it, every
+    ;; session this process has ever been asked about would be held until it exits.
     (sessions/start!)
+    ;; AND THE RUN STATE'S STARTUP CLEANUP, once, after the sweeper and before the
+    ;; socket opens: no run of any session is alive in a process that has not started
+    ;; one yet, so every `running` the column carries was left by a process that is
+    ;; gone. The kernel's registry starts empty; the store now agrees with it.
+    (sessions/clear-startup-run-state!)
     ;; THE SESSION'S OUTSIDE FACTS ARE INSTALLED HERE, not at some namespace's load: what a
-    ;; record is and what a provider may be handed are the adapter's (`harness.edge.sessions`),
     ;; and the meter's band is a consumer's fold and step (`harness.edge.pressure`). A process
     ;; that never starts a server registers neither.
     (sessions/install!)
