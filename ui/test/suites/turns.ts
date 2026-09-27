@@ -20,9 +20,20 @@ import {
   turnConclusion,
   turnCounts,
   turnIsSettled,
+  turnStepsFrom,
   turnSummaryLabel,
   type TurnMessage,
 } from "../../src/lib/turns";
+import { forgetTurnNumbers, noteTurnEnd, serverTurnNumbers } from "../../src/lib/turn-numbers";
+import type { FactFrame } from "../../src/lib/mux";
+
+/// A fact frame with the two fields `lib/turn-numbers.ts` reads, BUILT rather than cast: its
+/// `type` is the union from `lib/mux.ts`, so renaming a frame there is a compile error here.
+function endFact(type: FactFrame["type"], numbers?: unknown, turnId?: string): FactFrame {
+  return turnId === undefined
+    ? { threadId: "t-numbers", seq: 1, type, numbers }
+    : { threadId: "t-numbers", seq: 1, type, turnId, numbers };
+}
 
 /// The two languages the summary line is written in, bound to the REAL catalogs
 /// (`test/support/locale.ts` builds them from `lib/catalogs.ts`, which the suite
@@ -207,6 +218,45 @@ const cases: Case[] = [
       // but returning a neighbour's answer from an index that is not an assistant
       // message would be the same silent lie `turnBounds` refuses.
       expect(turnConclusion(THREAD, 0, 0)).toBeUndefined();
+    },
+  },
+  {
+    name: "one-owner-per-turn-the-servers-number-only-for-the-turn-it-closed",
+    run: async () => {
+      // THE CHOICE ADR 0006 DECISION 5 ASKS FOR, as a value: when a turn folds there is ONE
+      // owner, and which one it is depends on the turn -- not on which reading is trusted.
+      expect(turnStepsFrom(3, 1, true), "the turn the server just closed: its number wins").toBe(1);
+      expect(turnStepsFrom(3, 1, false), "an older turn: the read side").toBe(3);
+      expect(turnStepsFrom(3, undefined, true), "nothing heard (a page that opened later)").toBe(3);
+      // A ZERO FROM THE SERVER IS A NUMBER, not 'nothing heard': a turn that closed with no steps
+      // at all is still an answer, which is why the check is `undefined` and not falsy.
+      expect(turnStepsFrom(2, 0, true)).toBe(0);
+    },
+  },
+  {
+    name: "the-turn-numbers-store-keeps-the-last-end-and-nothing-else",
+    run: async () => {
+      // THE STORE THE FOLD LINE READS (`.scratch/step-events`): one `turn/end` per conversation,
+      // and everything else in the family leaves it standing.
+      forgetTurnNumbers("t-numbers");
+      expect(serverTurnNumbers("t-numbers"), "nothing heard yet").toBeUndefined();
+      noteTurnEnd("t-numbers", endFact("turn/end", { steps: 1, messages: 2 }, "t-numbers-t9"));
+      expect(serverTurnNumbers("t-numbers")).toEqual({ turnId: "t-numbers-t9", steps: 1, messages: 2 });
+
+      // A SECOND CONVERSATION IS A SECOND ANSWER: one page holds more than one thread at a time.
+      expect(serverTurnNumbers("t-other")).toBeUndefined();
+
+      // THE REST OF THE FAMILY IS NOT AN ANSWER: a start opens a turn and knows no count.
+      noteTurnEnd("t-numbers", endFact("turn/start", undefined));
+      expect(serverTurnNumbers("t-numbers")?.steps, "a start does not overwrite the last end").toBe(1);
+
+      // AND A PAYLOAD WITHOUT A COUNT IS NOT ONE EITHER -- the sender would rather say nothing than
+      // have this side invent a number, and a frame is allowed to carry no `numbers` at all.
+      noteTurnEnd("t-numbers", endFact("turn/end", { messages: 2 }));
+      expect(serverTurnNumbers("t-numbers")?.steps).toBe(1);
+
+      forgetTurnNumbers("t-numbers");
+      expect(serverTurnNumbers("t-numbers"), "and forgetting is forgetting").toBeUndefined();
     },
   },
 ];

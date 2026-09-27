@@ -172,3 +172,42 @@ turn/end        {turnId, steps, messages, conclusionId, seqFrom, seqTo}   ← �
 - **记录每步多两行**：一次没有工具的请求现在是四行（`step/start` + `model/*` + `step/end`）。
   内存里那圈事实随之涨：一步四帧起，`fact-buffer-size`（1024 帧）仍够——一次断线缺口是秒级的，
   而 1024 帧约等于十六个三十步的轮（`mux_test` 那条新用例把这个算式的结论写在自己的注释里）。
+
+## 补：票 05 那条没做到的验收（2026-09-27 晚）
+
+**红两次，红出两个真缺口，都修了。**
+
+### 落下的两半
+
+- **共享用例表**：`ui/test/suites/turn.ts` 的 `the-read-side-and-the-server-count-the-same-steps` ——
+  一条真 run，**同一个轮数两遍**（服务端 `turn/end` 的 `steps`，与读侧 `turnCounts`），两边必须相等。
+  读法落在折叠**真正看到的那个形状**上：原始 AG-UI 里工具结果是**独立一条** `role: "tool"`
+  （这次实测到 `[user, reasoning, assistant, tool, assistant]`），它会把 `turnBounds` 的助手消息连续段
+  切断；页面自己的视图不带这条（结果是助手消息里的一个 part —— 走查里这一轮正是「2 步」，来自
+  同一份读侧）。
+- **客户端开始吃服务端那对数**：新增 `ui/src/lib/turn-numbers.ts`（每场会话留最后一个 `turn/end` 的
+  `steps` / `messages`，可订阅），`app.tsx` 在它那条事实订阅里记下；折叠那一行按 `lib/turns.ts` 的
+  `turnStepsFrom` **只认一个主人**——服务端拥有它刚关掉的那一轮（最新那轮），别的轮归读侧
+  （事实不重放，读侧是唯一能回答「你没看着的过去」的那个）。
+
+### 红出来的两个真缺口
+
+1. **`subscribeFacts` 从不声明这场会话。** `lib/mux.ts` 的 `wantedThreads()` 只算窗口与 run，
+   于是「只要事实」的页面在服务器那边等于没订过——事实根本不会推来。现在它也算一条认领
+   （并且在订阅时就把声明发出去）。
+2. **run 一收尾就把整条声明撤了。** agent 的流一结束就退订 run，而 `turn/end` 是**后一个内核事件**
+   才推的（同一个 `:run/done` 的先后）；只靠 run 认领的页面——**刚新建的会话就是这样**——
+   永远收不到收轮的那条事实。三处收尾现在都问一句 `stillWanted`：窗口 / run / 事实是三条
+   各自独立的认领，撤自己那条不能把别人的带走。
+
+**这个 bug 只有真跑才看得见**：单元套件里的 `declaredSet()` 断言、`mux` 的路由用例都不会注意到
+「服务器没在给你发」这件事。
+
+### 判据
+
+- `npm test`：**170/170**（新增三条：纯规则、store、以及上面那条真 run 的共享用例表）
+- `npm run typecheck` 通过
+- **真浏览器复走一遍**（`node scripts/dev.mjs --scripted`）：折起来仍是「2 步」，展开两步的行都在，
+  控制台只有既有那两条 404（`favicon.ico` 与新建会话的 `/stats`）——**这一格是这次改动唯一会被渲染到的
+  地方**（`turn-steps.tsx` 的新钩子没有单元套件能渲染它）
+- 后端一个字节没动，这一轮没有重跑后端套件

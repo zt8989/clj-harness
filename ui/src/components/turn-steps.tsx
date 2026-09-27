@@ -25,16 +25,19 @@
 // of looking at the conversation in front of you rather than a preference about
 // conversations, which is the same line `app.tsx` takes for the
 // conversation/trajectory switch.
-import { type FC, useSyncExternalStore } from "react";
+import { type FC, useContext, useSyncExternalStore } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { useAuiState, type AssistantState } from "@assistant-ui/react";
 import { useTranslation } from "react-i18next";
 
+import { ThreadIdContext } from "@/components/composer-chrome";
+import { serverTurnNumbers, subscribeTurnNumbers } from "@/lib/turn-numbers";
 import {
   turnBounds,
   turnConclusion,
   turnCounts,
   turnIsSettled,
+  turnStepsFrom,
   turnSummaryLabel,
 } from "@/lib/turns";
 import { cn } from "@/lib/utils";
@@ -103,9 +106,30 @@ const isFoldableOf = (s: AssistantState): boolean => {
 ///
 /// A `hook-safe` selector because it is read through `useAuiState`: it walks the thread's
 /// messages, and it answers the same thing every time for the same state.
-const turnStepsOf = (s: AssistantState): number => {
+const turnStepsFromRead = (s: AssistantState): number => {
   const { first, last } = turnBounds(s.thread.messages, s.message.index);
   return turnCounts(s.thread.messages, first, last).steps;
+};
+
+/// IS THIS TURN THE CONVERSATION'S LAST ONE? -- the question `lib/turns.ts`'s `turnStepsFrom`
+/// turns on. The last turn's own end IS the last `turn/end` a page heard (turns close in
+/// order), so for that one -- and only that one -- the server's number is about the turn this
+/// line is drawing.
+const isNewestTurnOf = (s: AssistantState): boolean => {
+  const { last } = turnBounds(s.thread.messages, s.message.index);
+  return last === s.thread.messages.length - 1;
+};
+
+/// THE STEPS THIS TURN TOOK, as the line prints them: ONE of the two readings, never both.
+/// The read side is what a page that opened later has; the server's number, which arrives with
+/// `turn/end`, is what a page that WATCHED the turn close has (and is the right one when the two
+/// part -- `lib/turn-numbers.ts` says where).
+const useTurnSteps = (): number => {
+  const threadId = useContext(ThreadIdContext);
+  const fromRead = useAuiState(turnStepsFromRead);
+  const newest = useAuiState(isNewestTurnOf);
+  const heard = useSyncExternalStore(subscribeTurnNumbers, () => serverTurnNumbers(threadId));
+  return turnStepsFrom(fromRead, heard?.steps, newest);
 };
 
 // ------------------------------------------------------------------ the hooks
@@ -184,7 +208,7 @@ export function useFoldedAnswer(): boolean {
 export const TurnStepsTrigger: FC = () => {
   const key = useAuiState(turnKeyOf);
   const folded = useTurnFolded();
-  const steps = useAuiState(turnStepsOf);
+  const steps = useTurnSteps();
   // The line's own words live in the `thread` face; `lib/turns.ts` takes the
   // translator rather than holding one, so this row is the one place that binds it
   // to the language the page is speaking.

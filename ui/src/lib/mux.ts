@@ -58,6 +58,9 @@ export type FactFrame = {
   type: "turn/start" | "turn/end" | "model/start" | "model/end" | "step/start" | "step/end";
   payload?: unknown;
   numbers?: unknown;
+  /// THE TURN'S OWN NAME (`<thread>-t<line>`), on the frame that closes one. It is the record line
+  /// the turn opened on, so nothing has to be kept for it to be stable (`harness.edge.http`).
+  turnId?: string;
 };
 
 /// THE FACT FAMILY'S TYPES, NAMED IN ONE PLACE. `harness.edge.http` writes these names and this
@@ -220,11 +223,38 @@ let reconnect: ReturnType<typeof setTimeout> | null = null;
 /// Whether the page WANTS a downlink at all. A page with nothing to follow keeps none.
 let wanted = false;
 
-/// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows OR a run it
-/// drives. The server filters run frames by this same set, so a run's thread has to be in it
-/// even when the page holds no window for it (a session this page just minted).
+/// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows, a run it
+/// drives, OR ONE WHOSE FACTS IT WANTS. The server filters EVERY family by this set, so a
+/// thread has to be in it however this page came to hold it.
+///
+/// THE FACTS BELONG HERE, and their absence used to be a hole with a real edge: a page whose
+/// only claim on a conversation was the run it had just driven stopped being told about that
+/// conversation the moment the agent dropped its run subscription -- which is ONE KERNEL EVENT
+/// BEFORE the `turn/end` that closes the turn (`.scratch/step-events`). A host holding a window
+/// never noticed, because its window kept the thread declared; a freshly minted session has no
+/// window yet, so its `turn/end` was simply missed.
 function wantedThreads(): string[] {
-  return [...new Set<string>([...subscriptions.keys(), ...runSubscriptions.keys()])];
+  return [
+    ...new Set<string>([
+      ...subscriptions.keys(),
+      ...runSubscriptions.keys(),
+      ...factSubscriptions.keys(),
+    ]),
+  ];
+}
+
+/// IS ANYBODY STILL CLAIMING THIS CONVERSATION? -- the question every door's close has to ask
+/// before it tells the server to stop sending. Window, run and facts are THREE SEPARATE CLAIMS on
+/// one conversation, and a door that drops only its own must not take the others' with it.
+///
+/// THE RUN'S OWN DOOR IS THE ONE THAT MADE THIS NECESSARY: the agent lets go of a run the moment
+/// its stream ends, and `turn/end` is pushed ONE KERNEL EVENT LATER -- so a page whose only other
+/// claim was its fact subscription lost the fact that closes the turn it had just watched
+/// (`.scratch/step-events`).
+function stillWanted(threadId: string): boolean {
+  return (
+    subscriptions.has(threadId) || runSubscriptions.has(threadId) || factSubscriptions.has(threadId)
+  );
 }
 
 /// THE SET, as the handshake URL and every re-declare spell it. A thread with no window
@@ -354,7 +384,7 @@ export function subscribeMux(
     // the closer that still owns the entry may remove it.
     if (subscriptions.get(threadId)?.handlers !== handlers) return;
     subscriptions.delete(threadId);
-    if (!runSubscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
+    if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     // THE SOCKET STAYS OPEN with nothing subscribed. One idle connection per page is the
     // budget this module exists to keep; closing and reopening it on every switch would be
     // the churn the single socket is meant to remove.
@@ -386,7 +416,7 @@ export function subscribeRun(
       const current = runSubscriptions.get(threadId);
       if (current === undefined || !current.delete(onEvent)) return;
       if (current.size === 0) runSubscriptions.delete(threadId);
-      if (!subscriptions.has(threadId)) void declare({ unsubscribe: [threadId] });
+      if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },
     declared,
   };
@@ -407,11 +437,18 @@ export function subscribeFacts(
   set.add(onFact);
   factSubscriptions.set(threadId, set);
   ensure();
+  // AND THE SERVER IS TOLD, like the other two doors: what it sends this connection is filtered
+  // by what the connection declared, so wanting a conversation's facts is a claim on the
+  // conversation (`wantedThreads` says why that matters).
+  void declareThread(threadId);
   return {
     unsubscribe: () => {
       const current = factSubscriptions.get(threadId);
       if (current === undefined || !current.delete(onFact)) return;
       if (current.size === 0) factSubscriptions.delete(threadId);
+      // AND THE DECLARATION GOES WHEN THE LAST CLAIM DOES: window, run and facts are three
+      // claims on one conversation, and dropping this one must not take the other two's.
+      if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },
   };
 }

@@ -476,7 +476,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// ...166 -> 167: the `frames` suite's case for the FACT FAMILY'S TWO LISTS -- one real run's
 /// socket, read for every frame NAME the server used, so a name it writes and the client does
 /// not know is a red suite here rather than a run that dies in the browser.
-const EXPECTED_CASES = 167;
+///
+/// ...167 -> 170: the two readings of a turn's step count get their own cases (`.scratch/step-events`
+/// 第 1 条) -- the server's number only for the turn it closed, the read side everywhere else, and a
+/// live run where the two are compared to each other.
+const EXPECTED_CASES = 170;
 
 let total = 0;
 for (const suite of SUITES) {

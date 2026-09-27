@@ -119,6 +119,24 @@ export function turnCounts(
   return { steps };
 }
 
+/// WHICH OF THE TWO READINGS THE SUMMARY LINE PRINTS (`.scratch/step-events`, and ADR 0006
+/// decision 5: 'when a turn folds there is ONE owner, never two').
+///
+/// THE SERVER OWNS THE TURN IT JUST CLOSED, and only that one. `turn/end` arrives when the turn
+/// is over and turns close in order, so the last one a page heard about is the last turn in its
+/// view -- that is `isNewest`. Every OTHER turn belongs to the read side: an older one, and any
+/// turn at all on a page that opened after it closed (facts are not replayed), which is the only
+/// reading that can answer for a past this page did not watch. The two agree everywhere except a
+/// request the vendor made us send twice, where the record is right -- `suites/turn.ts` measures
+/// that they agree on a real run.
+export function turnStepsFrom(
+  fromRead: number,
+  fromServer: number | undefined,
+  isNewest: boolean,
+): number {
+  return isNewest && fromServer !== undefined ? fromServer : fromRead;
+}
+
 /// The translator `turnSummaryLabel` takes, PINNED TO THE FACE THAT DRAWS IT.
 ///
 /// i18next's `TFunction` is branded with the namespace it was bound to, so a bare

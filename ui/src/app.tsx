@@ -82,6 +82,7 @@ import { SessionRunContext } from "@/components/session-run-state";
 // server says is open, as a value this host holds and the message footer reads -- see
 // `lib/live-turn.ts` for why the run's word cannot answer that question.
 import { SessionTurnContext } from "@/components/live-turn-state";
+import { noteTurnEnd } from "@/lib/turn-numbers";
 import { NO_TURN, turnAfterFact, turnFromWindow, type LiveTurn } from "@/lib/live-turn";
 import { subscribeFacts } from "@/lib/mux";
 // THE STOP THE COMPOSER DRAWS WHEN THE SERVER SAYS THIS CONVERSATION IS RUNNING (ticket
@@ -888,6 +889,10 @@ const SessionHost: FC<{
     // session the page is only WATCHING has a window AND hears the facts. Neither is a reason to
     // skip the other.
     const { unsubscribe } = subscribeFacts(threadId, (fact) => {
+      // THE CLOSING FRAME'S OWN NUMBERS ARE KEPT TOO (`lib/turn-numbers.ts`): the fold line's step
+      // count is the server's for the turn that just closed, and this is the one place a host hears
+      // the fact family -- so it is where the number is filed.
+      noteTurnEnd(threadId, fact);
       setLiveTurn((turn) => turnAfterFact(turn, fact.type));
     });
     return unsubscribe;
