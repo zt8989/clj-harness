@@ -64,6 +64,14 @@ node scripts/dev.mjs --scripted my.json          # 换脚本（照 scripts/examp
 
 细则（隔离怎么造、临时目录怎么取、用例要自己守什么）：`docs/rules/testing.md`。
 
+## 热修复（不重启，让改动在这个进程里生效）
+
+改完源码，**跑着的那个进程手里还是旧代码**：工具表要 `(require 'harness.cap.tools :reload)` 再
+`(harness.cap.tools/install!)`，`prompt.md` 要 `(harness.kernel.llm/reset-prompt!)`（代价是一次冷 prefill）。
+它**替代不了测试**——机器门照旧走 `harness.test-runner`；它也不追认任何已经落盘的字节。
+
+步骤、怎么验、陷阱，以及「改了什么走哪扇门」：`docs/rules/hotfix.md`。
+
 ## README 只有四节
 
 **介绍 / 前置准备 / 运行命令 / 配置说明——四节之外不写。** README 是**入口**，不是手册：
