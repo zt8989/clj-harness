@@ -69,7 +69,16 @@
 - `harness.edge.http/torn-record` + `refuse-torn-record!` + `handle-run` 里的一道路（第四道门之后）：不过关就以 409 拒，点名只能 fork。**先问进程注册表**（`running?`）——一个正在跑的 run 不是坏的，文件分不出它和死掉的 run，注册表能。
 - 这是**临时闸门**：只为兼容旧的 JSONL 记录；格式稳定、旧记录退役后整段拆掉（代码里写明退场条件，收在一处）。
 - 判据：`harness.edge.fork-test` 的 `the-envelope-gate-sees-only-what-fell-out`；`harness.edge.fork-http-test` 的 `a-record-out-of-its-envelope-refuses-the-run` 与 `a-closed-record-is-not-refused-by-the-gate`。
-| 03 | 消息动作里的 Fork（界面） | 无（01 已落地） |
+
+## 落地（票 03，2026-09-27）
+
+**消息动作条的「更多」菜单里多了一项 Fork。**
+
+- `ui/src/lib/threads.ts/forkThread`：POST `/api/threads/<id>/fork`（可选 `compactionId`），成功答新 thread id，失败抛服务端自己的句子。
+- `thread.aui.tsx` 的 `AssistantActionBar`：从 `ThreadIdContext` 取当前会话（复用它，不新造 context——它就是「composer 为哪场会话而作」）；有会话时才画 Fork 项，点了调 `forkThread`，拒绝用 `errors` 目录里的句子说出来（服务端的原话），不静默。
+- 新会话由服务端登记，侧边栏靠 host 推送自己出现；原会话那一行不动，也不切走当前视图。
+- 文案：`elements-thread` 的 `message.fork` / `message.forkTitle`（中英各一份）。
+- 判据：`npm run typecheck`、`npm test`（171 用例）、`npm run build` 全绿。**真机走查（`node scripts/dev.mjs --scripted` + 浏览器）还没做**——机器门挡不住布局，这一条留着给人过。
 
 ## 落地（票 01，2026-09-27）
 

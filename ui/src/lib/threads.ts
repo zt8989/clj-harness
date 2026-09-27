@@ -178,6 +178,36 @@ export async function stopRun(threadId: string, t: Translate): Promise<{ runId: 
   return (await res.json()) as { runId: string };
 }
 
+/// FORK THE CONVERSATION FROM JUST BEFORE A COMPACTION -- `POST /api/threads/<id>/fork`.
+///
+/// THE SERVER DECIDES WHERE THE CUT LANDS: the newest recorded compaction unless one is
+/// named, and everything before it is what the new session starts from. This page says
+/// WHICH conversation, never where -- the boundary is a fact about the record, and a page
+/// that picked one would be guessing at event pairs it cannot see.
+///
+/// THE ANSWER IS THE NEW THREAD ID. The new session is a row in the store like any other,
+/// so it arrives in the sidebar on the host stream; nothing here has to draw it.
+///
+/// A REFUSAL IS THE OTHER REAL ANSWER: 409 while a run is in flight, 400 when the
+/// conversation has no recorded compaction, 404 when this home has never heard of it -- and
+/// the server's own sentence says which (see `harness.edge.http/fork-post`).
+export async function forkThread(
+  threadId: string,
+  compactionId: string | null,
+  t: Translate,
+): Promise<{ threadId: string; from: string; compactionId: string }> {
+  const res = await fetch(
+    `${API_BASE}threads/${encodeURIComponent(threadId)}/fork`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(compactionId ? { compactionId } : {}),
+    },
+  );
+  if (!res.ok) throw new Error(await refusalFrom(res, t));
+  return (await res.json()) as { threadId: string; from: string; compactionId: string };
+}
+
 /// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it -- and as
 /// a window states it too (`lib/window.ts`), because it is the same fact about the same
 /// conversation and both reads carry it.

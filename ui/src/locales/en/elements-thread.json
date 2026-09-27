@@ -22,6 +22,8 @@
     "copy": "Copy",
     "refresh": "Refresh",
     "more": "More",
+    "fork": "Fork",
+    "forkTitle": "Fork - start a new session from just before the last compaction; this one stays",
     "exportMarkdown": "Export as Markdown",
     "edit": "Edit",
     "previous": "Previous",

@@ -51,6 +51,10 @@ import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
 import { SessionRunContext } from "@/components/session-run-state";
+// LOCAL (session-fork ticket 03): WHICH conversation this element is inside, so the action
+// bar's Fork can name it. A context for the same reason the two above are: the copied
+// element is rendered as `children` and cannot be handed a prop.
+import { ThreadIdContext } from "@/components/composer-chrome";
 // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE TURN the server says is open
 // (`turn/start` / `turn/end`), which is what the dot at a turn's end is about -- see
 // `lib/live-turn.ts` for why it is not the run's word.
@@ -59,6 +63,9 @@ import { SessionTurnContext } from "@/components/live-turn-state";
 // the server's word. See `AssistantActionBar`.
 import { stillBeingWritten } from "@/lib/session-status";
 import { wearsWorkingDot } from "@/lib/live-turn";
+// LOCAL (session-fork ticket 03): the one WRITE this bar offers -- fork the conversation
+// from just before a recorded compaction (POST /api/threads/<id>/fork).
+import { forkThread } from "@/lib/threads";
 import { registerViewport } from "@/lib/window-scroll";
 import {
   ActionBarMorePrimitive,
@@ -85,6 +92,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
+  GitBranchIcon,
   MicIcon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -855,6 +863,12 @@ const AssistantActionBar: FC = () => {
   // `hideWhenRunning={true}` with `thread.isRunning === false` drew the bar). The prop stays
   // for the runtime's own case, which is the one it can speak about.
   const { t } = useTranslation("elements-thread");
+  // LOCAL (session-fork ticket 03): which conversation this bar belongs to, so Fork can
+  // name it. Null when the element is mounted outside a session (a storybook, a test).
+  const threadId = useContext(ThreadIdContext);
+  // The refusal sentences are the SERVER's, and they are catalogued under `errors` like
+  // every other HTTP refusal this page shows (`session-run-stop.tsx` does the same).
+  const { t: tErrors } = useTranslation("errors");
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -897,6 +911,24 @@ const AssistantActionBar: FC = () => {
               {t("message.exportMarkdown")}
             </ActionBarMorePrimitive.Item>
           </ActionBarPrimitive.ExportMarkdown>
+          {/* LOCAL (session-fork ticket 03): FORK -- the conversation from just before its
+              last recorded compaction. The new session lands in the sidebar on the host
+              stream; this one is untouched. Offered only when there is a conversation to
+              name (a bare element has none). */}
+          {threadId ? (
+            <ActionBarMorePrimitive.Item
+              className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
+              title={t("message.forkTitle")}
+              onClick={() => {
+                void forkThread(threadId, null, tErrors).catch((err: unknown) => {
+                  window.alert(err instanceof Error ? err.message : String(err));
+                });
+              }}
+            >
+              <GitBranchIcon className="size-4" />
+              {t("message.fork")}
+            </ActionBarMorePrimitive.Item>
+          ) : null}
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
