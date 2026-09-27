@@ -72,3 +72,51 @@ turn/end        {turnId, steps, messages, conclusionId, seqFrom, seqTo}   ← �
 - **记录的自洽**：`step/end` 的行号大于同一步最后一个工具结局的**那一次**模型调用还不算完；
   一步的区间恰好覆盖 `model/*` 与这一步的 `tools/*`，不多不少（读侧一条用例钉住）。
 - **展示**：一轮一步一条消息时那一行**照旧不出现**（今天的规矩）；有 step 有工具时逐字形成「N 步 · M 条消息」。
+
+## 落地（票 01，2026-09-27）
+
+**落了。** 落在 `.worktrees/step-events` 这个 worktree 里（分支 `step-events`），改动六处：
+
+| 文件 | 改了什么 |
+|---|---|
+| `harness.edge.mux` | 新增 `fact-types` —— 事实族名字的**唯一一处拼写**，与它本来就持有的
+  `fact-buffer-size` / `record-fact!` / `facts-after` 同住 |
+| `harness.edge.http` | 那条 `contains?` 的门从字面量 `#{"model/start" "model/end"}` 换成 `mux/fact-types` |
+| `test/harness/test_support.clj` | `fact-frame-types` 不再是第二份集合，直接就是 `mux/fact-types`（多一个 require） |
+| `ui/test/e2e.ts` | 删掉自己抄的 `WINDOW_TYPES` / `FACT_TYPES`，改问 `lib/mux.ts` 的 `familyOf`；
+  socket 那一段拆成 `readRun`，两个读者共用 |
+| `ui/test/suites/frames.ts` | 新用例 `the-wire-says-which-names-are-facts` |
+| `ui/test/ui.test.ts` | 用例总数 166 → 167 |
+
+### 两次红，都值得记
+
+1. **空 `append` 的那次**：一开始给 `frameTypesFromRun` 传了 `[]`，于是那一轮**没有一条 user 消息**，
+   按 ADR 0006 决策 3 就没有轮——`turn/*` 两个名字一个都没上线，期望的四个回来两个。
+   **「跑了一轮」不等于「有人说话」**：模型照样被调用了。
+2. **终帧不等于最后一条**：补上 user 消息之后 `turn/end` 仍然缺，而原因是真事实——`turn/end` 在
+   `harness.edge.http` 那条 drain 循环的 `:run/done` 分支里发，而 `RUN_FINISHED` 帧来自**前一个**
+   内核事件 `:run/end`（那段注释自己写着 `:run/done` 从不被转换）。于是「这一轮结束了」比
+   「这一轮的最后一个事实」**早到**；读取器在终帧就挂断，就丢了尾巴。修法是 `readRun` 的
+   `afterTerminalMs`——只有想要会话那半事实的读者才等。
+   **这是给票 04 的现成结论**：客户端在 `RUN_FINISHED` 上收手的地方，都要留出这一格。
+
+### 判据
+
+- 新用例**先红再绿**：把 `model/start` 从客户端那份表里删掉，报的正是
+  `model/start must be the client's fact family: expected 'run' to be 'fact'`。
+- `harness.edge.mux-test` + `harness.edge.http-test`：125 用例 / 1276 断言，**0 失败**（226.5s，
+  这是带上本次改动的一次全绿）。
+- 前端：`npm test` **167/167 通过**；`npm run typecheck`、`npm run build` 通过。
+
+### 一处没绿，以及它为什么不是这一刀的账
+
+`clojure -M:test -m harness.test-runner`（整轮）在本机**撞了单命名空间 300s 的硬限制、退出 2**，
+两次点名的都是 `harness.edge.http-test`。证据说这不是本次改动造成的：
+
+- 同一份改动的**单独一轮是绿的**（上面 226.5s 那条）。
+- 用**没有本次改动**的树（`c5cdfb9`，只多 spec 与票）单独跑 `http-test`，同样撞 300s、退出 2。
+- 本机 **4 核**，跑测试那会儿 **CPU 100%**，另有两个 Clojure JVM 与若干 node 进程——其中一个是
+  **在那一轮跑到一半（20:14:55）起来的**。把限制放宽到 900s 重跑，`http-test` 用了 **711.5s**，
+  并出现 28 处「等了 5000ms 那扇缝还没开」这类**对负载敏感**的失败。
+
+**下一张票（或任何一次收口）要在没有别的会话抢机器的机器上复跑整轮，把那个数留下。**
