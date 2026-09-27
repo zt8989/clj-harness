@@ -64,3 +64,34 @@
 - 已知 flake(与本次无关,基线同样偶发):`http_test` 的
   `a-running-session-reads-what-has-arrived-and-nothing-is-written` 与
   `an-overflow-refusal-compacts-aggressively-and-retries-in-one-turn`——重跑即绿。
+
+## 追加:一个被这次走查撞出来的旧 bug(2026-09-27,`c39a12c`)
+
+**症状**:初次发送时,底部统计条只有一串原始 key(`stats.turns`),轮次/步数/缓存都不初始化。
+
+**根因**(两个,叠在一起):
+
+1. **`live-numbers-slice` 从引入那天起就读错了形状**:它读 `(:stats n)`,而 `live-numbers`
+   返回的是**扁平**的(`stats-answer` 再 assoc `:context`/`:pressure`)。于是每个 `contains?`
+   都是假,切片恒为 `{}`——`model/end` **一直在推空对象**。有快照在手时看不出来(合并 `{}`
+   等于没合并);只有「只被推送过」的页面才暴露。
+2. **客户端把「只有推送」的载荷当整包用**:`withPushedNumbers(null, {})` 返回
+   `{} as StatsPayload`,`statsCells` 于是问目录要一个**没有 count 的复数**
+   (`t("stats.turns", {count: undefined})`)——i18next 对缺 count 不做复数解析,直接**返回键名**,
+   屏幕上就是 `stats.turns`。
+
+**修法**:
+
+- 服务端:按 `live-numbers` 自己的形状读它(并补上 `:turns`——刚开的会话在首次 `model/end` 时
+  还没有快照,而这一次 run 的轮已经开了,折里有这个数);
+- 客户端:`StatsPayload.turns` 改为**可选**,`statsCells` 在没有 count 时给 `null`
+  (那一格连同秒表一起缺席,而不是画出键名),`withPushedNumbers` 的契约写清「只有推送的载荷就是
+  它本来的样子,缺的格不补」;
+- 测试:后端钉住切片内容(`:turns` 与 `:steps`);客户端新增一例——「只有推送的载荷」必须给
+  `turns: null` 且**不含** `stats.turns` 字样。
+
+**为什么它在 main 上**:**不是这次改动引入的**——`bd5c314`(引入 `live-numbers-slice` 的那次合并)
+就是这样,所以 main 上同样有这个 bug;本分支的 `c39a12c` 修掉了它。
+
+**验证**:浏览器首屏从空直接变「1 轮 · 1 次调用」,全程无原始 key;调用数随后自己长到 2(推送);
+后端全量 1326 tests / 0 失败;前端 160 tests + typecheck 过。
