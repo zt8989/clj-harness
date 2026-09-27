@@ -27,7 +27,7 @@ components/
                      **折叠有两种样子，`lg` 决定哪一种**：宽窗是一条 **48px 的 rail**（列还在、只剩
                      图标与 logo：顶格平时是记号、hover/聚焦才换成那颗「展开」，会话/项目列表 `hidden`、
                      设置那颗 32px 居中），窄窗仍旧 `display: none`。两种都由 `lg:` 类产出，不加监听
-                     rail 与列表都是 `hidden` 而不是卸载（它是 `/api/projects` 唯一的读者，见下）
+                     rail 与列表都是 `hidden` 而不是卸载（侧栏那份 `/api/projects` 的挂载读只有它发，见下）
   app-brand.tsx     品牌行的记号（内联 SVG，`aria-hidden`）与产品名；产品名是常量不是词表条目，
                      所以它从 `lib/session-title.ts` 取（同一个词在 tab 尾巴上还要说一遍）
   session-title.tsx 对话列顶栏那行标题：读这一场的第一句用户消息，画出来，并让浏览器 tab 跟上
@@ -244,12 +244,20 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 - **侧边栏的数据是另一份**：`GET /api/projects`（不是运行时的 thread 形状——那个形状里没有项目、
   没有「谁是任务」）。**一份快照答两块**：`projects`（按目录分组）与 `tasks`（未绑定的会话，平铺不分组）。
   **这份列表只由库回答**：id、归属、归档、名字（`sessions.title`）、**上次发送时间**
-  （`sessions.last_sent_at`）全是库里那几列，页面上唯一一个库答不了的是 `running`——它来自进程内的
-  live-runs 注册表，也是主人说的那条例外（取舍在 `.scratch/store-backed-sidebar/spec.md` 一节）。
-  于是行上不再有日志体积与 mtime，刷新也不再 walk 那棵树：一次 SELECT 加一次注册表查。
-  **列表是快照**，切换会话 / 当前会话变化 / 按刷新键时重取；**发送之后不用等刷新**——侧边栏握着一个
-  「有标题、不在列表里、也不在跑」的会话时会自己再问一次库（每个 id 每次页面加载最多一次，`asked` ref，
-  所以成不了环）。
+  （`sessions.last_sent_at`）、以及**运行状态**（`sessions.run_state`，见下）全是库里那几列
+  （取舍在 `.scratch/store-backed-sidebar/spec.md` 一节，`run_state` 那张票见
+  `.scratch/sidebar-ws-and-run-state`）。于是行上不再有日志体积与 mtime，刷新也不再 walk 那棵树：
+  一次 SELECT 答完所有行。
+  **运行状态也在库里，而且是「上次已知」不是「现在」**：`sessions.run_state` 由 run 起止那两个动词
+  与进程内注册表在同一时刻写（`harness.edge.sessions/run-started!` / `run-finished!`，它们并且 ring
+  一次 host 流），进程启动时把上一进程遗留的 `running` 清回 `idle`（`clear-startup-run-state!`）——
+  所以进程内实时答案仍以注册表为准，跨重启的答案由这一列给出，而侧边栏只读这一列。
+  **列表首次走 HTTP、之后全靠推送**（`.scratch/sidebar-ws-and-run-state` 票 02）：挂载时一次
+  `GET /api/projects`（socket 连不上时那颗刷新键是兜底），此后每一个 host 级变化——run 起止、别窗
+  发送、项目增删、归档——都由 `events.host` 推来（ADR 0004），**切换会话不再重取**（当年重取的理由
+  是 mtime 失真，那个理由随体积/mtime 一起退场了）。唯一还按需再问的是**懒创建**那一格：侧边栏握着
+  一个「有标题、列表里还没有、也还没跑完」的会话时会自己再问一次库（`asked` ref，每个 id 每次页面
+  加载至多 5 次，所以成不了环；见 `lib/sidebar-refetch.ts`）。
 - **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只铸一枚 id**
   （`lib/id.ts`，就是 `@ag-ui/client` 自己导出的 `randomUUID()` —— AG-UI 的设计就是客户端铸 thread-id，
   它的 `AbstractAgent` 也是 `threadId ?? v4()`；而**不能**用 `crypto.randomUUID`：那个只在安全上下文有，
@@ -308,7 +316,8 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   （`.scratch/sidebar-rail`）：宽窗是一条 48px 的 rail，列还在、出口长在它自己的顶格里；窄窗才整个消失、由
   左上角那颗浮标把它打开（那颗归 `app.tsx` 画，因为窄窗折起来的是隐藏子树，画不了一颗要被看见的按钮）。
   三处出口共用 `SIDEBAR_ID`（`components/sidebar-toggle.tsx`，它们与它们约定的事都写在那儿）。
-- **折 ≠ 卸载**，而且这是正确性、不是省事：`sidebar.tsx` 是 `GET /api/projects` **唯一**的读者，挂载恢复
+- **折 ≠ 卸载**，而且这是正确性、不是省事：`sidebar.tsx` 的挂载读是**侧栏那份** `GET /api/projects`
+  （composer 的目录选择器另有一份自己的，见票 02 的走查说明），挂载恢复
   正是从那一次读取里知道「记住的那一场还在不在」（`app.tsx` 的 `onListed`）。手机宽的窗口一开就是折着的，
   卸载它等于让**这些窗口恢复不了任何东西**，记住的 id 一直陈旧到有人把列表展开；列表自己那份状态
   （滚到哪儿、哪个项目是展开的）也会每折一下丢一次。
