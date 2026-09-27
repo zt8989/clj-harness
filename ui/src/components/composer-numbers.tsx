@@ -105,7 +105,13 @@ function useSessionNumbers(threadId: string): SessionNumbersValue {
   // subscription (`lib/mux.ts` routes by `familyOf`).
   useEffect(() => {
     const { unsubscribe } = subscribeFacts(threadId, (fact) => {
-      if (fact.type !== "model/end") return;
+      // BOTH ENDS OF A CALL CARRY THEM NOW, and the START is the one that matters for the
+      // conversation's opening: a request that has just gone out has a size nobody has reported
+      // yet, so the server sends the counts, zeroes for cache and rate, and the ESTIMATE of what
+      // was sent (see `live-numbers-slice`'s `:start` phase). The END replaces those with the
+      // vendor's numbers -- including `:estimated false`, which is what stops the mark sticking
+      // to a measured figure.
+      if (fact.type !== "model/end" && fact.type !== "model/start") return;
       const numbers = fact.numbers as Partial<StatsPayload> | undefined;
       if (numbers !== undefined) setPushed(numbers);
     });

@@ -453,4 +453,38 @@
         (let [slice (#'http/live-numbers-slice thread-id)]
           (is (some? slice) "this process holds the session, so the folds answer")
           (is (= 1 (:turns slice)) "one user turn, and the push says so")
-          (is (= 1 (:steps slice)) "beside the call count it always carried"))))))
+          (is (= 1 (:steps slice)) "beside the call count it always carried")
+          (is (false? (:estimated slice))
+              "`false` OUT LOUD: merging this over a `:start` push must clear the estimate mark"))))))
+
+(deftest the-opening-request-initializes-the-strip-instead-of-leaving-it-blank
+  ;; THE OWNER'S CALL (2026-09-27): at the moment a conversation's first request has gone out,
+  ;; the strip draws the counts, `0` for the cache share and the rate (nothing has been
+  ;; reported), and an ESTIMATE of the tokens that request carries -- the system prompt, the
+  ;; user's message and that run's injections are already out the door, so the pressure band
+  ;; can price them. Marked `:estimated`, which is what makes an estimate honest on a page whose
+  ;; oldest rule is 'not reported is not zero'.
+  ;;
+  ;; The shaping is pure and pinned with literals; the band is the real band of a session that
+  ;; has just run, so the two halves meet the way they do in `model/start`'s push.
+  (let [folded {:turns 1 :steps 1 :incomplete false}
+        band   {:pressureTokens 12100 :windowTokens 128000 :percent 9}
+        ;; THE BASE A PUSH MAY SEND is `owned-numbers` of the fold's answer -- passed through
+        ;; it here the way `live-numbers-slice` does, so a read-fact cannot ride along.
+        slice  (#'http/initial-numbers (#'http/owned-numbers folded) band)]
+    (is (= 1 (:turns slice)) "the turn that just opened")
+    (is (= 1 (:steps slice)) "and the call that just went out")
+    (is (= 0 (:cacheHitPercent slice)) "the vendor has reported nothing: 0% cached")
+    (is (= 0 (:outputTokensPerSecond slice)) "and no completed call means 0 tok/s")
+    (is (true? (:estimated slice)) "the token figures are an estimate, and said so")
+    (is (= {:totalTokens 12100} (:usage slice)) "the strip's token cell holds what was sent")
+    (is (= {:usedTokens 12100 :windowTokens 128000 :percent 9} (:context slice))
+        "and the ring is filled by the same estimate")
+    (is (nil? (:incomplete slice))
+        "the fold's read-facts are not the push's to send (see `withPushedNumbers`)")
+    (is (nil? (:pressure slice)) "and neither is the band, which is a reading of its own"))
+  (testing "a band that cannot price the request leaves the token figures out"
+    (let [slice (#'http/initial-numbers (#'http/owned-numbers {:turns 1 :steps 1}) {})]
+      (is (= 0 (:cacheHitPercent slice)))
+      (is (nil? (:usage slice)) "'not reported' still beats a made-up number")
+      (is (nil? (:context slice))))))

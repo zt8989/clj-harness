@@ -1815,7 +1815,14 @@
                                 (family-send!
                                  thread-id
                                  (cond-> {:type kind :seq offset}
-                                   (= "model/start" kind) (assoc :payload payload)
+                                   ;; THE START CARRIES THEM TOO, and that is the whole point of
+                                   ;; the `:start` phase: the request has just gone out, so the
+                                   ;; strip can be initialized (counts, zeroes, and the estimate
+                                   ;; of what was sent) instead of drawing nothing until the
+                                   ;; vendor answers. See `initial-numbers`.
+                                   (= "model/start" kind) (assoc :payload payload
+                                                                :numbers (live-numbers-slice
+                                                                          thread-id :start))
                                    ;; THE NUMBERS RIDE ON THE END, and they are the session's own
                                    ;; folds at this moment -- ADR 0006 decision 8: the fold has to
                                    ;; be in memory for this to have anything to say.
@@ -4225,10 +4232,64 @@
   [ch frame]
   (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
 
+(defn- initial-numbers
+  "THE NUMBERS A CONVERSATION STARTS WITH, for the moment its first request has just gone out
+  and nothing has reported anything yet: the fold's counts as they stand, `0` for the vendor's
+  cache share and for the rate, and an ESTIMATE of the tokens that request carries -- which is
+  what `harness.edge.pressure`'s band already measures (it prices the request an edge has
+  assembled, and at a call's start that request is the one on its way to the vendor). The
+  payload is marked `:estimated`, so a client draws the estimate as one (see `statsCells`).
+
+  THE OWNER ASKED FOR THIS (2026-09-27), and it is worth writing down as a DELIBERATE
+  EXCEPTION to this repo's oldest rule about numbers -- 'not reported is not zero' -- because a
+  strip that draws nothing until the first vendor reply is a strip that looks broken for as
+  long as the first call takes. What makes the exception honest rather than a lie is that the
+  estimate is MARKED as one: the zeroes are the truth about the vendor (it has reported
+  nothing), and the token figures say what was SENT, which is a fact about this moment and not
+  a guess about the vendor.
+
+  BASE IS `owned-numbers` OF THE FOLD'S ANSWER -- the keys a push owns and nothing else, so
+  this cannot leak a read-fact (`:incomplete`) onto the wire by passing a bigger map in. BAND is
+  the pressure band at this moment."
+  [base band]
+  (let [tokens (:pressureTokens band)]
+    (cond-> (assoc base :cacheHitPercent 0 :outputTokensPerSecond 0 :estimated true)
+      (number? tokens)
+      (assoc :usage {:totalTokens tokens}
+             :context (cond-> {:usedTokens tokens}
+                        (number? (:windowTokens band))
+                        (assoc :windowTokens (:windowTokens band)
+                               :percent (:percent band)))))))
+
+(defn- owned-numbers
+  "THE KEYS A PUSH OWNS, out of the fold's whole answer: the numbers a fold can move, and none
+  of the facts about a READ (`:incomplete`, `:pressure`). One place, so the two phases of a
+  call cannot disagree about what a push is allowed to say -- see `live-numbers-slice`."
+  [n]
+  (cond-> {}
+    ;; THE FLAG IS ALWAYS ON THE WIRE, both ways: an end-phase push says `false` out loud so that
+    ;; merging it over a `:start` push REPLACES the estimate rather than leaving a stale mark on
+    ;; a measured number (`withPushedNumbers` is a spread, and a key nobody sends is a key that
+    ;; stays).
+    true (assoc :estimated false)
+    (contains? n :turns) (assoc :turns (:turns n))
+    (contains? n :steps) (assoc :steps (:steps n))
+    (contains? n :usage) (assoc :usage (:usage n))
+    (contains? n :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent n))
+    (contains? n :outputTokensPerSecond)
+    (assoc :outputTokensPerSecond (:outputTokensPerSecond n))
+    (seq (:context n)) (assoc :context (:context n))))
+
 (defn- live-numbers-slice
-  "The slice of `live-numbers` that `model/end` puts on the wire (ADR 0006 decision 4): the
-  session's numbers AT THIS MOMENT -- how many turns, how many calls so far, what they
+  "The slice of `live-numbers` that the `model/*` facts put on the wire (ADR 0006 decision 4):
+  the session's numbers AT THIS MOMENT -- how many turns, how many calls so far, what they
   reported, how fast the answers came, and the context ring's four fields.
+
+  PHASE IS WHICH END OF A CALL THIS IS, and it decides ONE thing: at `:start` with nothing yet
+  reported by the vendor, the payload is `initial-numbers` -- the counts, zeroes for cache and
+  rate, and the ESTIMATE of the request that just went out (see that function, and the owner's
+  decision recorded there). Anywhere else the fold's own answer is sent as it stands, absent
+  keys included.
 
   WHY A SLICE RATHER THAN THE WHOLE PAYLOAD: the wire's fact is about a MODEL CALL, while the
   pressure band (the third fold `live-numbers` carries) is the edge's own pre-flight estimate --
@@ -4254,16 +4315,15 @@
   it was written -- invisible while a snapshot was in hand (merging `{}` changes nothing), and
   the reason a page that had only ever been PUSHED drew a raw catalog key instead of a number
   (measured 2026-09-27). One shape, read as itself."
-  [stem]
-  (when-some [n (live-numbers stem)]
-    (cond-> {}
-      (contains? n :turns) (assoc :turns (:turns n))
-      (contains? n :steps) (assoc :steps (:steps n))
-      (contains? n :usage) (assoc :usage (:usage n))
-      (contains? n :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent n))
-      (contains? n :outputTokensPerSecond)
-      (assoc :outputTokensPerSecond (:outputTokensPerSecond n))
-      (seq (:context n)) (assoc :context (:context n)))))
+  ([stem] (live-numbers-slice stem :end))
+  ([stem phase]
+   (when-some [n (live-numbers stem)]
+     (let [base (owned-numbers n)]
+       (if (and (= :start phase) (zero? (long (or (:stepsWithUsage n) 0))))
+         ;; NOTHING REPORTED YET: this is the conversation's opening request (or one whose
+         ;; vendor has told us nothing), and the strip is initialized rather than left blank.
+         (initial-numbers base (:pressure n))
+         base)))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).

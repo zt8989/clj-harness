@@ -308,6 +308,39 @@ const cases: Case[] = [
       expect(statsCells(merged, en)?.turns).toBe("3 turns");
     },
   },
+
+  {
+    name: "an-estimated-token-count-is-drawn-as-an-estimate",
+    run: async () => {
+      // THE `model/start` PAYLOAD (owner, 2026-09-27): counts, zeroes, and the size of the
+      // request that just went out. The zeroes are DRAWN (they are the truth about the vendor:
+      // it has reported nothing), and the token figure carries the `~` that `contextCells`
+      // already uses for figures nobody has reported.
+      const opening = {
+        turns: 1,
+        steps: 1,
+        cacheHitPercent: 0,
+        outputTokensPerSecond: 0,
+        usage: { totalTokens: 12100 },
+        context: { usedTokens: 12100, windowTokens: 128000, percent: 9 },
+        estimated: true,
+        incomplete: false,
+      } as StatsPayload;
+      const cells = statsCells(opening, en);
+      expect(cells?.turns).toBe("1 turn");
+      expect(cells?.steps).toBe("1 step");
+      expect(cells?.cached).toBe("0% cached");
+      expect(cells?.rate).toBe("0 tok/s");
+      expect(cells?.total).toBe("~12k tok");
+
+      // AND A MEASURED TOTAL KEEPS ITS PLAIN FACE: the mark is about the payload, not the cell.
+      const measured = { ...opening, estimated: undefined } as StatsPayload;
+      expect(statsCells(measured, en)?.total).toBe("12k tok");
+
+      // ...and the same two readings in Chinese, where the words differ but the mark does not.
+      expect(statsCells(opening, zh)?.total).toBe("~12k tok");
+    },
+  },
 ];
 
 export const statsSuite: Suite = { name: "stats", cases };

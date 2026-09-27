@@ -145,6 +145,16 @@ export interface StatsPayload {
   };
   cacheHitPercent?: number;
   outputTokensPerSecond?: number;
+  /// WHETHER THE TOKEN FIGURES BELOW ARE AN ESTIMATE RATHER THAN A VENDOR'S REPORT.
+  ///
+  /// THE `model/start` PUSH CARRIES ONE (owner, 2026-09-27): at the moment a request has gone
+  /// out there is nothing for the vendor to have reported, and a strip that draws nothing until
+  /// the first reply looks broken for as long as that call takes. So that payload says what is
+  /// KNOWN (the counts, `0` for a cache share nobody has reported, `0` for a rate with no
+  /// completed call) and what was SENT (the prompt's own size, from the pressure band) -- and
+  /// this flag is how the drawing side tells the second apart from a measured number. It is the
+  /// same distinction `contextCells` already draws with its `~`.
+  estimated?: boolean;
   /// WHETHER THE RECORD'S LAST FRAME IS TERMINAL -- and OPTIONAL, unlike the rest of this
   /// payload's facts, because it is a fact about a READ and not a number: only the fold can
   /// answer it. The stored snapshot the strip usually starts from cannot (a run may have
@@ -205,7 +215,12 @@ export function statsCells(payload: StatsPayload | null, t: Translate): StatsCel
       payload.outputTokensPerSecond === undefined
         ? null
         : t("stats.rate", { value: payload.outputTokensPerSecond }),
-    total: total === undefined ? null : t("stats.total", { value: formatTokens(total) }),
+    total:
+      total === undefined
+        ? null
+        : payload.estimated === true
+          ? t("stats.totalEstimated", { value: formatTokens(total) })
+          : t("stats.total", { value: formatTokens(total) }),
     cached:
       payload.cacheHitPercent === undefined
         ? null

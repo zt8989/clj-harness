@@ -467,7 +467,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// because the push carried an empty slice and no turn count. The case pins the rule that
 /// replaced it: a cell the payload does not carry is left out, and the catalog is never asked
 /// for a plural with no count.
-const EXPECTED_CASES = 160;
+/// ...166 -> 167 HERE: the `stats` suite gained a second case with the bug fix's follow-up --
+/// the `model/start` payload (counts, zeroes, and the ESTIMATE of the request just sent) drawn
+/// as an estimate rather than a measured number.
+const EXPECTED_CASES = 161;
 
 let total = 0;
 for (const suite of SUITES) {
