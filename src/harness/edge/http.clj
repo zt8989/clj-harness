@@ -102,6 +102,7 @@
             [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
+            [harness.edge.projection :as projection]
             [harness.edge.compaction :as compaction]
             [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
@@ -5644,7 +5645,14 @@
                    ;; words -- it is the more specific statement about the session.
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
-                   (subagents/install! {:run run-subagent!})]]
+                   (subagents/install! {:run run-subagent!})
+                   ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
+                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `record/append!` must not wait for
+                   ;; a database write, and a pass that misses a tick is a NUMBER
+                   ;; (`harness.edge.projection/lag`) rather than a lost line. It HAS a teardown,
+                   ;; unlike the writer: a process that stops serving stops copying, and the next one
+                   ;; resumes at the offset it left.
+                   (projection/start!)]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.edge.record`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the

@@ -211,8 +211,8 @@
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
-                  "todos"]
+                  "hashline_undo" "messages" "projection_offsets" "projects"
+                  "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
@@ -365,8 +365,8 @@
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                      "hashline_undo" "projects" "schema_steps" "session_claims" "sessions"
-                      "todos"]
+                      "hashline_undo" "messages" "projection_offsets" "projects"
+                      "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
@@ -985,6 +985,23 @@
                ;; was taken -- which is why it is state rather than a record.
                "session_claims"     #{"thread_id" "instance" "token" "pid"
                                       "started_at" "since"}}
+              ;; AND THE PROJECTION'S THREE (ADR 0008, 2026-09-25): the owner overruled the half of
+              ;; this boundary that said 'jsonl 里的任何内容都不进库', so `messages` and `tool_calls`
+              ;; are content BY DECISION and are listed here as exactly what they may hold. They are
+              ;; kept in a SEPARATE map from the state tables above because the guard the doseq runs
+              ;; (a name pattern for 'this looks like a record') is about the tables that must NOT
+              ;; mirror a log -- a pattern that had to exempt the two tables it was written to forbid
+              ;; would be pretending rather than guarding. What still guards the projection is that
+              ;; it is RECOMPUTABLE: `harness.edge.projection-test/
+              ;; rebuilding-answers-row-for-row-what-was-there` is the acceptance ADR 0008 decision 6
+              ;; asks for, and `harness.infra.db/projected-content` is where the three tables' shape
+              ;; is decided.
+              declared-projected-columns
+              {"messages"           #{"session_id" "seq" "run_id" "source" "role" "content"
+                                      "reasoning" "tool_calls" "at"}
+               "tool_calls"         #{"session_id" "seq" "call_id" "name" "arguments" "result"}
+               "projection_offsets" #{"session_id" "path" "byte_offset" "line_offset"
+                                      "updated_at"}}
               ;; `titles?` LEFT THIS LIST with `sessions.title` (see the comment above):
               ;; the exact list below is what keeps a column a decision, and a name
               ;; pattern that has to exempt the one column it was written to forbid
@@ -998,7 +1015,13 @@
               (testing (str "and none of " table "'s columns holds conversation content")
                 (is (empty? (filter #(re-find forbidden %) actual))
                     (str "these columns look like records rather than state: "
-                         (pr-str (filter #(re-find forbidden %) actual))))))))))))
+                         (pr-str (filter #(re-find forbidden %) actual)))))))
+          (testing "and the projected tables carry exactly the columns the decision named"
+            ;; NO NAME PATTERN IS ASKED OF THESE, on purpose (see the comment above): what makes a
+            ;; content table safe is not what it is CALLED but that the record can rebuild it.
+            (doseq [[table columns] declared-projected-columns]
+              (is (= columns (set (map :name (db/select (str "PRAGMA table_info(" table ")")))))
+                  (str table " is not the shape ADR 0008 decided")))))))))
 
 (deftest no-table-in-the-store-mirrors-a-log
   ;; .scratch/project-sidebar decision 2, stated as something a machine checks.
@@ -1011,6 +1034,13 @@
   ;; not a record. The name pattern alone would pass for anything innocuously
   ;; named -- `turns`, `history`, `archive` -- which is exactly how a log mirror
   ;; would arrive if nobody were watching.
+  ;;
+  ;; ADR 0008 MOVED THE LINE, AND THIS IS WHERE IT NOW RUNS. The owner overruled the half that said
+  ;; 'jsonl 里的任何内容都不进库' (2026-09-25): `messages` and `tool_calls` ARE a mirror of the log, BY
+  ;; DECISION, and the two assertions below are split to say so -- the exact list still carries the
+  ;; decision (a table nobody listed fails this test), while the name pattern guards only the tables
+  ;; that must NOT be records. What guards the projection instead is that it is RECOMPUTABLE:
+  ;; `harness.edge.projection-test/rebuilding-answers-row-for-row-what-was-there`.
   (let [dir (fresh-root)]
     (with-root
       dir
@@ -1019,13 +1049,20 @@
                                       "hashline_snapshots" "hashline_ownership"
                                       "hashline_sessions" "hashline_undo" "todos"
                                       "session_claims"}
+              ;; THE PROJECTION'S THREE ARE TABLES TOO (ADR 0008) -- listed here so that 'the store's
+              ;; tables are exactly the ones the home declared' keeps meaning something now that two of
+              ;; them are content.
+              declared-projected-tables #{"messages" "tool_calls" "projection_offsets"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
-            (is (= declared-state-tables (set (db/tables)))))
-          (testing "and none of them is a place a log could be mirrored into"
-            (is (empty? (filter #(re-find forbidden %) (db/tables)))
-                (str "these tables look like records rather than state: "
-                     (pr-str (filter #(re-find forbidden %) (db/tables)))))))))))
+            (is (= (into declared-state-tables declared-projected-tables) (set (db/tables)))))
+          (testing "and none of the STATE tables is a place a log could be mirrored into"
+            ;; ASKED OF THE STATE HALF ONLY: the two content tables are the decision, and a pattern
+            ;; that had to exempt the names it was written to forbid would be pretending.
+            (let [state (remove declared-projected-tables (db/tables))]
+              (is (empty? (filter #(re-find forbidden %) state))
+                  (str "these tables look like records rather than state: "
+                       (pr-str (filter #(re-find forbidden %) state)))))))))))
 
 ;; ------------------------------------------------- quarantining is a race too
 ;;

@@ -4866,10 +4866,19 @@
 
 (defn- home-facts
   "Every file in this home, by name, with its bytes and mtime -- the shape a claim
-  like 'only these files moved' can be checked against."
-  []
+  like 'only these files moved' can be checked against.
+
+  THE STORE'S OWN FILES ARE NOT PART OF THAT SHAPE, and that is a fact about WHO ELSE WRITES: the
+  database is touched by every reader and writer in this process, and since ADR 0008 there is always
+  one (the projection's pass opens it and, whenever a log has grown, writes a chunk -- which in a
+  suite that shares one home happens every couple of seconds). The WAL companions come and go with
+  those same connections. What these cases are about is the CONFIG: a setting written, a setting
+  refused -- and `harness.edn` / `config.edn` are still here, size and mtime, for the assertions
+  that mean 'nothing was written'." []
   (into {} (for [f (reverse (file-seq (io/file (home/root))))
-                 :when (.isFile ^java.io.File f)]
+                 :when (and (.isFile ^java.io.File f)
+                            (not (contains? #{"harness.db" "harness.db-wal" "harness.db-shm"}
+                                            (.getName ^java.io.File f))))]
              [(.getName ^java.io.File f) [(.length ^java.io.File f) (.lastModified ^java.io.File f)]])))
 
 (def ^:private a-provider-body

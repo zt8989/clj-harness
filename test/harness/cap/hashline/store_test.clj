@@ -100,9 +100,11 @@
           (is (= [{:canonical-path "/kept" :created-at 7}]
                  (db/select "SELECT canonical_path, created_at FROM projects"))))
         (testing "and the anchor tables arrived beside it"
-          (let [all ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                     "hashline_undo" "projects" "schema_steps" "session_claims"
-                     "sessions" "todos"]]
+          (let [;; THE CONTENT PROJECTION'S THREE ARE HERE TOO (ADR 0008): they arrive with the full
+                ;; chain like every other table, and a test that lists the store's tables says so.
+                all ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+                     "hashline_undo" "messages" "projection_offsets" "projects"
+                     "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]]
             (is (= all (db/tables)))
             (is (= all (db/tables full)))))
         (finally
