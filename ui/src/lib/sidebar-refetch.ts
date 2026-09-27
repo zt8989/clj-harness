@@ -30,14 +30,17 @@
 // write a chance to land, and it is why the answer this rule reads is the row's send time
 // rather than its presence.
 //
-// AND THE THIRD REASON IS THE MIRROR OF THE FIRST. The listing carries the SERVER's
-// live-runs registry as of that read, so a listing taken while the run was in flight goes
-// on saying `running` -- and a row drawn from it wears its spinner until something reads
-// again. That is the same trap in the other direction (a row that has arrived and cannot
-// settle), and it is why the caller hands this rule its OWN registry alongside the
-// listing: the end of a run there is what makes the stale snapshot due for one more read.
-// A row whose run is really in flight is left alone, because asking would get the same
-// answer -- the change it waits for is the run ending, and that arrives by itself.
+// THE THIRD REASON THIS RULE USED TO CARRY IS GONE, and its removal is ticket 02 of
+// `.scratch/sidebar-ws-and-run-state`. It used to ask again about a listed row whose
+// `running` this page was not itself running, on the theory that the run had ended and the
+// snapshot was stale -- a spinner nobody would take off. That theory was true of a POLLED
+// listing, and false the moment the listing became PUSHED: `events.host` now carries the
+// run's start and its end (the server rings from the run-state writes themselves), so a
+// `running` in the listing that is still `true` really is a run in flight, and the frame
+// that says it stopped is what updates the row. Keeping the old rule under push means
+// every OTHER window's run asks this page for a re-read it does not need, forever, once
+// per run -- the walkthrough caught exactly that (`.scratch/sidebar-ws-and-run-state/
+// walkthrough.mjs`, "B: no /api/projects fetch after mount").
 //
 // ---------------------------------------------------------------- what bounds the loop
 //
@@ -76,17 +79,14 @@ export type Ask = {
   readonly after: number;
 };
 
-/// WHAT THE LISTING SAYS ABOUT ONE SESSION -- a SNAPSHOT, and that word is the whole reason
-/// this rule is shaped the way it is: both fields can be behind the session they describe,
-/// and both are behind it in a direction this page can see.
+/// WHAT THE LISTING SAYS ABOUT ONE SESSION, for the one question this rule has left:
+/// whether its send has been recorded yet. Both halves of the old shape are behind the
+/// session they describe, and only the second is behind it in a way this page can see.
 export type ListedRow = {
   /// THE STORE'S SEND TIME, or null for a row whose send has not been recorded yet. The
   /// row is created by the registration; the name and the time are written when the run's
   /// input arrives. Between the two the row is there and still says 还没跑过.
   readonly lastSentAt: number | null;
-  /// WHETHER THE LISTING SAYS A RUN IS IN FLIGHT -- the server's live-runs registry as of
-  /// that read, not as of now.
-  readonly running: boolean;
 };
 
 /// WHICH SESSION TO ASK ABOUT, OR UNDEFINED WHEN THERE IS NOTHING LEFT TO ASK.
@@ -96,47 +96,34 @@ export type ListedRow = {
 /// every id in it has had a write issued for it -- which is what makes an id in it a row
 /// that is due rather than one nobody has asked for.
 ///
-/// AND THE ROWS THE LISTING NAMES ARE CANDIDATES TOO, which is the half the third reason
-/// cannot do without: an id LEAVES `titles` the moment the listing names it (the page's
-/// own live title is only there to name a row the store has not answered for yet --
-/// `app.tsx`'s `forgetListedTitles`), and the row that has ARRIVED is exactly the row the
-/// third reason is about. A rule that only looked at `titles` could never ask again once a
-/// row was listed, so the spinner a stale listing put on it would stay. `titles` still
-/// answers FIRST, so a session with no row at all is asked about before a stale one.
+/// AND THE ROWS THE LISTING NAMES ARE CANDIDATES TOO: an id LEAVES `titles` the moment the
+/// listing names it (the page's own live title is only there to name a row the store has
+/// not answered for yet -- `app.tsx`'s `forgetListedTitles`), and the row that has ARRIVED
+/// is exactly the row the second reason is about -- named but not yet sent to. `titles`
+/// still answers FIRST, so a session with no row at all is asked about before a listed
+/// one that is still catching up.
 ///
-/// `rows` IS WHAT THE LISTING SAYS, per id it names, and `running` IS WHICH SESSIONS THIS
-/// PAGE IS DRIVING a run in right now -- its own registry, live, and the only thing that
-/// knows a run has ended. THE TWO ARE READ TOGETHER because the listing's `running` is a
-/// snapshot: a read taken while a run was in flight goes on saying so, and the row would
-/// wear its spinner for ever if nothing asked again once the run was over. An id the
-/// listing does not name at all answers exactly as an id whose snapshot is behind does --
-/// ask again -- and a row is DUE in any of three cases:
+/// A ROW IS DUE IN EXACTLY TWO CASES, and both are about the STORE not having caught up
+/// with this page's own write:
 ///
 ///   * it is not in the listing (the registration has not been read yet);
-///   * it is, with no send recorded (the run's own write is not there yet);
-///   * it is, with `running` set while this page is not running it -- the run ended after
-///     that read, and the row is still wearing a spinner nobody will take off.
+///   * it is, with no send recorded (the run's own write is not there yet).
 ///
-/// AND AN ID THAT IS RUNNING IS LEFT ALONE: asking while a run is in flight gets the same
-/// answer, and the end of the run is what changes it -- which arrives as a change to
-/// `running` and re-runs the caller's effect. So this is not a poll: every ask is a
-/// response to a state, and each of the three stops the moment the store catches up.
+/// Everything else -- a row that is named and sent to, whatever its `running` -- is
+/// settled, and the PUSH is what moves it from here (see this file's header on the third
+/// reason's removal).
 ///
 /// `attempts` is the count so far per id, this page load's -- see the header on why there
 /// is a bound, and why it is per id.
 export function nextAsk(
   titles: readonly string[],
   rows: ReadonlyMap<string, ListedRow>,
-  running: ReadonlySet<string>,
   attempts: ReadonlyMap<string, number>,
 ): Ask | undefined {
   const candidates = [...new Set([...titles, ...rows.keys()])];
   const id = candidates.find((t) => {
     const row = rows.get(t);
-    const due =
-      row === undefined ||
-      row.lastSentAt === null ||
-      (row.running && !running.has(t));
+    const due = row === undefined || row.lastSentAt === null;
     return due && (attempts.get(t) ?? 0) < ASK_AGAIN_LIMIT;
   });
   if (id === undefined) return undefined;

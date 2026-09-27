@@ -18,6 +18,7 @@
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
             [harness.edge.ag-ui :as ag]
+            [harness.edge.host :as host]
             [harness.edge.http :as http]
             [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
@@ -6957,3 +6958,52 @@
        (sessions/clear-startup-run-state!)
        (is (= "idle" (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
                                                    "alive-runstate")))))))))
+
+(deftest a-run-starting-and-ending-pushes-the-host-listing
+  ;; Ticket 02 of `.scratch/sidebar-ws-and-run-state`: the sidebar's `running` rides
+  ;; `events.host` as a PUSH. The adapter's run-started!/run-finished! write the
+  ;; column AND ring the host stream, so a watcher -- which is exactly what every
+  ;; events.host connection installs -- hears the listing change without anybody
+  ;; asking. The watcher here records the frame a connection would have been SENT,
+  ;; and it is installed before the run so the start's own frame cannot be missed.
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-push"
+   (fn []
+     (bind! "alive-push" alive-dir)
+     (let [frames (atom [])
+           ;; A pushed listing that names this row running, or nil.
+           running-frame?
+           (fn []
+             (some (fn [frame]
+                     (and (= "projects" (:type frame))
+                          (some (fn [p]
+                                  (some (fn [s] (and (= (:threadId s) "alive-push")
+                                                     (:running s)))
+                                        (:sessions p)))
+                                (:projects frame))))
+                   @frames))
+           ;; A pushed listing that names this row NOT running, or nil.
+           idle-frame?
+           (fn []
+             (some (fn [frame]
+                     (and (= "projects" (:type frame))
+                          (some (fn [p]
+                                  (some (fn [s] (and (= (:threadId s) "alive-push")
+                                                     (not (:running s))))
+                                        (:sessions p)))
+                                (:projects frame))))
+                   @frames))]
+       (host/watch! (fn [] (swap! frames conj (http/host-frame-for-test))))
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "alive-push")]
+         (try
+           (testing "while the run is held, a pushed listing names it running"
+             (is (until running-frame? 5000)
+                 "no pushed frame said the run was in flight"))
+           (finally
+             (.close sock)
+             ((:release gate))))
+         (testing "and the ending pushes a listing that says it stopped"
+           (is (until idle-frame? 5000)
+               "no pushed frame said the run had ended")))))))

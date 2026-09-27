@@ -580,7 +580,9 @@ export const Sidebar: FC<SidebarProps> = ({
     setRowError(null);
     try {
       onShow(threadId);
-      await refresh();
+      // NO LISTING READ HERE (ticket 02): switching re-reads nothing -- the old size/
+      // mtime reasons are gone, and a run's start/end on the session being left rides
+      // the push like every other fact.
     } finally {
       setBusy(false);
     }
@@ -641,7 +643,8 @@ export const Sidebar: FC<SidebarProps> = ({
           onShowFresh(id, project === null ? null : project.path);
         }
       }
-      await refresh();
+      // NO LISTING READ HERE (ticket 02): the archive route rings the host stream
+      // (`rung`), so this page's own listing arrives by push like everyone else's.
     } catch (failure: unknown) {
       setRowError({
         id: threadId,
@@ -712,7 +715,7 @@ export const Sidebar: FC<SidebarProps> = ({
           onShowFresh(id, null);
         }
       }
-      await refresh();
+      // NO LISTING READ HERE (ticket 02): the removal route rings the host stream.
     } catch (failure: unknown) {
       // The server's reason, on the row the click landed on -- the project's row
       // is the one thing on screen that names what failed.
@@ -745,7 +748,8 @@ export const Sidebar: FC<SidebarProps> = ({
     setAddError(null);
     setTypingPath(false);
     setTypedPath("");
-    await refresh();
+    // NO LISTING READ HERE (ticket 02): the add route rings the host stream, and the
+    // push is what draws the new project row -- on this page and every other one.
   };
 
   /// Add a project: open the folder picker, and add whatever it answers. The
@@ -929,6 +933,13 @@ export const Sidebar: FC<SidebarProps> = ({
       ),
     [statuses],
   );
+  // TICKET 02 NOTE: this is the ONE caller of `refresh` left besides the button and
+  // the mount read. `refresh` here is the LISTING read the rule has always meant --
+  // "ask the store again", wherever the store's word comes from -- not a vote against
+  // the push: a page whose socket is delivering still asks, because the ask is about
+  // a row the push has no reason to ring for (its registration landed a moment ago and
+  // the host ring for it went out with the registration, which this page had not yet
+  // drawn).
   useEffect(() => {
     const ask = nextAsk(Object.keys(liveTitles), listedRows, liveRunning, asked.current);
     if (ask === undefined) return;
