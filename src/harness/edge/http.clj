@@ -1272,7 +1272,13 @@
           ;; AUTO COMPACTION (ticket 04): before this run derives its request, is the model's
           ;; window about to run out? At or over the threshold, compact NOW -- so `history`
           ;; below reads the compacted conversation. Below it, nothing happens.
-          (compact-if-pressured! thread-id)
+          ;;
+          ;; WHAT IT DID IS KEPT BESIDE THE RUN (`:compacted`), and that is not bookkeeping: this
+          ;; compaction changed what the model will read on this very run, and a person watching has
+          ;; no other way to be told. It cannot be said HERE either -- a frame before RUN_STARTED is
+          ;; a frame the client has no run to hang it on -- so it rides the run's first frames
+          ;; (the `:run/start` branch below, beside the injections).
+          (swap! state assoc :compacted (compact-if-pressured! thread-id))
           (let [history  (sessions/messages thread-id)
                 born?    (empty? history)
                 [opening opening-failure]
@@ -1691,7 +1697,7 @@
                                                              ;; compacts aggressively and answers a SHORTER view, or
                                                              ;; nil (the vendor's refusal then stands).
                                                              :on-overflow (fn [history t]
-                                                                            (recover-overflow! thread-id provider history t))
+                                                                            (recover-overflow! thread-id provider history t emit))
                                                              ;; THE SAME QUESTION, ASKED BEFORE EVERY CALL INSTEAD OF
                                                              ;; AFTER THE REFUSAL: is this the request to send? A run
                                                              ;; that grows between calls (one tool result can be
@@ -1700,7 +1706,7 @@
                                                              ;; the run's start, 97% thirteen seconds later, over 100%
                                                              ;; twelve minutes in (`.scratch/compaction-shape` 04).
                                                              :on-pressure (fn [history]
-                                                                            (relieve-pressure! thread-id provider history))
+                                                                            (relieve-pressure! thread-id provider history emit))
                                                              :overflow-retries (compaction/overflow-retries thread-id)
                                                              ;; THE IDLE GUARD'S TWO KNOBS, read from the same harness.edn
                                                              ;; and on the same terms: how long a model call may sit silent,
@@ -1862,10 +1868,20 @@
                                                 ;; `pre` = folded in BEFORE the first call; the
                                                 ;; kernel's keep `ctx`, which is the name of the
                                                 ;; event they answer (`:context/injected`).
-                                                (cond-> (vec (map-indexed
-                                                              (fn [i message]
-                                                                (ag/injected-frame (str run-id "-pre" i) message))
-                                                              injected))
+                                                (cond-> (into (if-some [compacted (:compacted @state)]
+                                                                ;; THE COMPACTION THIS RUN WOKE UP TO ALREADY RIDES FIRST,
+                                                                ;; because it happened FIRST: the trigger at the run's head
+                                                                ;; (`compact-if-pressured!`, whose answer this key holds)
+                                                                ;; measured the record BEFORE the injections below were derived,
+                                                                ;; so the summary the model is now reading stands in front of
+                                                                ;; material derived after it. A run the trigger left alone has
+                                                                ;; no such key and this is the empty vector it takes instead.
+                                                                [(ag/compacted-frame compacted)]
+                                                                [])
+                                                              (map-indexed
+                                                               (fn [i message]
+                                                                 (ag/injected-frame (str run-id "-pre" i) message))
+                                                               injected))
                                                   ;; AND THE CONVERSATION THIS RUN WROTE
                                                   ;; PART OF rides with it, for the same
                                                   ;; reason and on the same run: the page
@@ -5082,7 +5098,14 @@
 
   OPTS' `:aggressive?` picks the plan: the ordinary budget-keeping one, or
   `compaction/overflow-plan` -- the one used after the vendor has ALREADY refused the request
-  for its length, which ignores the budget and keeps only the newest indivisible unit."
+  for its length, which ignores the budget and keeps only the newest indivisible unit.
+
+  IT ANSWERS WHAT IT DID, AND A CALLER THAT HAS A RUN SAYS IT OUT LOUD. The map is
+  `harness.edge.compaction/perform!`'s own, so `:compactionId` names the pair of rows just written
+  and `:tokens` is the size of the range they replace. Nothing HERE builds a frame, because the
+  manual route has no run to speak into; the callers that do build one pass this map to
+  `harness.edge.ag_ui/compacted-frame` -- including the trigger at a run's head, whose answer
+  `run-agent!` holds until the run's first frames go out."
   [stem provider records window ratios opts]
   (let [written   (atom [])
         put       (fn [kind payload]
@@ -5188,8 +5211,14 @@
 
   THE VIEW IS MEASURED BEFORE AND AFTER, over the CONVERSATION alone -- not over what was
   actually sent, whose derived injections would make any view look shorter. A pass that removed
-  nothing answers nil rather than retrying the same overflowing request."
-  [stem provider history _t]
+  nothing answers nil rather than retrying the same overflowing request.
+
+  WHAT IT FOLDED AWAY IS SAID OUT LOUD (`emit`): the vendor refused this request for its length,
+  so the run has just taken the front of the conversation off the model's view, and that is
+  precisely the moment a person watching needs to be told about. A PASS THAT ONLY PRUNED EMITS
+  NOTHING -- pruning is a different fact with its own name (`context/pruned`), and a `compacted`
+  card over it would be a card about work that did not happen."
+  [stem provider history _t emit]
   (try
     (locking compaction-lock
       (when-some [f (replay/find-log (home/projects-dir) stem)]
@@ -5200,9 +5229,16 @@
               records (or (:records pruned) records)
               ratios  (compaction/config stem)
               ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress.
-              _       (try (run-compaction! stem provider records (:context-window provider) ratios
-                                            {:aggressive? true})
-                           (catch Throwable _ nil))
+              ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress,
+              ;;    and its success is SAID OUT LOUD before the retry goes out: the run has just
+              ;;    folded the front of this conversation away, and that card belongs on screen
+              ;;    whether or not the shorter view survives the check below.
+              _       (when-some [compacted (try
+                                            (run-compaction! stem provider records
+                                                             (:context-window provider) ratios
+                                                             {:aggressive? true})
+                                            (catch Throwable _ nil))]
+                        (emit (ag/compacted-frame compacted)))
               system  (vec (take-while #(= "system" (:role %)) history))
               after   (sessions/messages stem)]
           (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
@@ -5230,8 +5266,14 @@
   because what comes back is the CONVERSATION and not this run's decorations.
 
   IT NEVER THROWS AND NEVER SHORTENS NOTHING: a failure answers nil, and so does a view the
-  estimator says is not shorter. The run then carries on with the array it had."
-  [stem provider history]
+  estimator says is not shorter. The run then carries on with the array it had.
+
+  ITS SUCCESS IS SAID OUT LOUD (`emit`), AND NOT CONDITIONALLY ON THE VIEW IT ANSWERS: the rows are
+  written and the session's own model view has already moved, so the conversation IS compacted even
+  when the shorter array is one this call declines to take (the loop refuses a view that would
+  leave a tool call unanswered). A card withheld in that case would be the harness hiding
+  something it had already done."
+  [stem provider history emit]
   (try
     (let [ratios (compaction/config stem)
           window (:context-window provider)
@@ -5242,7 +5284,12 @@
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
                   before  (pressure/estimate-messages history)]
-              (when (run-compaction! stem provider records window ratios nil)
+              (when-some [compacted (run-compaction! stem provider records window ratios nil)]
+                ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
+                ;; The rows are written and the session's own model view has already moved, so the
+                ;; conversation IS compacted; the comparison below only decides whether THIS call
+                ;; takes the shorter array.
+                (emit (ag/compacted-frame compacted))
                 (let [system (vec (take-while #(= "system" (:role %)) history))
                       view   (into system (ag/provider-messages (sessions/messages stem)))]
                   (when (< (pressure/estimate-messages view) before)
@@ -5260,7 +5307,13 @@
 
   PRUNING GOES FIRST AND MAY BE ENOUGH (ticket 06): the oversized TOOL RESULTS are elided for
   free, the pressure is MEASURED AGAIN over the pruned surface, and a view that came back under
-  the threshold skips the summary entirely -- one model call that does not happen."
+  the threshold skips the summary entirely -- one model call that does not happen.
+
+  IT ANSWERS WHAT IT COMPACTED, or nil, where it used to answer nothing at all: this compaction
+  happens BEFORE the run has emitted anything, so its card cannot go out from here -- a frame
+  before RUN_STARTED has no run to hang on -- and `run-agent!` holds this answer until the run's
+  first frames (see the `:run/start` branch there). Failing soft still answers nil, which draws no
+  card."
   [stem]
   (try
     (locking compaction-lock
@@ -5288,8 +5341,8 @@
                 (when-some [provider (providers/current-provider stem)]
                   (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))))
     (catch Throwable t
-      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
-  nil)
+      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
+      nil)))
 
 (defn- compact-post
   "POST /api/threads/<stem>/compact -- one compaction, run by hand (ticket 03).

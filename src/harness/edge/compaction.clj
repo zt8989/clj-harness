@@ -216,8 +216,14 @@ anything. Be concise.")
 (defn perform!
   "One compaction. RECORDS is the log as it stands; the effects are APPEND (write a row:
   `(append kind payload)`) and SUMMARIZE (the head's messages -> summary text). Returns
-  `{:shadowed [ids] :summary text}` when it compacted, and nil when it did not -- because
-  the lock was held, or because there was no range.
+  `{:compactionId id :shadowed [ids] :summary text :tokens n}` when it compacted, and nil
+  when it did not -- because the lock was held, or because there was no range.
+
+  IT ANSWERS WHAT IT DID, AND NOTHING ELSE IS ASKED OF IT: `:compactionId` names the pair of
+  rows it just wrote and `:tokens` is what the folded range was estimated at, and both are on the
+  `context/compacted` fact already. A caller that has somewhere to SAY this (a run's frame
+  sink -- `harness.edge.http`) reads them off here rather than picking the fact back out of the
+  record: one writer, one answer.
 
   THE ROWS GO OUT IN THE ORDER THE LOCK REQUIRES: start, the summary fact, end. Nothing is
   written when there is no range -- a pair of rows recording an empty compaction is noise on
@@ -242,7 +248,10 @@ anything. Be concise.")
                                     :end   (last (:shadowed head))}
                      :tokens       (:head-tokens head)})
             (append "compaction/end" {:compactionId id})
-            {:shadowed (:shadowed head) :summary summary})
+            {:compactionId id
+             :shadowed     (:shadowed head)
+             :summary      summary
+             :tokens       (:head-tokens head)})
           (catch Throwable t
             (append "compaction/end" {:compactionId id :error (ex-message t)})
             (throw t)))))))

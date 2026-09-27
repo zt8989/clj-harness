@@ -8,7 +8,7 @@
 //
 // THERE IS NO COUNTERPART IN A REBUILT CONVERSATION, and that is the feature rather than
 // an omission: the frame is never recorded (`harness.edge.http/wire-only-frame?`), so this
-// module has no `keepInjectionCards` -- there is nothing to put back after a refresh. What
+// module has no `keepCardParts` -- there is nothing to put back after a refresh. What
 // is on screen is what the live run said.
 //
 // RUNTIME-ZERO IMPORTS, like `lib/injections.ts` and for the same reason: the UI suite

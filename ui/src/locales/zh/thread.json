@@ -30,6 +30,9 @@
     "messages_other": "{{count}} 条消息"
   },
   "injection.name": "注入的上下文",
+  "compaction.name": "压缩的上下文",
+  "compaction.tokens": "{{value}} tok",
+  "compaction.folded_other": "折叠了 {{count}} 条消息",
   "timeout.name": "模型超时",
   "timeout.idle": "{{ms}}ms 没有数据",
   "timeout.retry": "重试 {{attempt}}/{{limit}}",

@@ -69,6 +69,22 @@
       msgs
       (assoc-in msgs [last-assistant :metadata :custom park-namespace :interrupts] interrupts))))
 
+(def ^:private card-custom-names
+  "The CUSTOM frame names that come back as a CARD MESSAGE rather than as nothing: the two the UI
+  draws as a row in the conversation column -- an injected context (`harness.edge.ag_ui`, the
+  instruction blocks and skill bodies a run was handed) and a compaction
+  (`.scratch/compaction-frames`, the summary that stands where the folded range stood).
+
+  THEY ARE SPELLED OUT HERE RATHER THAN REQUIRED FROM THE EDGE, because this is the KERNEL and the
+  edge sits above it: what the kernel reads of the wire is the frames a log recorded. The other
+  reader of the same list is `harness.edge.replay/wire-custom-names`, one level down, and THE TWO
+  MUST AGREE -- a name in one and not the other is a card that draws live and vanishes after a
+  refresh, or one that is in the record and never on screen.
+
+  ANY OTHER CUSTOM IS DROPPED, which is the honest default: a frame this fold has never heard of
+  is one the conversation does not contain."
+  #{"injected-context" "compacted-context"})
+
 (defn apply-frames
   "The bare minimum of what @ag-ui/client's applier does: accumulate text and reasoning
   into separate messages, attach tool calls to the open assistant message, and turn
@@ -118,17 +134,15 @@
          (patch-tool-call msgs (:toolCallId f)
                           #(update-in % [:function :arguments] str (:delta f)))
 
-         ;; AN INJECTED CONTEXT FRAME COMES BACK AS A CARD MESSAGE. The client draws
-         ;; it (a `data` part, see the UI's context-card) and never sends it back --
-         ;; `toAgUiMessages` has no case for a data part -- so a rebuilt conversation
-         ;; carries what was on screen without putting anything into what the model is
-         ;; asked next. The id is the frame's own, so the same card survives every
-         ;; rebuild under the same name.
-         ;;
-         ;; ANY OTHER CUSTOM FRAME IS DROPPED, which is the honest default: a frame
-         ;; this fold has never heard of is one the conversation does not contain.
-         (and (= t "CUSTOM") (= (:name f) "injected-context"))
-         (conj msgs {:id (or (:messageId f) (str "injected-" (count msgs)))
+         ;; A CARD FRAME -- either of the two -- COMES BACK AS A CARD MESSAGE. The client
+         ;; draws it (a `data` part, see the UI's context-card and compaction-card) and never
+         ;; sends it back -- `toAgUiMessages` has no case for a data part -- so a rebuilt
+         ;; conversation carries what was on screen without putting anything into what the model
+         ;; is asked next. The id is the frame's own, so the same card survives every rebuild
+         ;; under the same name (`card-custom-names` says which names these are, and why the
+         ;; literal lives here).
+         (and (= t "CUSTOM") (contains? card-custom-names (:name f)))
+         (conj msgs {:id (or (:messageId f) (str "card-" (count msgs)))
                      :role "assistant"
                      :content [{:type "data" :name (:name f)
                                 :data (get-in f [:value])}]})

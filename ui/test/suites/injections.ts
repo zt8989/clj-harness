@@ -30,12 +30,11 @@ import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { type Case, type Suite } from "../e2e";
+import { isCardOnly, keepCardParts } from "../../src/lib/card-parts";
 import {
   INJECTION_PART,
   injectionView,
-  isCardOnly,
   isOpeningEntryId,
-  keepInjectionCards,
   textOfParts,
 } from "../../src/lib/injections";
 
@@ -109,13 +108,13 @@ const cases: readonly Case[] = [
     run: async () => {
       // What the ADAPTER hands back for a rebuild: the card message survives with its
       // id but with EMPTY content -- `toAssistantSnapshotMessage` keeps text and tool
-      // calls only. This is the state `keepInjectionCards` is written for.
+      // calls only. This is the state `keepCardParts` is written for.
       const converted = [
         { id: "u1", role: "user" as const, content: "你好" },
         { id: "r1-ctx1", role: "assistant" as const, content: "" },
         { id: "a1", role: "assistant" as const, content: "收到" },
       ];
-      const kept = keepInjectionCards(rebuiltWithCard("<skills>a catalog</skills>"), converted);
+      const kept = keepCardParts(rebuiltWithCard("<skills>a catalog</skills>"), converted);
       expect(kept[1]?.content).toEqual([
         {
           type: "data",
@@ -133,7 +132,7 @@ const cases: readonly Case[] = [
         { id: "a1", role: "assistant" as const, content: "" },
         { id: "r1-ctx1", role: "assistant" as const, content: "" },
       ];
-      const byId = keepInjectionCards(rebuiltWithCard("<instructions>x</instructions>"), shifted);
+      const byId = keepCardParts(rebuiltWithCard("<instructions>x</instructions>"), shifted);
       expect(byId[1]?.content).toBe("");
       expect(byId[2]?.content).toEqual([
         {
@@ -147,7 +146,7 @@ const cases: readonly Case[] = [
       // feature (or one with no injections in it) comes through untouched, byte for
       // byte -- the same list instance is not reused, but every message is identical.
       const plain = [{ id: "u1", role: "user" as const, content: "你好" }];
-      expect(keepInjectionCards([], plain)).toEqual(plain);
+      expect(keepCardParts([], plain)).toEqual(plain);
 
       // A `data` part of SOMEONE ELSE'S name is left alone: this module owns one name.
       const foreign = [
@@ -158,7 +157,7 @@ const cases: readonly Case[] = [
         },
       ];
       const convertedForeign = [{ id: "x1", role: "assistant" as const, content: "" }];
-      expect(keepInjectionCards(foreign, convertedForeign)[0]?.content).toBe("");
+      expect(keepCardParts(foreign, convertedForeign)[0]?.content).toBe("");
     },
   },
   {
@@ -203,7 +202,7 @@ const cases: readonly Case[] = [
       // (`.scratch/session-opening`): a `data` part that is the card a person sees and
       // a text part that is what the model read. The adapter keeps the text (it has no
       // case for the part), so without this the rebuilt message would draw the block
-      // twice -- as prose and as the card. `keepInjectionCards` replaces the whole
+      // twice -- as prose and as the card. `keepCardParts` replaces the whole
       // content with the card, so the block is read once, in the shape it arrived in.
       //
       // THE ROLE IS `user` AND THAT IS THE POINT (ticket 02): these entries are user
@@ -233,7 +232,7 @@ const cases: readonly Case[] = [
           content: "<instructions>STANDING RULE</instructions>",
         },
       ];
-      const kept = keepInjectionCards(opening, converted);
+      const kept = keepCardParts(opening, converted);
       expect(kept[0]?.content).toEqual([
         {
           type: "data",
@@ -336,7 +335,7 @@ const cases: readonly Case[] = [
       expect(isCardOnly([card])).toBe(true);
 
       // WORDS BESIDE THE CARD ARE WORDS: somebody's message that happens to carry a card
-      // still belongs in a bubble, and `keepInjectionCards` is what turns the opening
+      // still belongs in a bubble, and `keepCardParts` is what turns the opening
       // into the card-only shape above.
       expect(isCardOnly([{ type: "text", text: "你好" }, card])).toBe(false);
       expect(isCardOnly([{ type: "text", text: "你好" }])).toBe(false);

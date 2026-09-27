@@ -1,0 +1,1383 @@
+test config root: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790
+test OS home: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-home-834110219516481744
+developer home store before this run: present (454774784 bytes, left alone)
+time limits: 300s per namespace, 1800s for the run (CLJ_HARNESS_TEST_NAMESPACE_TIMEOUT_SECS / CLJ_HARNESS_TEST_RUN_TIMEOUT_SECS)
+
+Testing harness.test-runner-test
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by org.sqlite.SQLiteJDBCLoader in an unnamed module (file:/C:/Users/zhouteng/.m2/repository/org/xerial/sqlite-jdbc/3.53.4.0/sqlite-jdbc-3.53.4.0.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+  [0.6s] harness.test-runner-test
+
+Testing harness.kernel.install-test
+  [0.0s] harness.kernel.install-test
+
+Testing harness.kernel.event-test
+  [0.0s] harness.kernel.event-test
+
+Testing harness.test-support-test
+  [0.2s] harness.test-support-test
+
+Testing harness.infra.db-test
+harness.db: the store was damaged ([SQLITE_CORRUPT] The database disk image is malformed (database disk image is malformed)) and moved aside: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-db-3590982722528789519\root-9805393586400\harness.db.corrupt-1790478153257
+harness.db: the store was damaged ([SQLITE_CORRUPT] The database disk image is malformed (database disk image is malformed)) and moved aside: C:\Users\zhouteng\AppData\Local\Temp\clj-harness-db-3590982722528789519\root-9810912311800\harness.db.corrupt-1790478158761
+  [8.8s] harness.infra.db-test
+
+Testing harness.infra.shell-test
+  [48.3s] harness.infra.shell-test
+
+Testing harness.infra.env-test
+  [1.9s] harness.infra.env-test
+
+Testing harness.infra.language-test
+  [0.0s] harness.infra.language-test
+
+Testing harness.kernel.llm-test
+  [0.9s] harness.kernel.llm-test
+
+Testing harness.cap.skills-test
+  [7.8s] harness.cap.skills-test
+
+Testing harness.cap.preamble-test
+  [1.9s] harness.cap.preamble-test
+
+Testing harness.kernel.tools-test
+  [94.2s] harness.kernel.tools-test
+
+Testing harness.cap.mcp-test
+  [24.3s] harness.cap.mcp-test
+
+Testing harness.cap.jobs-test
+  [85.9s] harness.cap.jobs-test
+
+Testing harness.cap.spill-test
+11:07:05.039 WARN  harness.infra.log - not-written reason=disk full thread-id=t
+  [0.2s] harness.cap.spill-test
+
+Testing harness.cap.mcp-wired-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4349 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:05.093 INFO  harness.infra.log - listening port=4349 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:05.092841400Z
+11:07:09.869 INFO  harness.infra.log - start model=scripted run-id=e535f27a-399f-4e66-87b8-7c91350de03e thread-id=wired-ledger
+11:07:11.001 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e535f27a-399f-4e66-87b8-7c91350de03e thread-id=wired-ledger
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4468 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:11.333 INFO  harness.infra.log - listening port=4468 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:11.332728900Z
+11:07:13.568 INFO  harness.infra.log - start model=scripted run-id=330aca0b-001f-477d-a903-90f88b17e89b thread-id=wired-call
+11:07:15.661 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=330aca0b-001f-477d-a903-90f88b17e89b thread-id=wired-call
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4573 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:15.823 INFO  harness.infra.log - listening port=4573 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:15.823354400Z
+11:07:18.242 INFO  harness.infra.log - start model=scripted run-id=b505809b-58d0-4563-b746-922743fbaa71 thread-id=wired-secret
+11:07:21.697 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b505809b-58d0-4563-b746-922743fbaa71 thread-id=wired-secret
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4693 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:22.072 INFO  harness.infra.log - listening port=4693 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:22.072242100Z
+11:07:24.060 INFO  harness.infra.log - start model=scripted run-id=d9ceb055-330d-48b6-a467-59e1a8ecd825 thread-id=wired-switch
+11:07:25.695 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d9ceb055-330d-48b6-a467-59e1a8ecd825 thread-id=wired-switch
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4794 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:26.799 INFO  harness.infra.log - listening port=4794 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:26.799127500Z
+11:07:29.279 INFO  harness.infra.log - start model=scripted run-id=ae11d4e4-7441-4ccb-a3ea-ebd6455439fc thread-id=wired-no-ask
+11:07:32.597 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ae11d4e4-7441-4ccb-a3ea-ebd6455439fc thread-id=wired-no-ask
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4901 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:32.797 INFO  harness.infra.log - listening port=4901 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:32.797022500Z
+11:07:35.662 INFO  harness.infra.log - start model=scripted run-id=0c2fbea6-fe2c-4dfd-8b2e-ad048824c81d thread-id=wired-delegate
+11:07:40.006 INFO  harness.infra.log - tool-not-run outcome=approved run-id=0c2fbea6-fe2c-4dfd-8b2e-ad048824c81d thread-id=wired-delegate tool=mcp__fake__echo
+11:07:41.141 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0c2fbea6-fe2c-4dfd-8b2e-ad048824c81d thread-id=wired-delegate
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5080 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:41.347 INFO  harness.infra.log - listening port=5080 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:41.346591700Z
+11:07:44.707 INFO  harness.infra.log - start model=scripted run-id=de44d8d9-0eaf-4083-a1f8-81208ec515f5 thread-id=wired-broken
+11:07:48.525 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=de44d8d9-0eaf-4083-a1f8-81208ec515f5 thread-id=wired-broken
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5207 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:48.680 INFO  harness.infra.log - listening port=5207 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:48.680327800Z
+11:07:50.358 INFO  harness.infra.log - start model=scripted run-id=7cb264d9-d71f-4ae1-9e18-2eda43cda046 thread-id=wired-none
+11:07:51.258 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7cb264d9-d71f-4ae1-9e18-2eda43cda046 thread-id=wired-none
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5258 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:07:51.530 INFO  harness.infra.log - listening port=5258 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:07:51.529519700Z
+11:07:54.005 INFO  harness.infra.log - start model=scripted run-id=01d6428e-a04e-44ff-b499-4482225dabee thread-id=wired-ask
+11:07:57.993 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=01d6428e-a04e-44ff-b499-4482225dabee thread-id=wired-ask
+11:08:00.002 INFO  harness.infra.log - start model=scripted run-id=c083ca4d-2d09-4cb4-b31f-e81ffe5cf85c thread-id=wired-ask
+11:08:06.170 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c083ca4d-2d09-4cb4-b31f-e81ffe5cf85c thread-id=wired-ask
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5543 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:06.417 INFO  harness.infra.log - listening port=5543 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:06.417455600Z
+11:08:08.419 INFO  harness.infra.log - start model=scripted run-id=784b75b6-58d3-4f51-a3ee-e978d510fb9e thread-id=wired-gate
+11:08:10.961 INFO  harness.infra.log - tool-not-run outcome=hook-blocked run-id=784b75b6-58d3-4f51-a3ee-e978d510fb9e thread-id=wired-gate tool=mcp__fake__echo
+11:08:11.554 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=784b75b6-58d3-4f51-a3ee-e978d510fb9e thread-id=wired-gate
+  [66.5s] harness.cap.mcp-wired-test
+
+Testing harness.cap.ask-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5637 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:11.658 INFO  harness.infra.log - listening port=5637 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:11.658469500Z
+11:08:12.360 INFO  harness.infra.log - start model=scripted run-id=901aa7be-e627-45a9-ae45-4ea45fef73e8 thread-id=ask-declined
+11:08:13.043 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=901aa7be-e627-45a9-ae45-4ea45fef73e8 thread-id=ask-declined
+11:08:13.643 INFO  harness.infra.log - start model=scripted run-id=e5d094c5-f7dd-4513-9b2f-01ffd93ea783 thread-id=ask-declined
+11:08:13.956 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e5d094c5-f7dd-4513-9b2f-01ffd93ea783 thread-id=ask-declined
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5685 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:13.993 INFO  harness.infra.log - listening port=5685 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:13.993721400Z
+11:08:14.464 INFO  harness.infra.log - start model=scripted run-id=a4314a81-d97e-442b-8a85-5fb2929f195b thread-id=ask-empty
+11:08:15.075 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a4314a81-d97e-442b-8a85-5fb2929f195b thread-id=ask-empty
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5703 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:15.102 INFO  harness.infra.log - listening port=5703 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:15.102519600Z
+11:08:15.597 INFO  harness.infra.log - start model=scripted run-id=30a45799-543d-47d7-b8a1-2c6834c15709 thread-id=ask-dupes
+11:08:16.110 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=30a45799-543d-47d7-b8a1-2c6834c15709 thread-id=ask-dupes
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5729 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:16.138 INFO  harness.infra.log - listening port=5729 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:16.138670Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5732 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:16.185 INFO  harness.infra.log - listening port=5732 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:16.185666Z
+11:08:16.655 INFO  harness.infra.log - start model=scripted run-id=31f7e004-1b74-4b0f-a35b-98a32b7f55ac thread-id=ask-bad-0
+11:08:17.532 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=31f7e004-1b74-4b0f-a35b-98a32b7f55ac thread-id=ask-bad-0
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5756 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:17.598 INFO  harness.infra.log - listening port=5756 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:17.597065700Z
+11:08:18.406 INFO  harness.infra.log - start model=scripted run-id=86508bd3-2efc-4fc1-bd9a-b0a7af2219a1 thread-id=ask-bad-1
+11:08:19.103 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=86508bd3-2efc-4fc1-bd9a-b0a7af2219a1 thread-id=ask-bad-1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5790 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:19.129 INFO  harness.infra.log - listening port=5790 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:19.129497800Z
+11:08:19.560 INFO  harness.infra.log - start model=scripted run-id=a3e6b4a7-a0f9-427e-af14-45cb32144202 thread-id=ask-bad-2
+11:08:20.742 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a3e6b4a7-a0f9-427e-af14-45cb32144202 thread-id=ask-bad-2
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5820 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:20.819 INFO  harness.infra.log - listening port=5820 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:20.819195Z
+11:08:21.730 INFO  harness.infra.log - start model=scripted run-id=ff0acfff-4af5-4933-a751-817e221c0c9d thread-id=ask-spent-once
+11:08:22.376 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ff0acfff-4af5-4933-a751-817e221c0c9d thread-id=ask-spent-once
+11:08:23.078 INFO  harness.infra.log - start model=scripted run-id=29144267-317e-4351-bf91-0b8c1d80e704 thread-id=ask-spent-once
+11:08:23.576 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=29144267-317e-4351-bf91-0b8c1d80e704 thread-id=ask-spent-once
+11:08:23.970 INFO  harness.infra.log - start model=scripted run-id=e0c5f014-df18-449e-a76e-a95b093b3a31 thread-id=ask-spent-once
+11:08:24.065 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e0c5f014-df18-449e-a76e-a95b093b3a31 thread-id=ask-spent-once
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5886 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:24.094 INFO  harness.infra.log - listening port=5886 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:24.093039200Z
+11:08:24.579 INFO  harness.infra.log - start model=scripted run-id=083c61a1-5082-488c-ae93-a74580a86d18 thread-id=ask-options
+11:08:24.905 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=083c61a1-5082-488c-ae93-a74580a86d18 thread-id=ask-options
+11:08:25.466 INFO  harness.infra.log - start model=scripted run-id=137e4075-e882-402a-9a7a-82c263cd6d2b thread-id=ask-options
+11:08:25.809 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=137e4075-e882-402a-9a7a-82c263cd6d2b thread-id=ask-options
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5929 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:25.883 INFO  harness.infra.log - listening port=5929 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:25.883816200Z
+11:08:26.761 INFO  harness.infra.log - start model=scripted run-id=d17cb94b-996f-406c-923f-16cd28de2d77 thread-id=ask-other
+11:08:27.363 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d17cb94b-996f-406c-923f-16cd28de2d77 thread-id=ask-other
+11:08:27.823 INFO  harness.infra.log - start model=scripted run-id=0c80ada6-0000-4350-b620-283dff6ba1cd thread-id=ask-other
+11:08:28.152 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0c80ada6-0000-4350-b620-283dff6ba1cd thread-id=ask-other
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5979 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:28.188 INFO  harness.infra.log - listening port=5979 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:28.187561500Z
+11:08:28.754 INFO  harness.infra.log - start model=scripted run-id=98004d35-597b-4aad-aa10-05a2ab79b24f thread-id=ask-other-no-options
+11:08:29.450 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=98004d35-597b-4aad-aa10-05a2ab79b24f thread-id=ask-other-no-options
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6008 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:29.501 INFO  harness.infra.log - listening port=6008 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:29.501502Z
+11:08:30.384 INFO  harness.infra.log - start model=scripted run-id=6e1820d0-8f6e-4412-b6a1-caa8ae36bf20 thread-id=ask-multi-shape
+11:08:30.732 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6e1820d0-8f6e-4412-b6a1-caa8ae36bf20 thread-id=ask-multi-shape
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6038 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:30.768 INFO  harness.infra.log - listening port=6038 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:30.767175500Z
+11:08:31.217 INFO  harness.infra.log - start model=scripted run-id=b36ffe82-49a1-4714-a5be-7104bfd98fd9 thread-id=ask-multi-picked
+11:08:31.527 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b36ffe82-49a1-4714-a5be-7104bfd98fd9 thread-id=ask-multi-picked
+11:08:31.898 INFO  harness.infra.log - start model=scripted run-id=7669971a-9959-42ae-852c-a9042916cd4f thread-id=ask-multi-picked
+11:08:32.219 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=7669971a-9959-42ae-852c-a9042916cd4f thread-id=ask-multi-picked
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6077 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:32.248 INFO  harness.infra.log - listening port=6077 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:32.248098400Z
+11:08:32.674 INFO  harness.infra.log - start model=scripted run-id=52e6bddb-4193-48fa-9484-5190cb7c41e9 thread-id=ask-multi-one
+11:08:32.994 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=52e6bddb-4193-48fa-9484-5190cb7c41e9 thread-id=ask-multi-one
+11:08:33.378 INFO  harness.infra.log - start model=scripted run-id=e1a9812e-cb37-4c84-88e2-1350f90e80ad thread-id=ask-multi-one
+11:08:33.684 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e1a9812e-cb37-4c84-88e2-1350f90e80ad thread-id=ask-multi-one
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6119 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:33.708 INFO  harness.infra.log - listening port=6119 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:33.708150600Z
+11:08:34.127 INFO  harness.infra.log - start model=scripted run-id=295169cd-1871-4d4f-a8ba-2cc553145bff thread-id=ask-multi-none
+11:08:34.456 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=295169cd-1871-4d4f-a8ba-2cc553145bff thread-id=ask-multi-none
+11:08:34.853 INFO  harness.infra.log - start model=scripted run-id=6de20a71-2b02-4a22-a141-469aeba2b070 thread-id=ask-multi-none
+11:08:35.158 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6de20a71-2b02-4a22-a141-469aeba2b070 thread-id=ask-multi-none
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6157 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:35.184 INFO  harness.infra.log - listening port=6157 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:35.183499700Z
+11:08:35.626 INFO  harness.infra.log - start model=scripted run-id=facc731a-26c9-45a7-998a-7183acd4dc93 thread-id=ask-multi-absent
+11:08:36.052 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=facc731a-26c9-45a7-998a-7183acd4dc93 thread-id=ask-multi-absent
+11:08:36.447 INFO  harness.infra.log - start model=scripted run-id=170fa4a2-27fb-45bb-b624-f10b46f54178 thread-id=ask-multi-absent
+11:08:36.755 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=170fa4a2-27fb-45bb-b624-f10b46f54178 thread-id=ask-multi-absent
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6197 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:36.785 INFO  harness.infra.log - listening port=6197 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:36.785864200Z
+11:08:37.216 INFO  harness.infra.log - start model=scripted run-id=ed0c6cce-be35-49df-85ae-0ca34a082fe0 thread-id=ask-resume
+11:08:37.589 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ed0c6cce-be35-49df-85ae-0ca34a082fe0 thread-id=ask-resume
+11:08:37.982 INFO  harness.infra.log - start model=scripted run-id=82781d4f-7029-4e34-bbb2-79e4e0210360 thread-id=ask-resume
+11:08:38.302 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=82781d4f-7029-4e34-bbb2-79e4e0210360 thread-id=ask-resume
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6236 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:08:38.329 INFO  harness.infra.log - listening port=6236 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:08:38.329737Z
+11:08:38.794 INFO  harness.infra.log - start model=scripted run-id=44f45422-0c26-422d-aca5-545ea1e971b0 thread-id=ask-park
+11:08:39.141 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=44f45422-0c26-422d-aca5-545ea1e971b0 thread-id=ask-park
+  [27.5s] harness.cap.ask-test
+
+Testing harness.session-tools-test
+  [8.1s] harness.session-tools-test
+
+Testing harness.approval-test
+  [6.0s] harness.approval-test
+
+Testing harness.kernel.loop-test
+  [18.3s] harness.kernel.loop-test
+
+Testing harness.edge.ag-ui-test
+  [0.1s] harness.edge.ag-ui-test
+
+Testing harness.edge.replay-test
+  [0.7s] harness.edge.replay-test
+
+Testing harness.evals-test
+  [0.0s] harness.evals-test
+
+Testing harness.cap.providers-test
+  [25.5s] harness.cap.providers-test
+
+Testing harness.cap.project-test
+  [18.4s] harness.cap.project-test
+
+Testing harness.cap.claims-test
+11:10:26.042 WARN  harness.infra.log - taken-over from-instance=d6a9abc4-ce3c-402d-911a-fb3e0a89e739 from-pid=13596 pid=107652 thread-id=cl-two-jvm
+11:10:26.513 WARN  harness.infra.log - taken-over from-instance=long-gone from-pid=116212 pid=107652 thread-id=cl-dead
+11:10:26.567 WARN  harness.infra.log - taken-over from-instance=the-previous-owner from-pid=107652 pid=107652 thread-id=cl-reused
+  [30.2s] harness.cap.claims-test
+
+Testing harness.infra.log-test
+11:10:28.944 ERROR harness.infra.log - first
+clojure.lang.ExceptionInfo: to a
+	at harness.infra.log_test$fn__34429$fn__34430.invoke(log_test.clj:167)
+	at harness.infra.log_test$fn__34429.invokeStatic(log_test.clj:165)
+	at harness.infra.log_test$fn__34429.invoke(log_test.clj:158)
+	at clojure.test$test_var$fn__9894.invoke(test.clj:717)
+	at clojure.test$test_var.invokeStatic(test.clj:717)
+	at clojure.test$test_var.invoke(test.clj:708)
+	at clojure.test$test_vars$fn__9920$fn__9925.invoke(test.clj:735)
+	at clojure.test$default_fixture.invokeStatic(test.clj:687)
+	at clojure.test$default_fixture.invoke(test.clj:683)
+	at clojure.test$test_vars$fn__9920.invoke(test.clj:735)
+	at clojure.test$default_fixture.invokeStatic(test.clj:687)
+	at clojure.test$default_fixture.invoke(test.clj:683)
+	at clojure.test$test_vars.invokeStatic(test.clj:731)
+	at clojure.test$test_all_vars.invokeStatic(test.clj:737)
+	at clojure.test$test_ns.invokeStatic(test.clj:758)
+	at clojure.test$test_ns.invoke(test.clj:743)
+	at harness.test_runner$run_namespaces_BANG_$fn__15828.invoke(test_runner.clj:513)
+	at harness.test_runner$run_with_deadline$fn__15804$fn__15805.invoke(test_runner.clj:393)
+	at harness.test_runner$run_with_deadline$fn__15804.invoke(test_runner.clj:393)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:10:28.948 ERROR harness.infra.log - second
+clojure.lang.ExceptionInfo: to b
+	at harness.infra.log_test$fn__34429$fn__34432.invoke(log_test.clj:170)
+	at harness.infra.log_test$fn__34429.invokeStatic(log_test.clj:168)
+	at harness.infra.log_test$fn__34429.invoke(log_test.clj:158)
+	at clojure.test$test_var$fn__9894.invoke(test.clj:717)
+	at clojure.test$test_var.invokeStatic(test.clj:717)
+	at clojure.test$test_var.invoke(test.clj:708)
+	at clojure.test$test_vars$fn__9920$fn__9925.invoke(test.clj:735)
+	at clojure.test$default_fixture.invokeStatic(test.clj:687)
+	at clojure.test$default_fixture.invoke(test.clj:683)
+	at clojure.test$test_vars$fn__9920.invoke(test.clj:735)
+	at clojure.test$default_fixture.invokeStatic(test.clj:687)
+	at clojure.test$default_fixture.invoke(test.clj:683)
+	at clojure.test$test_vars.invokeStatic(test.clj:731)
+	at clojure.test$test_all_vars.invokeStatic(test.clj:737)
+	at clojure.test$test_ns.invokeStatic(test.clj:758)
+	at clojure.test$test_ns.invoke(test.clj:743)
+	at harness.test_runner$run_namespaces_BANG_$fn__15828.invoke(test_runner.clj:513)
+	at harness.test_runner$run_with_deadline$fn__15804$fn__15805.invoke(test_runner.clj:393)
+	at harness.test_runner$run_with_deadline$fn__15804.invoke(test_runner.clj:393)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+  [2.1s] harness.infra.log-test
+
+Testing harness.cap.git-test
+  [171.7s] harness.cap.git-test
+
+Testing harness.cap.editing-test
+  [2.1s] harness.cap.editing-test
+
+Testing harness.cap.subagents-test
+  [9.8s] harness.cap.subagents-test
+
+Testing harness.cap.frame-bus-test
+  [0.0s] harness.cap.frame-bus-test
+
+Testing harness.cap.editing-mode-tools-test
+  [10.1s] harness.cap.editing-mode-tools-test
+
+Testing harness.cap.hashline.anchors-test
+  [0.2s] harness.cap.hashline.anchors-test
+
+Testing harness.cap.hashline.store-test
+  [2.6s] harness.cap.hashline.store-test
+
+Testing harness.cap.hashline.read-test
+  [11.2s] harness.cap.hashline.read-test
+
+Testing harness.cap.hashline.replace-test
+  [22.6s] harness.cap.hashline.replace-test
+
+Testing harness.cap.hashline.refusals-test
+  [7.9s] harness.cap.hashline.refusals-test
+
+Testing harness.cap.hashline.write-test
+  [10.3s] harness.cap.hashline.write-test
+
+Testing harness.cap.hashline.undo-test
+  [9.1s] harness.cap.hashline.undo-test
+
+Testing harness.cap.hashline.batch-test
+  [5.6s] harness.cap.hashline.batch-test
+
+Testing harness.cap.hashline.insert-test
+  [9.9s] harness.cap.hashline.insert-test
+
+Testing harness.cap.hashline.grep-test
+  [71.2s] harness.cap.hashline.grep-test
+
+Testing harness.cap.glob-test
+  [71.7s] harness.cap.glob-test
+
+Testing harness.cap.todos-test
+  [9.8s] harness.cap.todos-test
+
+Testing harness.cap.web-test
+  [0.5s] harness.cap.web-test
+
+Testing harness.cap.web-search-test
+  [1.3s] harness.cap.web-search-test
+
+Testing harness.kernel.hooks.install-test
+  [0.1s] harness.kernel.hooks.install-test
+
+Testing harness.kernel.hooks-test
+  [13.1s] harness.kernel.hooks-test
+
+Testing harness.kernel.hooks.dispatch-test
+
+FAIL in (a-hang-is-bounded-and-means-the-same-as-a-failure) (dispatch_test.clj:139)
+a gate that hangs blocks
+the gate should have been killed too, took 10572ms
+expected: (< elapsed 5000)
+  actual: (not (< 10572 5000))
+  [57.8s] harness.kernel.hooks.dispatch-test
+
+Testing harness.kernel.hooks-wired-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14691 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:18:48.800 INFO  harness.infra.log - listening port=14691 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:18:48.800720200Z
+11:18:50.003 INFO  harness.infra.log - start model=scripted run-id=f8cbd260-8fa2-42fd-b559-7b9e79eb4b44 thread-id=hw-gate
+11:18:53.622 INFO  harness.infra.log - tool-not-run outcome=hook-blocked run-id=f8cbd260-8fa2-42fd-b559-7b9e79eb4b44 thread-id=hw-gate tool=read
+11:18:54.267 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f8cbd260-8fa2-42fd-b559-7b9e79eb4b44 thread-id=hw-gate
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14753 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:18:54.345 INFO  harness.infra.log - listening port=14753 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:18:54.345020500Z
+11:18:55.989 INFO  harness.infra.log - start model=scripted run-id=f4c0e7fe-85ea-42ab-8a19-5c9642071b0a thread-id=hw-disabled
+11:18:56.956 INFO  harness.infra.log - tool-not-run outcome=disabled run-id=f4c0e7fe-85ea-42ab-8a19-5c9642071b0a thread-id=hw-disabled tool=read
+11:18:57.523 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f4c0e7fe-85ea-42ab-8a19-5c9642071b0a thread-id=hw-disabled
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14812 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:18:59.074 INFO  harness.infra.log - listening port=14812 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:18:59.074346400Z
+11:19:00.381 INFO  harness.infra.log - start model=scripted run-id=83ea0c42-bff9-4fef-978c-ee3ac7dbb6f3 thread-id=hw-start
+11:19:05.930 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=83ea0c42-bff9-4fef-978c-ee3ac7dbb6f3 thread-id=hw-start
+11:19:08.604 INFO  harness.infra.log - start model=scripted run-id=784226d6-d896-487c-b7bd-1bd519ce86cf thread-id=hw-start
+11:19:09.097 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=784226d6-d896-487c-b7bd-1bd519ce86cf thread-id=hw-start
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:14931 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:09.795 INFO  harness.infra.log - listening port=14931 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:09.795254300Z
+11:19:10.442 INFO  harness.infra.log - start model=scripted run-id=f28d699d-b26b-4d36-a248-ab5c9b1e2d40 thread-id=hw-delegate-no
+11:19:15.353 INFO  harness.infra.log - tool-not-run outcome=vetoed run-id=f28d699d-b26b-4d36-a248-ab5c9b1e2d40 thread-id=hw-delegate-no tool=read
+11:19:16.763 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f28d699d-b26b-4d36-a248-ab5c9b1e2d40 thread-id=hw-delegate-no
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1024 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:16.891 INFO  harness.infra.log - listening port=1024 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:16.891939700Z
+11:19:19.300 INFO  harness.infra.log - start model=scripted run-id=015241c6-c440-49ef-91e2-2cc36fbe9bdc thread-id=hw-audit
+11:19:22.800 INFO  harness.infra.log - tool-not-run outcome=hook-blocked run-id=015241c6-c440-49ef-91e2-2cc36fbe9bdc thread-id=hw-audit tool=read
+11:19:23.800 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=015241c6-c440-49ef-91e2-2cc36fbe9bdc thread-id=hw-audit
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1098 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:23.863 INFO  harness.infra.log - listening port=1098 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:23.863102800Z
+11:19:24.947 INFO  harness.infra.log - start model=scripted run-id=69aa8b75-3810-4979-9e16-66dbb8ac0d20 thread-id=hw-post
+11:19:31.732 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=69aa8b75-3810-4979-9e16-66dbb8ac0d20 thread-id=hw-post
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1177 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:31.889 INFO  harness.infra.log - listening port=1177 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:31.888549500Z
+11:19:32.315 INFO  harness.infra.log - start model=scripted run-id=3ef87df8-acac-4955-bd6e-95bf28a2b47d thread-id=hw-nomatch
+11:19:32.923 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=3ef87df8-acac-4955-bd6e-95bf28a2b47d thread-id=hw-nomatch
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1212 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:34.539 INFO  harness.infra.log - listening port=1212 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:34.539329600Z
+11:19:35.784 INFO  harness.infra.log - start model=scripted run-id=9e75d4b3-c39d-4995-9542-8669023f71ac thread-id=hw-none
+11:19:37.365 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9e75d4b3-c39d-4995-9542-8669023f71ac thread-id=hw-none
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1254 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:37.759 INFO  harness.infra.log - listening port=1254 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:37.759486600Z
+11:19:39.414 INFO  harness.infra.log - start model=scripted run-id=84dc542f-4dc1-4257-9e5e-7f37bda3e204 thread-id=hw-stop
+11:19:44.224 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=84dc542f-4dc1-4257-9e5e-7f37bda3e204 thread-id=hw-stop
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1339 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:44.309 INFO  harness.infra.log - listening port=1339 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:44.309871500Z
+11:19:51.176 INFO  harness.infra.log - start model=scripted run-id=a37b7d53-2d92-46cd-b38f-133bf7dbeeb7 thread-id=hw-instructions
+11:19:52.475 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a37b7d53-2d92-46cd-b38f-133bf7dbeeb7 thread-id=hw-instructions
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1460 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:19:52.630 INFO  harness.infra.log - listening port=1460 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:19:52.630285900Z
+11:19:53.975 INFO  harness.infra.log - start model=scripted run-id=74a45748-0907-451a-8706-e65b41f0701b thread-id=hw-frames-on
+11:20:03.521 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=74a45748-0907-451a-8706-e65b41f0701b thread-id=hw-frames-on
+11:20:04.831 INFO  harness.infra.log - start model=scripted run-id=fbee15e1-62a7-4185-a983-b4772b6441b1 thread-id=hw-frames-off
+11:20:06.219 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fbee15e1-62a7-4185-a983-b4772b6441b1 thread-id=hw-frames-off
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1654 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:06.300 INFO  harness.infra.log - listening port=1654 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:06.300501600Z
+11:20:07.668 INFO  harness.infra.log - start model=scripted run-id=4f33eea3-95f6-4f69-81ee-5620935ee6d2 thread-id=hw-allow
+11:20:13.597 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4f33eea3-95f6-4f69-81ee-5620935ee6d2 thread-id=hw-allow
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1753 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:13.674 INFO  harness.infra.log - listening port=1753 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:13.674241600Z
+11:20:15.522 INFO  harness.infra.log - start model=scripted run-id=f98191d0-6015-4133-a640-55092ade09e6 thread-id=hw-plain
+11:20:16.660 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=f98191d0-6015-4133-a640-55092ade09e6 thread-id=hw-plain tool=read
+11:20:16.784 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f98191d0-6015-4133-a640-55092ade09e6 thread-id=hw-plain
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1804 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:16.903 INFO  harness.infra.log - listening port=1804 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:16.903892300Z
+11:20:18.198 INFO  harness.infra.log - start model=scripted run-id=8e41b712-4b96-4655-bce2-fdb093631f8d thread-id=hw-noinstructions
+11:20:19.706 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8e41b712-4b96-4655-bce2-fdb093631f8d thread-id=hw-noinstructions
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1849 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:19.773 INFO  harness.infra.log - listening port=1849 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:19.773626900Z
+11:20:21.373 INFO  harness.infra.log - start model=scripted run-id=848f6d7a-75da-429e-ba98-f9a393b321a2 thread-id=hw-both
+11:20:21.438 INFO  harness.infra.log - start model=scripted run-id=2a517056-dafb-46f5-bd51-ee67ceee3e95 thread-id=hw-both
+11:20:24.945 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2a517056-dafb-46f5-bd51-ee67ceee3e95 thread-id=hw-both
+11:20:26.335 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=848f6d7a-75da-429e-ba98-f9a393b321a2 thread-id=hw-both
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:1947 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:26.507 INFO  harness.infra.log - listening port=1947 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:26.507840700Z
+11:20:27.537 INFO  harness.infra.log - start model=scripted run-id=e45598fc-456a-44c8-8522-37ae5ddc3a13 thread-id=hw-delegate-quiet
+11:20:31.287 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=e45598fc-456a-44c8-8522-37ae5ddc3a13 thread-id=hw-delegate-quiet tool=read
+11:20:31.409 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e45598fc-456a-44c8-8522-37ae5ddc3a13 thread-id=hw-delegate-quiet
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:2026 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:20:31.469 INFO  harness.infra.log - listening port=2026 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:20:31.469902100Z
+11:20:32.680 INFO  harness.infra.log - start model=scripted run-id=b2c96ff7-a720-45aa-a7e1-f48c0ad87e6c thread-id=hw-delegate-ok
+11:20:37.344 INFO  harness.infra.log - tool-not-run outcome=approved run-id=b2c96ff7-a720-45aa-a7e1-f48c0ad87e6c thread-id=hw-delegate-ok tool=read
+11:20:38.743 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b2c96ff7-a720-45aa-a7e1-f48c0ad87e6c thread-id=hw-delegate-ok
+  [110.0s] harness.kernel.hooks-wired-test
+
+Testing harness.cap.system-prompt-test
+  [40.3s] harness.cap.system-prompt-test
+
+Testing harness.edge.stats-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:2875 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:19.242 INFO  harness.infra.log - listening port=2875 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:19.241082300Z
+11:21:24.492 INFO  harness.infra.log - start model=scripted run-id=e8111554-108a-4068-b28a-4de5e5511a6b thread-id=stats-endpoint
+11:21:25.648 INFO  harness.infra.log - tool-not-run outcome=unknown-tool run-id=e8111554-108a-4068-b28a-4de5e5511a6b thread-id=stats-endpoint tool=no-such-tool
+11:21:26.640 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e8111554-108a-4068-b28a-4de5e5511a6b thread-id=stats-endpoint
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3032 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:26.830 INFO  harness.infra.log - listening port=3032 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:26.830135Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3036 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:26.926 INFO  harness.infra.log - listening port=3036 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:26.926158800Z
+11:21:28.722 INFO  harness.infra.log - start model=scripted run-id=0200f465-f08c-4dc0-80e5-5f81a99673db thread-id=stats-live
+11:21:29.649 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0200f465-f08c-4dc0-80e5-5f81a99673db thread-id=stats-live
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3098 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:29.844 INFO  harness.infra.log - listening port=3098 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:29.844923800Z
+  [10.7s] harness.edge.stats-test
+
+Testing harness.edge.trajectory-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3102 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:30.015 INFO  harness.infra.log - listening port=3102 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:30.015256900Z
+11:21:31.887 INFO  harness.infra.log - start model=scripted run-id=33a6cc4c-4794-4e45-bd54-30eb9bd1cb36 thread-id=trajectory-endpoint
+11:21:32.719 INFO  harness.infra.log - tool-not-run outcome=unknown-tool run-id=33a6cc4c-4794-4e45-bd54-30eb9bd1cb36 thread-id=trajectory-endpoint tool=no-such-tool
+11:21:33.705 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=33a6cc4c-4794-4e45-bd54-30eb9bd1cb36 thread-id=trajectory-endpoint
+11:21:34.406 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=r1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3200 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:34.486 INFO  harness.infra.log - listening port=3200 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:34.486778700Z
+11:21:35.709 INFO  harness.infra.log - start model=scripted run-id=82ad58fb-2268-4034-a811-72a16191d61a thread-id=trajectory-push
+11:21:36.712 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=82ad58fb-2268-4034-a811-72a16191d61a thread-id=trajectory-push
+11:21:38.971 INFO  harness.infra.log - start model=scripted run-id=ce42e84e-2c8e-41a1-b735-af8a9f60c241 thread-id=trajectory-push
+11:21:39.960 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ce42e84e-2c8e-41a1-b735-af8a9f60c241 thread-id=trajectory-push
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3315 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:40.062 INFO  harness.infra.log - listening port=3315 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:40.062527100Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3318 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:40.115 INFO  harness.infra.log - listening port=3318 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:40.115530200Z
+11:21:41.459 INFO  harness.infra.log - start model=scripted run-id=aa6e4714-b8b1-4e77-baa4-fb19de198491 thread-id=trajectory-view
+11:21:42.137 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=aa6e4714-b8b1-4e77-baa4-fb19de198491 thread-id=trajectory-view
+  [12.3s] harness.edge.trajectory-test
+
+Testing harness.edge.context-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3365 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:42.299 INFO  harness.infra.log - listening port=3365 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:42.299061400Z
+11:21:43.595 INFO  harness.infra.log - start model=scripted run-id=5846d347-ea64-4891-8ac3-de31965ce20f thread-id=context-endpoint
+11:21:44.263 INFO  harness.infra.log - tool-not-run outcome=unknown-tool run-id=5846d347-ea64-4891-8ac3-de31965ce20f thread-id=context-endpoint tool=no-such-tool
+11:21:44.921 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=5846d347-ea64-4891-8ac3-de31965ce20f thread-id=context-endpoint
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3427 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:45.071 INFO  harness.infra.log - listening port=3427 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:45.070603400Z
+DEBUG changed-case answer: {:usedTokens 500, :windowTokens 5000, :percent 10, :parts [{:key "system", :tokens 160} {:key "tools", :tokens 10} {:key "conversation", :tokens 330}]}
+  [2.8s] harness.edge.context-test
+
+Testing harness.edge.pressure-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3429 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:45.159 INFO  harness.infra.log - listening port=3429 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:45.159598700Z
+11:21:46.542 INFO  harness.infra.log - start model=scripted run-id=44107320-cd58-4d17-933a-b2da651f5d39 thread-id=pressure-endpoint
+11:21:47.543 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=44107320-cd58-4d17-933a-b2da651f5d39 thread-id=pressure-endpoint
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3512 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:47.554 INFO  harness.infra.log - listening port=3512 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:47.554416600Z
+11:21:48.871 INFO  harness.infra.log - start model=scripted run-id=405a6ed7-6603-439e-beda-4fb55a36a84d thread-id=pressure-band
+  [4.6s] harness.edge.pressure-test
+
+Testing harness.edge.compaction-test
+11:21:49.780 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=405a6ed7-6603-439e-beda-4fb55a36a84d thread-id=pressure-band
+  [0.0s] harness.edge.compaction-test
+
+Testing harness.edge.compaction-run-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3590 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:49.853 INFO  harness.infra.log - listening port=3590 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:49.853169500Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3678 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:54.237 INFO  harness.infra.log - listening port=3678 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:54.237323700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3680 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:54.378 INFO  harness.infra.log - listening port=3680 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:54.378567500Z
+  [4.7s] harness.edge.compaction-run-test
+
+Testing harness.edge.relieve-pressure-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3685 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:54.586 INFO  harness.infra.log - listening port=3685 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:54.586562900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3686 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:54.635 INFO  harness.infra.log - listening port=3686 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:54.635563400Z
+  [0.4s] harness.edge.relieve-pressure-test
+
+Testing harness.edge.prune-test
+  [0.0s] harness.edge.prune-test
+
+Testing harness.edge.ui-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3696 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-empty-1872231922505388390 -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+11:21:55.050 INFO  harness.infra.log - listening port=3696 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.050899700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3700 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: this process serves no page -- run `cd ui && npm run build` and start it from the repo root, or name a directory with --ui-dist
+11:21:55.109 INFO  harness.infra.log - listening port=3700 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.108140200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3705 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-empty-1872231922505388390 -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+11:21:55.189 INFO  harness.infra.log - listening port=3705 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.189349800Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3710 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+NO UI BUILD: no built page at C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-empty-1872231922505388390 -- run `cd ui && npm run build`, or start this process with --ui-dist naming a directory that holds one
+11:21:55.276 INFO  harness.infra.log - listening port=3710 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.276347900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3717 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\AppData\Local\Temp\clj-harness-ui-dist-16204511814282405639\index.html
+11:21:55.394 INFO  harness.infra.log - listening port=3717 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.393920200Z
+  [0.7s] harness.edge.ui-test
+
+Testing harness.edge.http-test
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3752 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:21:55.831 INFO  harness.infra.log - listening port=3752 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:21:55.831067800Z
+11:21:57.410 INFO  harness.infra.log - start model=scripted run-id=73a4111e-6da0-4f97-ba0b-111a7cebb5d5 thread-id=sofar-a
+11:22:00.469 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=73a4111e-6da0-4f97-ba0b-111a7cebb5d5 thread-id=sofar-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3938 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:00.858 INFO  harness.infra.log - listening port=3938 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:00.858747400Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3944 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:00.978 INFO  harness.infra.log - listening port=3944 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:00.978747900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:3985 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:02.186 INFO  harness.infra.log - listening port=3985 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:02.186784Z
+11:22:06.066 INFO  harness.infra.log - start model=scripted run-id=0e88d74f-c959-4646-b5f0-3df482357413 thread-id=it-system-off
+11:22:07.881 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0e88d74f-c959-4646-b5f0-3df482357413 thread-id=it-system-off
+11:22:08.422 INFO  harness.infra.log - start model=scripted run-id=d972759a-c2ff-4ee3-80fe-57c72ba64954 thread-id=it-system-off
+11:22:08.728 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d972759a-c2ff-4ee3-80fe-57c72ba64954 thread-id=it-system-off
+11:22:11.026 INFO  harness.infra.log - start model=scripted run-id=b91a152a-1647-43a3-8377-0db77ffb05fb thread-id=it-system-off
+11:22:11.420 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b91a152a-1647-43a3-8377-0db77ffb05fb thread-id=it-system-off
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4257 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:11.512 INFO  harness.infra.log - listening port=4257 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:11.512001600Z
+11:22:12.651 INFO  harness.infra.log - start model=scripted run-id=8667bec3-fbe7-4098-834d-049951c7ea43 thread-id=born-with-context
+11:22:13.081 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8667bec3-fbe7-4098-834d-049951c7ea43 thread-id=born-with-context
+11:22:13.522 INFO  harness.infra.log - start model=scripted run-id=da3c7bac-c4dd-4109-b0b5-95678aabd25d thread-id=born-with-context
+11:22:13.893 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=da3c7bac-c4dd-4109-b0b5-95678aabd25d thread-id=born-with-context
+11:22:14.327 INFO  harness.infra.log - start model=scripted run-id=ab033124-f170-4479-83aa-a57cb85c78e7 thread-id=born-with-context
+11:22:14.631 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ab033124-f170-4479-83aa-a57cb85c78e7 thread-id=born-with-context
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4330 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:14.680 INFO  harness.infra.log - listening port=4330 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:14.680851300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4344 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:14.877 INFO  harness.infra.log - listening port=4344 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:14.877852200Z
+11:22:14.917 WARN  harness.infra.log - taken-over from-instance=the-previous-owner from-pid=107652 pid=107652 thread-id=stale-claim
+11:22:15.876 INFO  harness.infra.log - start model=scripted run-id=521a90cf-3c85-434a-925f-c0c9debf1262 thread-id=stale-claim
+11:22:17.179 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=521a90cf-3c85-434a-925f-c0c9debf1262 thread-id=stale-claim
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4394 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:17.243 INFO  harness.infra.log - listening port=4394 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:17.242052400Z
+11:22:17.901 INFO  harness.infra.log - start model=scripted run-id=444d8deb-7118-441e-ae24-57b736f1fa88 thread-id=rebind-run
+11:22:18.651 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=444d8deb-7118-441e-ae24-57b736f1fa88 thread-id=rebind-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4435 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:18.700 INFO  harness.infra.log - listening port=4435 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:18.700796900Z
+11:22:19.266 INFO  harness.infra.log - start model=scripted run-id=04f0c044-f39f-41b3-ac54-0be545802b69 thread-id=rebuild-694c5ae1-4e26-4bb4-80a7-69c69f4126a0
+11:22:20.081 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=04f0c044-f39f-41b3-ac54-0be545802b69 thread-id=rebuild-694c5ae1-4e26-4bb4-80a7-69c69f4126a0
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4487 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:20.182 INFO  harness.infra.log - listening port=4487 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:20.182286500Z
+11:22:20.789 INFO  harness.infra.log - start model=scripted run-id=29ff43f1-b0e2-4577-a636-118ebb111d30 thread-id=alive-rebuild
+11:22:21.749 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=29ff43f1-b0e2-4577-a636-118ebb111d30 thread-id=alive-rebuild
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4553 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:21.844 INFO  harness.infra.log - listening port=4553 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:21.844976400Z
+11:22:22.431 INFO  harness.infra.log - start model=scripted run-id=fd6e0536-8eda-4757-a960-f4d2b56bb712 thread-id=proj-run
+11:22:23.078 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fd6e0536-8eda-4757-a960-f4d2b56bb712 thread-id=proj-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4589 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:23.117 INFO  harness.infra.log - listening port=4589 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:23.117791700Z
+11:22:23.872 INFO  harness.infra.log - start model=scripted run-id=952f3c83-fe09-4fac-a3b1-756979aa6dfe thread-id=iu-http-replace
+11:22:24.770 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=952f3c83-fe09-4fac-a3b1-756979aa6dfe thread-id=iu-http-replace
+11:22:28.596 INFO  harness.infra.log - start model=scripted run-id=ca75303e-b753-46cd-8602-c8da0b4cf86f thread-id=iu-http-replace
+11:22:29.181 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ca75303e-b753-46cd-8602-c8da0b4cf86f thread-id=iu-http-replace
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4753 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:29.265 INFO  harness.infra.log - listening port=4753 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:29.265269600Z
+11:22:29.781 INFO  harness.infra.log - start model=scripted run-id=fc83f2aa-8bcd-470d-96a6-1ad331fea18d thread-id=named-once
+11:22:30.046 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fc83f2aa-8bcd-470d-96a6-1ad331fea18d thread-id=named-once
+11:22:30.544 INFO  harness.infra.log - start model=scripted run-id=fcaf87e9-02ba-4fb4-a583-50f12fe5e802 thread-id=named-once
+11:22:30.837 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fcaf87e9-02ba-4fb4-a583-50f12fe5e802 thread-id=named-once
+11:22:31.431 INFO  harness.infra.log - start model=scripted run-id=0b824502-9223-4008-aaca-b508aeff5ba4 thread-id=no-words
+11:22:31.997 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=0b824502-9223-4008-aaca-b508aeff5ba4 thread-id=no-words
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-1400914422005512965/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4845 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:32.163 INFO  harness.infra.log - listening port=4845 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-1400914422005512965 since=2026-09-27T03:22:32.163033600Z
+11:22:33.128 INFO  harness.infra.log - start model=scripted run-id=d153d6dc-6360-4fc2-b59e-ac531d25a234 thread-id=it-slash-side
+11:22:33.702 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d153d6dc-6360-4fc2-b59e-ac531d25a234 thread-id=it-slash-side
+11:22:34.385 INFO  harness.infra.log - start model=scripted run-id=84077707-e5c3-4ba7-ac11-ec19d7851947 thread-id=it-slash-side
+11:22:34.650 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=84077707-e5c3-4ba7-ac11-ec19d7851947 thread-id=it-slash-side
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4900 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:34.720 INFO  harness.infra.log - listening port=4900 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:34.720606400Z
+11:22:35.562 ERROR harness.infra.log - run-refused thread-id=http-guard
+clojure.lang.ExceptionInfo: model "beta-plain" does not accept ["image"] input; it declares ["text"] (provider :beta) -- change the model, or send only what it declares
+	at harness.edge.http$guard_input_modalities_BANG_.invokeStatic(http.clj:1142)
+	at harness.edge.http$guard_input_modalities_BANG_.invoke(http.clj:1116)
+	at harness.edge.http$run_agent_BANG_$fn__25249$fn__25259.invoke(http.clj:1383)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1353)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:22:35.620 INFO  harness.infra.log - terminal event=RUN_ERROR reason=model "beta-plain" does not accept ["image"] input; it declares ["text"] (provider :beta) -- change the model, or send only what it declares run-id=496e43c1-db56-489a-9797-2e026c16ac0e thread-id=http-guard
+11:22:36.747 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=3f802646-0eb6-4d82-b67d-2274d97092e2 thread-id=http-guard
+11:22:37.423 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=3f802646-0eb6-4d82-b67d-2274d97092e2 thread-id=http-guard
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:4968 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:37.488 INFO  harness.infra.log - listening port=4968 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:37.488905500Z
+11:22:38.750 INFO  harness.infra.log - start model=scripted run-id=a6239455-c171-4b4b-8bfd-e42d927ef56b thread-id=images
+11:22:39.932 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a6239455-c171-4b4b-8bfd-e42d927ef56b thread-id=images
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5025 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:40.019 INFO  harness.infra.log - listening port=5025 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:40.019659600Z
+11:22:40.560 INFO  harness.infra.log - start model=scripted run-id=09c1ca94-3426-431a-bdd6-169beaed8d0a thread-id=park-dead
+11:22:40.627 INFO  harness.infra.log - terminal event=RUN_ERROR reason=this run's history leaves 1 tool call unanswered and no parked approval in this process can answer it (call_dead1): an OpenAI-shaped vendor refuses a request whose assistant message with tool_calls is not followed by a tool message for each 'tool_call_id', so the run was refused before the provider was called. Send a result for that call, or start a new session. run-id=09c1ca94-3426-431a-bdd6-169beaed8d0a thread-id=park-dead
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5049 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:40.671 INFO  harness.infra.log - listening port=5049 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:40.671364800Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5054 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:40.804 INFO  harness.infra.log - listening port=5054 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:40.804296600Z
+11:22:41.363 INFO  harness.infra.log - start model=scripted run-id=c258a46e-e345-4c56-86b2-924c47d7c304 thread-id=diag-story
+11:22:42.156 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c258a46e-e345-4c56-86b2-924c47d7c304 thread-id=diag-story
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5087 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:42.183 INFO  harness.infra.log - listening port=5087 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:42.183870900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-13466280229277340513/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5094 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:42.320 INFO  harness.infra.log - listening port=5094 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-13466280229277340513 since=2026-09-27T03:22:42.320870500Z
+11:22:42.417 ERROR harness.infra.log - run-refused thread-id=count-in
+clojure.lang.ExceptionInfo: a tier may not carry [:context-window]; those are the catalog's answers about the model a tier selected, and a tier chooses only [":provider" ":model" ":reasoning-effort"] -- declare them on the model entry in config.edn's :providers (or describe the whole provider inline in :default)
+	at harness.cap.providers$fail.invokeStatic(providers.clj:171)
+	at harness.cap.providers$fail.invoke(providers.clj:171)
+	at harness.cap.providers$selection.invokeStatic(providers.clj:794)
+	at harness.cap.providers$selection.invoke(providers.clj:774)
+	at harness.cap.providers$default_selection.invokeStatic(providers.clj:1160)
+	at harness.cap.providers$default_selection.invoke(providers.clj:1145)
+	at harness.cap.providers$resolve_tiers.invokeStatic(providers.clj:1188)
+	at harness.cap.providers$resolve_tiers.invoke(providers.clj:1177)
+	at harness.cap.providers$resolve_provider.invokeStatic(providers.clj:1219)
+	at harness.cap.providers$resolve_provider.invoke(providers.clj:1192)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1303)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1295)
+	at harness.cap.providers$current_provider.invokeStatic(providers.clj:1300)
+	at harness.cap.providers$current_provider.invoke(providers.clj:1295)
+	at harness.edge.http$run_agent_BANG_$fn__25249$fn__25259.invoke(http.clj:1361)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1353)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:22:42.446 INFO  harness.infra.log - terminal event=RUN_ERROR reason=a tier may not carry [:context-window]; those are the catalog's answers about the model a tier selected, and a tier chooses only [":provider" ":model" ":reasoning-effort"] -- declare them on the model entry in config.edn's :providers (or describe the whole provider inline in :default) run-id=7f0f611d-059c-4f11-930f-0090712658ef thread-id=count-in
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5101 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:42.494 INFO  harness.infra.log - listening port=5101 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:42.494375600Z
+11:22:43.181 INFO  harness.infra.log - start model=scripted run-id=f590a46b-9be3-43b1-a7a2-4f1c4c40af28 thread-id=alive-runstate
+11:22:44.125 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f590a46b-9be3-43b1-a7a2-4f1c4c40af28 thread-id=alive-runstate
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5165 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:44.244 INFO  harness.infra.log - listening port=5165 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:44.244636200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5189 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:44.593 INFO  harness.infra.log - listening port=5189 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:44.593081800Z
+11:22:46.668 ERROR harness.infra.log - run-refused thread-id=it-system-block
+clojure.lang.ExceptionInfo: no system message for you
+	at harness.cap.system_prompt$assemble_STAR_.invokeStatic(system_prompt.clj:127)
+	at harness.cap.system_prompt$assemble_STAR_.invoke(system_prompt.clj:87)
+	at harness.cap.instruction_updates$plan.invokeStatic(instruction_updates.clj:133)
+	at harness.cap.instruction_updates$plan.invoke(instruction_updates.clj:95)
+	at harness.edge.http$run_agent_BANG_$fn__25249$fn__25259.invoke(http.clj:1369)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1353)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:22:46.695 INFO  harness.infra.log - terminal event=RUN_ERROR reason=no system message for you run-id=03f6d9bd-3f08-496c-a466-9b738844c7ef thread-id=it-system-block
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5238 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:46.731 INFO  harness.infra.log - listening port=5238 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:46.731475300Z
+11:22:47.218 INFO  harness.infra.log - start model=scripted run-id=cc6056e4-6ef3-4426-b5b1-5f5a19caaa09 thread-id=minted-run
+11:22:47.505 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=cc6056e4-6ef3-4426-b5b1-5f5a19caaa09 thread-id=minted-run
+11:22:47.997 INFO  harness.infra.log - start model=scripted run-id=419c8c57-0ebf-45d2-a611-6f36aec16a02 thread-id=minted-run
+11:22:48.283 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=419c8c57-0ebf-45d2-a611-6f36aec16a02 thread-id=minted-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5292 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:48.409 INFO  harness.infra.log - listening port=5292 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:48.409274700Z
+11:22:48.963 INFO  harness.infra.log - start model=scripted run-id=ae4f8c9e-c87f-47cd-8fe9-1a968169cc5c thread-id=diag-refused
+11:22:49.258 INFO  harness.infra.log - tool-not-run outcome=unknown-tool run-id=ae4f8c9e-c87f-47cd-8fe9-1a968169cc5c thread-id=diag-refused tool=no-such-tool
+11:22:49.526 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ae4f8c9e-c87f-47cd-8fe9-1a968169cc5c thread-id=diag-refused
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5338 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:49.607 INFO  harness.infra.log - listening port=5338 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:49.607999600Z
+11:22:50.575 INFO  harness.infra.log - start model=scripted run-id=f93b4bdc-7c7a-48f7-8f7e-b5e8f3fab3b9 thread-id=arch-a
+11:22:51.998 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f93b4bdc-7c7a-48f7-8f7e-b5e8f3fab3b9 thread-id=arch-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5468 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:53.316 INFO  harness.infra.log - listening port=5468 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:53.316653900Z
+11:22:53.824 INFO  harness.infra.log - start model=scripted run-id=87ab26db-fa5d-49e3-8e20-55ae9633be22 thread-id=served-elsewhere
+11:22:54.654 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=87ab26db-fa5d-49e3-8e20-55ae9633be22 thread-id=served-elsewhere
+11:22:55.399 INFO  harness.infra.log - start model=scripted run-id=6400ce1f-62af-4b02-9289-9a2e9e43cc4f thread-id=served-elsewhere
+11:22:55.653 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6400ce1f-62af-4b02-9289-9a2e9e43cc4f thread-id=served-elsewhere
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5536 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:55.723 INFO  harness.infra.log - listening port=5536 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:55.722746300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5539 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:55.773 INFO  harness.infra.log - listening port=5539 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:55.773744100Z
+11:22:56.304 INFO  harness.infra.log - start model=scripted run-id=26fdc6d3-93c8-44c8-b561-6e4f796572ef thread-id=lifecycle
+11:22:57.103 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=26fdc6d3-93c8-44c8-b561-6e4f796572ef thread-id=lifecycle
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5592 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:22:57.222 INFO  harness.infra.log - listening port=5592 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:22:57.222325600Z
+11:22:57.838 INFO  harness.infra.log - start model=scripted run-id=932584d5-6caf-41ea-80ff-cb405f168ede thread-id=two-kinds
+11:22:58.646 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=932584d5-6caf-41ea-80ff-cb405f168ede thread-id=two-kinds
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5677 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:00.513 INFO  harness.infra.log - listening port=5677 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:00.513530900Z
+11:23:01.015 INFO  harness.infra.log - start model=scripted run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb thread-id=it-jobs
+11:23:01.854 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb thread-id=it-jobs
+11:23:02.323 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:02.334 INFO  harness.infra.log - start model=scripted run-id=a26fc9d6-b8b6-4bec-9c94-639ca1b77985 thread-id=it-jobs
+11:23:02.397 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:02.604 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:02.698 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:02.800 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:02.899 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:03.082 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+11:23:03.094 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a26fc9d6-b8b6-4bec-9c94-639ca1b77985 thread-id=it-jobs
+11:23:03.099 WARN  harness.infra.log - unpaired-model-row carried-by-the-frames=0 paired=0 run-id=4a101d6f-934c-4680-9cde-42a2f1d058eb
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5748 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:03.213 INFO  harness.infra.log - listening port=5748 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:03.213510300Z
+11:23:03.792 INFO  harness.infra.log - start model=scripted run-id=90ad45f9-25b1-4ee1-97f8-4e353c71f4e8 thread-id=iu-http-in-place
+11:23:04.331 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=90ad45f9-25b1-4ee1-97f8-4e353c71f4e8 thread-id=iu-http-in-place
+11:23:07.389 INFO  harness.infra.log - start model=scripted run-id=85e2347f-aab5-4d4a-ae8a-df3dda1ce3c8 thread-id=iu-http-in-place
+11:23:07.710 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=85e2347f-aab5-4d4a-ae8a-df3dda1ce3c8 thread-id=iu-http-in-place
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5847 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:07.753 INFO  harness.infra.log - listening port=5847 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:07.753890400Z
+11:23:08.304 INFO  harness.infra.log - start model=scripted run-id=4257c3fc-b096-4397-8d0b-e952a2ed1802 thread-id=park-ask
+11:23:08.373 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4257c3fc-b096-4397-8d0b-e952a2ed1802 thread-id=park-ask
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5867 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:08.409 INFO  harness.infra.log - listening port=5867 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:08.409596900Z
+11:23:08.997 INFO  harness.infra.log - start model=scripted run-id=da7fdd87-c2fc-494c-99e1-669078178d81 thread-id=replay-e2e
+11:23:09.799 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=da7fdd87-c2fc-494c-99e1-669078178d81 thread-id=replay-e2e
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5962 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:12.837 INFO  harness.infra.log - listening port=5962 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:12.837724400Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5981 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:13.135 INFO  harness.infra.log - listening port=5981 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:13.135459300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-18119507070800091313/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:5988 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:13.283 INFO  harness.infra.log - listening port=5988 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-18119507070800091313 since=2026-09-27T03:23:13.282176600Z
+11:23:13.769 INFO  harness.infra.log - start model=scripted run-id=da4312e9-e18b-44bb-bbb5-9ea958ba23ef thread-id=it-slash
+11:23:14.038 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=da4312e9-e18b-44bb-bbb5-9ea958ba23ef thread-id=it-slash
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6014 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:14.186 INFO  harness.infra.log - listening port=6014 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:14.186734Z
+11:23:14.944 INFO  harness.infra.log - start model=scripted run-id=f747eb7c-e46e-4c65-8d5b-2bfdca0625c7 thread-id=rm-a
+11:23:15.646 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f747eb7c-e46e-4c65-8d5b-2bfdca0625c7 thread-id=rm-a
+11:23:16.163 INFO  harness.infra.log - start model=scripted run-id=1db581be-c99e-479f-a755-2e8ace2459ee thread-id=rm-b
+11:23:16.847 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1db581be-c99e-479f-a755-2e8ace2459ee thread-id=rm-b
+11:23:17.953 INFO  harness.infra.log - start model=scripted run-id=35e0ba9f-53e2-4c7c-9a12-eb1cda6ce2d6 thread-id=rm-other
+11:23:19.410 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=35e0ba9f-53e2-4c7c-9a12-eb1cda6ce2d6 thread-id=rm-other
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6213 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:21.193 INFO  harness.infra.log - listening port=6213 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:21.193989400Z
+11:23:24.846 INFO  harness.infra.log - start model=scripted run-id=2be08a05-b2e3-413c-ab37-3956be27203e thread-id=it-system
+11:23:26.594 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=2be08a05-b2e3-413c-ab37-3956be27203e thread-id=it-system
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6324 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:27.075 INFO  harness.infra.log - listening port=6324 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:27.075171600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6331 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:27.265 INFO  harness.infra.log - listening port=6331 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:27.265840500Z
+11:23:29.270 INFO  harness.infra.log - start model=scripted run-id=4c8deb09-bb40-49ad-bef0-33356d0990b1 thread-id=task-ran
+11:23:30.910 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4c8deb09-bb40-49ad-bef0-33356d0990b1 thread-id=task-ran
+11:23:32.488 INFO  harness.infra.log - start model=seeded run-id=9212d623-2a01-46a9-86c8-73b7a755d1c0 thread-id=task-released
+11:23:33.570 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=9212d623-2a01-46a9-86c8-73b7a755d1c0 thread-id=task-released
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6547 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:35.093 INFO  harness.infra.log - listening port=6547 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:35.093746700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6566 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:35.488 INFO  harness.infra.log - listening port=6566 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:35.488506500Z
+11:23:36.678 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=016d1e6c-24ab-4241-8738-7466b35fbb5c thread-id=http-prov
+11:23:37.242 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=016d1e6c-24ab-4241-8738-7466b35fbb5c thread-id=http-prov
+11:23:38.108 INFO  harness.infra.log - start model=alpha-small provider=:alpha run-id=3df1bf84-8c67-4faa-9cc5-23613a676d70 thread-id=http-prov
+11:23:38.675 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=3df1bf84-8c67-4faa-9cc5-23613a676d70 thread-id=http-prov
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6689 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:40.756 INFO  harness.infra.log - listening port=6689 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:40.756967300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6695 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:40.908 INFO  harness.infra.log - listening port=6695 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:40.908961900Z
+11:23:41.683 INFO  harness.infra.log - start model=scripted run-id=e3459a49-651f-4e62-b757-f0c87f03db43 thread-id=diag-lost-stream
+11:23:41.741 WARN  harness.infra.log - events-closed-without-terminal run-id=e3459a49-651f-4e62-b757-f0c87f03db43 thread-id=diag-lost-stream
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6721 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:41.811 INFO  harness.infra.log - listening port=6721 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:41.810287200Z
+11:23:43.110 INFO  harness.infra.log - start model=scripted run-id=f6efdd14-b045-4cb8-88c2-b225bfa4c2f4 thread-id=sofar-b
+11:23:44.545 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f6efdd14-b045-4cb8-88c2-b225bfa4c2f4 thread-id=sofar-b
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6817 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:44.748 INFO  harness.infra.log - listening port=6817 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:44.748288600Z
+11:23:45.858 INFO  harness.infra.log - start model=scripted run-id=1424a51e-35c6-40f1-8e05-854c3fd52773 thread-id=frames-rebuilt
+11:23:47.515 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1424a51e-35c6-40f1-8e05-854c3fd52773 thread-id=frames-rebuilt
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6872 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:47.638 INFO  harness.infra.log - listening port=6872 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:47.638648600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6943 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:51.262 INFO  harness.infra.log - listening port=6943 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:51.262365700Z
+11:23:52.348 INFO  harness.infra.log - start model=scripted run-id=6d7b2e9c-cac1-4dfb-89dd-e959dd29a8de thread-id=t-think-echo
+11:23:53.733 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6d7b2e9c-cac1-4dfb-89dd-e959dd29a8de thread-id=t-think-echo
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:6995 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:53.837 INFO  harness.infra.log - listening port=6995 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:53.837206500Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7001 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:53.988 INFO  harness.infra.log - listening port=7001 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:53.988767500Z
+11:23:55.398 INFO  harness.infra.log - start model=scripted run-id=78a14252-4e57-405a-a058-44e17bcb2533 thread-id=cors-origin
+11:23:55.772 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=78a14252-4e57-405a-a058-44e17bcb2533 thread-id=cors-origin
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7059 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:55.858 INFO  harness.infra.log - listening port=7059 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:55.858044200Z
+11:23:56.965 INFO  harness.infra.log - start model=scripted run-id=076cf860-234b-44a4-a972-a934d88288f0 thread-id=images-reborn
+11:23:57.641 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=076cf860-234b-44a4-a972-a934d88288f0 thread-id=images-reborn
+11:23:58.781 INFO  harness.infra.log - start model=scripted run-id=fe383b48-a6f5-4cd5-a261-ffba0e587481 thread-id=images-reborn
+11:23:59.929 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fe383b48-a6f5-4cd5-a261-ffba0e587481 thread-id=images-reborn
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7140 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:23:59.991 INFO  harness.infra.log - listening port=7140 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:23:59.991594Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7170 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:00.799 INFO  harness.infra.log - listening port=7170 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:00.799601700Z
+11:24:01.604 INFO  harness.infra.log - start model=scripted run-id=8dfa3ee0-2269-4749-8fed-026b9c4e09c7 thread-id=t-pad-on
+11:24:01.907 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8dfa3ee0-2269-4749-8fed-026b9c4e09c7 thread-id=t-pad-on
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7197 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:01.925 INFO  harness.infra.log - listening port=7197 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:01.925409200Z
+11:24:02.450 INFO  harness.infra.log - start model=scripted run-id=a860948b-7614-483e-bbcb-513370d51a51 thread-id=t-pad-off
+11:24:02.747 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a860948b-7614-483e-bbcb-513370d51a51 thread-id=t-pad-off
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7232 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:02.805 INFO  harness.infra.log - listening port=7232 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:02.805443Z
+11:24:03.339 INFO  harness.infra.log - start model=scripted run-id=86e3c712-bd6e-480f-9963-cd7390a55b30 thread-id=t-client-field
+11:24:03.662 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=86e3c712-bd6e-480f-9963-cd7390a55b30 thread-id=t-client-field
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7255 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:03.706 INFO  harness.infra.log - listening port=7255 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:03.706184300Z
+11:24:03.968 WARN  harness.infra.log - close-off-failed reason=line 1 of the log is not valid JSON (JSON error (end-of-file inside string)) -- the log is truncated or corrupt thread-id=corrupt-c38d0eab-2f39-4f51-81c6-5a63815c6968
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7269 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:04.067 INFO  harness.infra.log - listening port=7269 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:04.066281400Z
+11:24:04.609 INFO  harness.infra.log - start model=scripted run-id=1424174f-a7ea-404f-afb0-e1b2bbcd50b3 thread-id=snapshots
+11:24:05.422 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1424174f-a7ea-404f-afb0-e1b2bbcd50b3 thread-id=snapshots
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7307 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:05.500 INFO  harness.infra.log - listening port=7307 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:05.500226800Z
+11:24:06.384 INFO  harness.infra.log - start model=scripted run-id=b877507a-d954-4903-a1fe-9d741140de8d thread-id=gate-a
+11:24:06.457 INFO  harness.infra.log - start model=scripted run-id=4294f74b-d6fb-42a4-a485-ff2f2dcc7959 thread-id=gate-b
+11:24:07.590 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=b877507a-d954-4903-a1fe-9d741140de8d thread-id=gate-a
+11:24:07.595 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4294f74b-d6fb-42a4-a485-ff2f2dcc7959 thread-id=gate-b
+11:24:08.487 INFO  harness.infra.log - start model=scripted run-id=ce8402a8-61f5-4867-ac7e-477857c48c75 thread-id=gate-a
+11:24:09.205 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=ce8402a8-61f5-4867-ac7e-477857c48c75 thread-id=gate-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7398 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:09.250 INFO  harness.infra.log - listening port=7398 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:09.249580300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7470 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:12.371 INFO  harness.infra.log - listening port=7470 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:12.371588700Z
+11:24:12.472 WARN  harness.infra.log - close-off-failed reason=line 1 of the log is written in the old contract (`kind` at the top level); this build reads only `event` and `message` rows -- start a new conversation, or read it with the build that wrote it thread-id=old-contract-b7af8007-2ff0-4952-9c9c-608af329a375
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7476 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:12.530 INFO  harness.infra.log - listening port=7476 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:12.530587200Z
+11:24:13.575 INFO  harness.infra.log - start model=scripted run-id=936870ba-5051-4421-a06d-2e874344555a thread-id=silent
+11:24:14.224 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=936870ba-5051-4421-a06d-2e874344555a thread-id=silent
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7511 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:14.305 INFO  harness.infra.log - listening port=7511 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:14.305120500Z
+11:24:15.318 INFO  harness.infra.log - start model=scripted run-id=da078767-18f9-4ddb-aaac-558a69d6052c thread-id=crash-gate
+11:24:15.388 ERROR harness.infra.log - crashed run-id=da078767-18f9-4ddb-aaac-558a69d6052c thread-id=crash-gate
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__52672$fn__52673$fn__52674$fn__52675.invoke(http_test.clj:5950)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1838)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:24:16.089 INFO  harness.infra.log - start model=scripted run-id=60131595-3df8-469f-857a-fcb38d7c1989 thread-id=crash-gate
+11:24:16.802 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=60131595-3df8-469f-857a-fcb38d7c1989 thread-id=crash-gate
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7566 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:16.857 INFO  harness.infra.log - listening port=7566 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:16.856645100Z
+11:24:17.551 ERROR harness.infra.log - run-refused thread-id=http-unknown
+clojure.lang.ExceptionInfo: unknown interrupt: never-parked
+	at harness.edge.http$resume_decisions$fn__25228.invoke(http.clj:1092)
+	at clojure.core$mapv$fn__8565.invoke(core.clj:7063)
+	at clojure.lang.PersistentVector.reduce(PersistentVector.java:418)
+	at clojure.core$reduce.invokeStatic(core.clj:6968)
+	at clojure.core$mapv.invokeStatic(core.clj:7054)
+	at clojure.core$mapv.invoke(core.clj:7054)
+	at harness.edge.http$resume_decisions.invokeStatic(http.clj:1084)
+	at harness.edge.http$resume_decisions.invoke(http.clj:1075)
+	at harness.edge.http$run_agent_BANG_$fn__25249$fn__25259.invoke(http.clj:1463)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1353)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+11:24:17.636 INFO  harness.infra.log - terminal event=RUN_ERROR reason=unknown interrupt: never-parked run-id=ba2cd8c1-93e3-45ab-8242-90121b1a9efe thread-id=http-unknown
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7589 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:17.716 INFO  harness.infra.log - listening port=7589 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:17.716428800Z
+11:24:19.098 INFO  harness.infra.log - start model=scripted run-id=450fe5f3-d56e-437c-a51e-c28b2364da4c thread-id=stop-vendor
+11:24:20.298 INFO  harness.infra.log - terminal event=RUN_ERROR reason=this run was stopped: a person pressed stop on this conversation while the run was going, so it was cut off without finishing run-id=450fe5f3-d56e-437c-a51e-c28b2364da4c thread-id=stop-vendor
+11:24:22.688 INFO  harness.infra.log - start model=scripted run-id=e40c3744-87ec-4ab3-9832-ac4ebff18d78 thread-id=stop-vendor
+11:24:23.548 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=e40c3744-87ec-4ab3-9832-ac4ebff18d78 thread-id=stop-vendor
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7718 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:23.680 INFO  harness.infra.log - listening port=7718 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:23.680564Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7730 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:24.000 INFO  harness.infra.log - listening port=7730 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:24.000360200Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7753 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:24.428 INFO  harness.infra.log - listening port=7753 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:24.428755100Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7773 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:25.118 INFO  harness.infra.log - listening port=7773 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:25.117552500Z
+11:24:27.143 INFO  harness.infra.log - start model=scripted run-id=4966bee8-6de6-493b-9d3c-69a5480234dc thread-id=sofar-parked
+11:24:28.621 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=4966bee8-6de6-493b-9d3c-69a5480234dc thread-id=sofar-parked tool=write
+11:24:28.717 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=4966bee8-6de6-493b-9d3c-69a5480234dc thread-id=sofar-parked
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:7856 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:29.404 INFO  harness.infra.log - listening port=7856 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:29.404498800Z
+11:24:30.576 INFO  harness.infra.log - start model=scripted run-id=65f625ed-b122-4470-9102-a03e811a73c3 thread-id=degraded-76dca46b-ddf1-4328-84c9-bebf63af86ac
+11:24:32.784 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=65f625ed-b122-4470-9102-a03e811a73c3 thread-id=degraded-76dca46b-ddf1-4328-84c9-bebf63af86ac
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:8410 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:24:59.484 INFO  harness.infra.log - listening port=8410 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:24:59.484325900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9330 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:25:52.260 INFO  harness.infra.log - listening port=9330 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:25:52.260422900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9341 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:25:52.665 INFO  harness.infra.log - listening port=9341 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:25:52.665033300Z
+11:25:54.379 INFO  harness.infra.log - start model=scripted run-id=1ac15dd6-bf8d-46fc-840c-21ac9e1494a0 thread-id=http-approve
+11:25:55.342 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=1ac15dd6-bf8d-46fc-840c-21ac9e1494a0 thread-id=http-approve tool=write
+11:25:55.487 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=1ac15dd6-bf8d-46fc-840c-21ac9e1494a0 thread-id=http-approve
+11:25:57.292 INFO  harness.infra.log - start model=scripted run-id=65a443cc-cafd-458e-a2c2-9efff7200782 thread-id=http-approve
+11:25:57.831 INFO  harness.infra.log - tool-not-run outcome=approved run-id=65a443cc-cafd-458e-a2c2-9efff7200782 thread-id=http-approve tool=write
+11:25:59.067 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=65a443cc-cafd-458e-a2c2-9efff7200782 thread-id=http-approve
+11:26:00.732 INFO  harness.infra.log - start model=scripted run-id=fb6a47f8-149d-4281-beab-d46c64014424 thread-id=http-veto
+11:26:02.351 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=fb6a47f8-149d-4281-beab-d46c64014424 thread-id=http-veto tool=write
+11:26:02.568 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=fb6a47f8-149d-4281-beab-d46c64014424 thread-id=http-veto
+11:26:03.537 INFO  harness.infra.log - start model=scripted run-id=6d4dc881-d481-454d-8f89-7f61a3a1e989 thread-id=http-veto
+11:26:03.667 INFO  harness.infra.log - tool-not-run outcome=vetoed run-id=6d4dc881-d481-454d-8f89-7f61a3a1e989 thread-id=http-veto tool=write
+11:26:04.263 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=6d4dc881-d481-454d-8f89-7f61a3a1e989 thread-id=http-veto
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9578 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:04.396 INFO  harness.infra.log - listening port=9578 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:04.396633300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9695 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:08.588 INFO  harness.infra.log - listening port=9695 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:08.588963900Z
+11:26:09.776 INFO  harness.infra.log - start model=scripted run-id=af21eab5-6a74-4ea6-b052-0ac911fd12ca thread-id=plain
+11:26:10.329 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=af21eab5-6a74-4ea6-b052-0ac911fd12ca thread-id=plain
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-18404973800302226740/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9736 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:10.673 INFO  harness.infra.log - listening port=9736 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-18404973800302226740 since=2026-09-27T03:26:10.673632900Z
+11:26:11.964 INFO  harness.infra.log - start model=scripted run-id=f529ef40-030c-4116-a6a0-aef888ada07b thread-id=it-skills
+11:26:13.021 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f529ef40-030c-4116-a6a0-aef888ada07b thread-id=it-skills
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9785 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:13.148 INFO  harness.infra.log - listening port=9785 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:13.148386300Z
+11:26:14.272 INFO  harness.infra.log - start model=scripted run-id=c3e63cad-1035-4e6e-9bb5-d59e3d1e76be thread-id=snapshots-eager
+11:26:16.170 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=c3e63cad-1035-4e6e-9bb5-d59e3d1e76be thread-id=snapshots-eager
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9850 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:16.237 INFO  harness.infra.log - listening port=9850 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:16.236032500Z
+11:26:17.391 INFO  harness.infra.log - start model=scripted run-id=bc6db6d4-74b1-45b7-a86f-675c63b4fc74 thread-id=snapshots-once
+11:26:19.157 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=bc6db6d4-74b1-45b7-a86f-675c63b4fc74 thread-id=snapshots-once
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9907 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:19.265 INFO  harness.infra.log - listening port=9907 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:19.265478900Z
+11:26:20.388 INFO  harness.infra.log - start model=scripted run-id=8ee20693-077b-493f-9944-15a9078c9e8b thread-id=spill-e2e
+11:26:21.850 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=8ee20693-077b-493f-9944-15a9078c9e8b thread-id=spill-e2e
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:9963 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:22.145 INFO  harness.infra.log - listening port=9963 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:22.145026500Z
+11:26:23.370 INFO  harness.infra.log - start model=scripted run-id=863e36ff-dfd1-4e16-b40a-0d9bfd5e4118 thread-id=request-tier
+11:26:24.018 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=863e36ff-dfd1-4e16-b40a-0d9bfd5e4118 thread-id=request-tier
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10009 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:24.128 INFO  harness.infra.log - listening port=10009 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:24.128405300Z
+11:26:25.234 INFO  harness.infra.log - start model=scripted run-id=a790f547-1e08-4d20-9815-a6905d33adfd thread-id=it-1
+11:26:27.245 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=a790f547-1e08-4d20-9815-a6905d33adfd thread-id=it-1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10093 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:27.433 INFO  harness.infra.log - listening port=10093 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:27.433625600Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10106 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:27.696 INFO  harness.infra.log - listening port=10106 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:27.696999900Z
+11:26:29.331 INFO  harness.infra.log - start model=scripted run-id=346c8a90-0004-49ea-b3a6-025b44a24a03 thread-id=grew-a
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10171 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:30.259 INFO  harness.infra.log - listening port=10171 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:30.259953700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10176 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:30.487 INFO  harness.infra.log - listening port=10176 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:30.487198100Z
+11:26:31.890 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=346c8a90-0004-49ea-b3a6-025b44a24a03 thread-id=grew-a
+11:26:32.498 INFO  harness.infra.log - start model=scripted run-id=abafe0ee-bcc9-4e8a-bc26-27fe64c56b60 thread-id=crashed-a
+11:26:32.753 ERROR harness.infra.log - crashed run-id=abafe0ee-bcc9-4e8a-bc26-27fe64c56b60 thread-id=crashed-a
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__52409$fn__52410$fn__52411$fn__52412.invoke(http_test.clj:5623)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1838)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10251 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:33.647 INFO  harness.infra.log - listening port=10251 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:33.647878100Z
+11:26:34.746 INFO  harness.infra.log - start model=scripted run-id=32d5cb2e-13a2-4018-8852-6137f411d6b7 thread-id=it-1
+11:26:36.383 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=32d5cb2e-13a2-4018-8852-6137f411d6b7 thread-id=it-1
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10307 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:36.456 INFO  harness.infra.log - listening port=10307 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:36.456835Z
+11:26:37.660 INFO  harness.infra.log - start model=scripted run-id=d6906a31-3f76-4570-bdab-94e28976d916 thread-id=http-answer
+11:26:38.423 INFO  harness.infra.log - tool-not-run outcome=needs-approval run-id=d6906a31-3f76-4570-bdab-94e28976d916 thread-id=http-answer tool=write
+11:26:38.558 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=d6906a31-3f76-4570-bdab-94e28976d916 thread-id=http-answer
+11:26:39.646 INFO  harness.infra.log - start model=scripted run-id=932b75c6-520a-4ef8-a797-ae8a0c24acb3 thread-id=http-answer
+11:26:39.740 INFO  harness.infra.log - tool-not-run outcome=approved run-id=932b75c6-520a-4ef8-a797-ae8a0c24acb3 thread-id=http-answer tool=write
+11:26:40.426 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=932b75c6-520a-4ef8-a797-ae8a0c24acb3 thread-id=http-answer
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10400 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:40.593 INFO  harness.infra.log - listening port=10400 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:40.593969600Z
+11:26:41.704 INFO  harness.infra.log - start model=scripted run-id=026ff023-69ed-4c85-a415-c3f6f93b14f6 thread-id=diag-crashed
+11:26:41.775 ERROR harness.infra.log - crashed run-id=026ff023-69ed-4c85-a415-c3f6f93b14f6 thread-id=diag-crashed
+clojure.lang.ExceptionInfo: no frames today
+	at harness.edge.http_test$fn__52225$fn__52226$fn__52227$fn__52228.invoke(http_test.clj:5357)
+	at harness.edge.http$run_agent_BANG_$fn__25249.invoke(http.clj:1838)
+	at clojure.core.async$thread_call$fn__8939.invoke(async.clj:486)
+	at clojure.lang.AFn.run(AFn.java:22)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1090)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:614)
+	at java.base/java.lang.Thread.run(Thread.java:1474)
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10439 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:42.022 INFO  harness.infra.log - listening port=10439 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:42.022668800Z
+11:26:43.625 INFO  harness.infra.log - start model=scripted run-id=5ae27fe9-6ec2-4a30-8149-254b86c722e5 thread-id=listing-a
+11:26:45.374 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=5ae27fe9-6ec2-4a30-8149-254b86c722e5 thread-id=listing-a
+11:26:47.023 INFO  harness.infra.log - start model=scripted run-id=25ce966a-4719-4fa5-9ded-5f37ce010281 thread-id=listing-b
+11:26:48.176 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=25ce966a-4719-4fa5-9ded-5f37ce010281 thread-id=listing-b
+11:26:48.880 INFO  harness.infra.log - start model=scripted run-id=f866aefb-de47-45e5-ae2c-b1603fac068e thread-id=listing-a
+11:26:49.513 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=f866aefb-de47-45e5-ae2c-b1603fac068e thread-id=listing-a
+11:26:50.949 INFO  harness.infra.log - start model=scripted run-id=34460ad0-00ba-4e8d-b4ee-880a0a92a0a6 thread-id=listing-unbound
+11:26:51.881 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=34460ad0-00ba-4e8d-b4ee-880a0a92a0a6 thread-id=listing-unbound
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10692 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:52.036 INFO  harness.infra.log - listening port=10692 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:52.036104500Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10696 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:52.140 INFO  harness.infra.log - listening port=10696 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:52.140177100Z
+11:26:52.857 INFO  harness.infra.log - start model=scripted run-id=bca06538-a6a0-4d7a-9e99-611f2bb89a55 thread-id=move-run
+11:26:53.480 INFO  harness.infra.log - terminal event=RUN_FINISHED run-id=bca06538-a6a0-4d7a-9e99-611f2bb89a55 thread-id=move-run
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-7739747167696246343/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10746 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:53.991 INFO  harness.infra.log - listening port=10746 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-root-7739747167696246343 since=2026-09-27T03:26:53.991241300Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10756 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:54.126 INFO  harness.infra.log - listening port=10756 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:54.126240700Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10766 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:54.327 INFO  harness.infra.log - listening port=10766 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:54.327239900Z
+logging to C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790/logs/harness.infra.log (rotated by date and size)
+harness listening on http://localhost:10780 -- POST an AG-UI RunAgentInput to /api/agent; stop with (stop!)
+serving the built UI at / from C:\Users\zhouteng\Documents\workspace\lisp-harness\.worktrees\compaction-frames\ui\dist\index.html
+11:26:54.451 INFO  harness.infra.log - listening port=10780 root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790 since=2026-09-27T03:26:54.451683400Z
+ISOLATION NOTE: C:\Users\zhouteng\.clj-harness\harness.db changed during this run: [454774784 1790477054435] -> [454774784 1790478161846] ([bytes mtime], nil meaning absent) -- and THIS PROCESS NEVER OPENED IT, so it was another process: a live harness session keeps its own state (anchors, todo lists, session rows) in that store while somebody works. NOT a failure.
+TEST RUN TIMEOUT: harness.edge.http-test did not finish within 300s -- the run stops here, exit code 2, rather than waiting for a verdict it may never reach.
+  It was still running when the limit hit, so its assertions have NO verdict: the counters below are the 60 namespaces that FINISHED, and this one is not among them.
+  thread state: TIMED_WAITING
+  where it was, captured before the process leaves (the jstack nobody took):
+  stack:
+    java.base/java.lang.Thread.sleepNanos0(Native Method)
+    java.base/java.lang.Thread.sleepNanos(Thread.java:509)
+    java.base/java.lang.Thread.sleep(Thread.java:540)
+    harness.edge.http_test$until.invokeStatic(http_test.clj:5268)
+    harness.edge.http_test$until.invoke(http_test.clj:5251)
+    clojure.lang.AFn.applyToHelper(AFn.java:156)
+    clojure.lang.AFn.applyTo(AFn.java:144)
+    clojure.core$apply.invokeStatic(core.clj:667)
+    clojure.core$apply.invoke(core.clj:662)
+    harness.edge.http_test$fn__52553$fn__52554$fn__52559.invoke(http_test.clj:5834)
+    harness.edge.http_test$fn__52553$fn__52554.invoke(http_test.clj:5833)
+    harness.edge.http_test$with_server.invokeStatic(http_test.clj:222)
+    harness.edge.http_test$with_server.invoke(http_test.clj:184)
+    harness.edge.http_test$with_server.invokeStatic(http_test.clj:211)
+    harness.edge.http_test$with_server.invoke(http_test.clj:184)
+    harness.edge.http_test$fn__52553.invokeStatic(http_test.clj:5825)
+    harness.edge.http_test$fn__52553.invoke(http_test.clj:5821)
+    clojure.test$test_var$fn__9894.invoke(test.clj:717)
+    clojure.test$test_var.invokeStatic(test.clj:717)
+    clojure.test$test_var.invoke(test.clj:708)
+    clojure.test$test_vars$fn__9920$fn__9925.invoke(test.clj:735)
+    clojure.test$default_fixture.invokeStatic(test.clj:687)
+    clojure.test$default_fixture.invoke(test.clj:683)
+    clojure.test$test_vars$fn__9920.invoke(test.clj:735)
+    clojure.test$default_fixture.invokeStatic(test.clj:687)
+  never started: harness.edge.mux-test, harness.edge.host-test, harness.edge.sessions-test, harness.edge.record-test, harness.edge.delegation-test, harness.edge.delegation-line-test, harness.edge.frames-route-test, harness.layers-test
+
+the namespaces that finished, before the limit:
+
+Ran 1132 tests containing 12207 assertions.
+1 failures, 0 errors.
+11:26:56.009 INFO  harness.infra.log - start model=scripted run-id=3ab9cb2b-f9e5-483a-a0cf-cb82806f9601 thread-id=kill-b
+11:26:56.039 INFO  harness.infra.log - start model=scripted run-id=a61860f0-465e-4bfd-b625-305a9b6d063b thread-id=kill-a
+test scratch directories removed: 333
+11:26:56.812 INFO  harness.infra.log - shutdown root=C:\Users\zhouteng\AppData\Local\Temp\clj-harness-test-3441057377983058790
+11:26:56.860 INFO  harness.infra.log - metrics bytes=0 fsync-failures=0 lines=3366 pending=0 promises=18 threads=156
+exit=2

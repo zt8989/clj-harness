@@ -64,6 +64,12 @@
         all     (into records (write-rows @written))
         view    (replay/compacted-messages (replay/entries all) (replay/compaction-facts all))]
     (is (= [0 1 2 3] (:shadowed result)))
+    (is (= 432 (:tokens result))
+        "and the size the folded range was estimated at")
+    (is (string? (:compactionId result)))
+    (is (= (:compactionId result) (:compactionId (second (second @written))))
+        (str "the answer names the pair of rows it just wrote -- which is what a card is folded"
+             " under (`harness.edge.ag-ui/compacted-frame`)"))
     (is (= ["compaction/start" "context/compacted" "compaction/end"] (mapv first @written))
         "start first, end LAST -- that order is the lock")
     (is (= "<compacted-summary>SUMMARY of 4</compacted-summary>" (:content (first view)))

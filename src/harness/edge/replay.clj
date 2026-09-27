@@ -101,6 +101,13 @@
   `harness.edge.http/row-of`). A second wire name must be added here in the same commit that
   starts using it -- otherwise a fact and a frame would be read the same way."
   #{ag/injected-part-name
+    ;; AND THE COMPACTION CARD (`.scratch/compaction-frames`): the harness folded the front of a
+    ;; conversation into one summary, and that is something a person reads back -- the card stands
+    ;; in the conversation the same way the injections do, and `harness.kernel.frames/apply-frames`
+    ;; is what folds it. It is NOT a fact about the record even though the fact it describes
+    ;; (`context/compacted`, a CUSTOM name nobody here lists) is: the fact changes the MODEL's
+    ;; view, and the card only tells the screen that it moved.
+    ag/compacted-part-name
     ;; AND THE RECORD'S OWN TEXT SNAPSHOT (ticket 03 of `.scratch/event-persistence`): it is not on
     ;; the wire at all -- the wire carries one frame per token -- but it is A FRAME THE CONVERSATION
     ;; IS MADE OF, which is exactly the question this set answers. Without it here the fold would

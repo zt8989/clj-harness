@@ -46,10 +46,14 @@ token 关闭**：它一直开着，晚到的 delta 落进**同一条** reasoning
 跨着答案开着的代价如实记下：那一行在整个回答期间都还是「正在想」（微光 + 实时窗），答案开始不等于思考结束。
 
 **发出去的帧分三族**：`RUN_*`（一次 run 的起与终，含 `RUN_ERROR`）、`TEXT_MESSAGE_*` / `REASONING_*` /
-`TOOL_CALL_*`（对话本身）、以及 **`CUSTOM`**——AG-UI 自己的扩展点，本仓拿它发一种东西：**注入物**
-（`name` 是 `injected-context`，值里是那条消息、id 是确定性的）。**这一族是唯一不进那场对话的**：适配器把
+`TOOL_CALL_*`（对话本身）、以及 **`CUSTOM`**——AG-UI 自己的扩展点，本仓拿它发**两件**人该看见、模型绝不能
+被喂回去的事：**注入物**（`name` 是 `injected-context`，值里是那条消息、id 是确定性的）与**一次压缩**
+（`name` 是 `compacted-context`，值里是那段摘要、它折了多少、估算多大，id 取压缩自己那个 UUID）。
+**这一族是唯一不进那场对话的**：适配器把
 `CUSTOM` 落成一个 `data` part，而交给下一轮的会话那一份没有它（`sessions/messages` 把 `data` part 摘掉）
-——于是注入物看得见、又**进不了**模型的向量（见 [client](client.md#注入物在会话栏里的一张卡)）。上面那五种只落审计行的事件照旧一个帧都不发。
+——于是两者都看得见、又**进不了**模型的向量（见 [client](client.md#注入物在会话栏里的一张卡) 与
+[client](client.md#压缩在会话栏里的那张卡)）。压缩那一张**只讲屏幕**：模型读到摘要走的是记录上那条
+`context/compacted` 事实的投影（`replay/model-nodes`），与这一帧无关。上面那五种只落审计行的事件照旧一个帧都不发。
 
 **线上一帧不少，记录不是一帧不落**：`REASONING_START` / `REASONING_MESSAGE_START` / `REASONING_MESSAGE_CONTENT` /
 `REASONING_MESSAGE_END` / `REASONING_END` 这五族**不写进记录**——同一段文字本来就在 run 自己那条 `message` 行
@@ -361,7 +365,7 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
   一条），而 system 消息同样是——它就在那个数组的第一位。payload 就是交给厂商/厂商返回的那个 map，
   **逐字**（信封上的键一个都不进 payload）；一条条目的**身份永远在信封上**（`id`），不进 payload；
 - **`event`** —— **其余一切事实**。线上发过的帧（`RUN_*` / `TEXT_MESSAGE_*` / `TOOL_CALL_*` /
-  `CUSTOM injected-context`）的 payload **就是那一帧**；harness 自己知道的事实（下面表里的那些）
+  `CUSTOM injected-context` / `CUSTOM compacted-context`）的 payload **就是那一帧**；harness 自己知道的事实（下面表里的那些）
   包成一个 **CUSTOM 帧**，`name` 是那种事实的名字，payload 是它当时知道的东西。
 
 判据是这一句：**同一段记录，当时线上发过什么帧，重建就得到什么帧——除了推理那五族**（它们不落行，同一段思考靠模型那条
