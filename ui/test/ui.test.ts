@@ -456,17 +456,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// back. That last one is not about our module at all: it is the adapter's contract, and
 /// it is what lets a stall be shown without becoming part of the conversation.
 ///
-/// 160 -> 161: the other side of the effort picker -- the `picker` suite's fourth. What a
-/// model OFFERS as its thinking levels is no longer the server's one union
-/// (`harness.cap.providers/reasoning-efforts`, the three OpenAI-compatible values, right
-/// as a wire contract and misleading as a menu): `lib/efforts.ts` holds one ladder per
-/// vendor from OpenAI through Kimi, matched by PREFIX against the model id with its
-/// `relay/` namespace dropped, plus the vendor's own default -- and a model the table
-/// does not know falls back to OpenAI's ladder, the widest one, so nothing is hidden.
-/// The module imports nothing, which is what lets the whole rule be a case here; that the
-/// picker DRAWS those levels, and that a switch really lands on the new vendor's list, is
-/// the browser walkthrough's half.
-const EXPECTED_CASES = 165;
+/// 160 -> 165 across two other features: the effort picker's ladder (`picker`'s fourth
+/// case, `lib/efforts.ts` -- one ladder per vendor, matched by prefix), and the
+/// compaction card.
+///
+/// ...AND 165 -> 164: ticket 02 of `.scratch/sidebar-ws-and-run-state` retired two
+/// `sidebar-refetch` cases. They pinned that rule's third reason -- "a listing that still
+/// says running after the run" was asked about again -- which the PUSHED listing makes
+/// unnecessary: `events.host` carries a run's start and its end now, so a `running` that
+/// is still true is a run in flight, not a stale snapshot. One case replaced them
+/// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
+/// candidates), which is why the count lands one lower rather than two.
+const EXPECTED_CASES = 164;
 
 let total = 0;
 for (const suite of SUITES) {
