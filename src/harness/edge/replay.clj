@@ -539,6 +539,53 @@
                                                " when the session was continued")})}))
          (open-runs records))))
 
+(defn envelope-violations
+  "RECORDS -> where a record fell out of its ENVELOPE, or nil when it did not.
+
+  AN ENVELOPE IS A PAIR OF EVENTS (owner, 2026-09-27): a run opens with its first `message`
+  row and closes with its terminal frame; `model/start` with `model/end`; `step/start` with
+  `step/end`; a `TOOL_CALL_START` with its `TOOL_CALL_RESULT`. A message (or a call) that
+  falls OUT of one is a record no run can honestly continue, and a caller refuses the run by
+  name rather than folding half a conversation.
+
+  ONLY A CLOSED RUN'S DANGLING PAIRS ARE REPORTED. A run still open is reported ONCE, as
+  itself (`:layer \"run\"`, with the calls it never answered) -- its model and step pairs are
+  still open because it is, and calling them violations too would double the news. That also
+  keeps this from crying wolf forever: a run a process died in the middle of is closed by
+  `closing-frames` (which writes a terminal, not a `model/end`), and a rule that counted
+  open pairs globally would then refuse that session for the rest of its life."
+  [records]
+  (let [rows     (vec records)
+        open     (open-runs rows)
+        open-ids (into #{} (map :run-id) open)
+        paired   (reduce (fn [acc row]
+                           (let [rid (:runId row)
+                                 k   (kind row)]
+                             (cond-> acc
+                               (and (some? rid) (= "model/start" k))
+                               (update-in [rid :model-start] (fnil inc 0))
+                               (and (some? rid) (= "model/end" k))
+                               (update-in [rid :model-end] (fnil inc 0))
+                               (and (some? rid) (= "step/start" k))
+                               (update-in [rid :step-start] (fnil inc 0))
+                               (and (some? rid) (= "step/end" k))
+                               (update-in [rid :step-end] (fnil inc 0)))))
+                         {}
+                         rows)
+        dangling (for [[rid c] paired
+                       :when    (not (contains? open-ids rid))
+                       [layer sk ek] [["model" :model-start :model-end]
+                                      ["step" :step-start :step-end]]
+                       :let [s (get c sk 0) e (get c ek 0)]
+                       :when (not= s e)]
+                   {:layer layer :run-id rid :started s :ended e})]
+    (seq (concat
+          (map (fn [{:keys [run-id last-frame unanswered]}]
+                 {:layer "run" :run-id run-id :last-frame last-frame
+                  :unanswered unanswered})
+               open)
+          dangling))))
+
 (defn- append-new
   "BASE with ENTRIES the conversation does not already hold, in order.
 

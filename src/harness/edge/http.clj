@@ -2100,6 +2100,41 @@
                    " fresh threadId when asked with no id -- and send the run again.")
     :threadId thread-id}))
 
+(defn- torn-record
+  "THREAD-ID's record's ENVELOPE VIOLATIONS, or nil when it has none (or cannot be read).
+
+  A RUN THIS PROCESS IS ANSWERING IS NOT TORN, which is why the registry is asked first:
+  the file cannot tell a run still going from one whose process died, and the registry can
+  (`running?`). Reading the log is best-effort -- a record that is corrupt or missing is
+  left to the reader that refuses it by name, not turned into a second refusal here."
+  [thread-id]
+  (when-not (running? thread-id)
+    (try
+      (when-some [f (replay/find-log (home/projects-dir) thread-id)]
+        (seq (replay/envelope-violations (vec (replay/read-records f)))))
+      (catch Throwable _ nil))))
+
+(defn- refuse-torn-record!
+  "The answer a client gets when a run aims at a record whose messages fell OUT of their
+  envelopes. 409: the conversation exists, and continuing it would fold half a pair.
+
+  THE REFUSAL NAMES THE DOOR OUT (fork), because there is one: the fork copies the record
+  up to a boundary and closes what a cut left open, so the work is not lost -- it is
+  continued from a record that reads.
+  TEMPORARY (owner, 2026-09-27): this gate exists to keep OLD JSONL records honest until the
+  format settles; it is meant to be deleted then."
+  [thread-id torn]
+  (api-response
+   409
+   {:error    (str "session " (pr-str thread-id) " has " (count torn)
+                   " message(s) outside their envelope, so a run cannot continue it:"
+                   " a record is folded from its event pairs, and one missing half a pair"
+                   " would hand the model half a conversation. Fork it"
+                   " (POST /api/threads/<stem>/fork) and continue the fork.")
+    :threadId   thread-id
+    :reason     "torn-record"
+    :violations (vec torn)}))
+
 (defn- refuse-retired-messages!
   "The answer a client gets for a run body that still carries the accumulated `messages`.
 
@@ -2541,8 +2576,15 @@
       (running? thread-id)
       (refuse-second-run! thread-id)
 
+      ;; 4b. THE RECORD'S OWN ENVELOPES. A message that fell OUT of its event pair (a run
+      ;; that never ended, a `model/start` with no `model/end`, a `step/start` with no
+      ;; `step/end`) is a record no vendor will read; the run is refused by name, and the
+      ;; answer points at fork. TEMPORARY (owner, 2026-09-27): it keeps OLD JSONL records
+      ;; honest until the format settles, and it is meant to be deleted then.
       :else
-      (start-run input run-id))))
+      (if-some [torn (torn-record thread-id)]
+        (refuse-torn-record! thread-id torn)
+        (start-run input run-id)))))
 
 ;; ----------------------------------------------------- the management edge
 ;;

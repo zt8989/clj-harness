@@ -156,3 +156,40 @@
         (let [{:keys [status]} (post port "/api/threads/nobody/fork" {})]
           (is (= 404 status)))
         (finally (stop))))))
+
+(deftest a-record-out-of-its-envelope-refuses-the-run
+  ;; ticket 02: a message that fell out of its event pair cannot be continued -- the run is
+  ;; refused by name, and the answer points at fork. TEMPORARY until the JSONL format
+  ;; settles (owner, 2026-09-27).
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-bad")
+        (spit-lines! (log-file "src-bad")
+                     [(header-line "src-bad")
+                      (msg "r1" "u1" "a run that never ended")
+                      (frame "r1" {:type "RUN_STARTED" :threadId "src-bad" :runId "r1"})])
+        (let [{:keys [status body]} (post port "/api/agent"
+                                         {:threadId "src-bad" :append [] :tools []})]
+          (is (= 409 status))
+          (is (= "torn-record" (:reason body)))
+          (is (pos? (count (:violations body)))))
+        (finally (stop))))))
+
+(deftest a-closed-record-is-not-refused-by-the-gate
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-ok")
+        (spit-lines! (log-file "src-ok")
+                     [(header-line "src-ok")
+                      (msg "r1" "u1" "a finished run")
+                      (frame "r1" {:type "RUN_FINISHED" :threadId "src-ok" :runId "r1"})])
+        ;; the gate must NOT fire here: a well-shaped record goes on to the run edge
+        (let [{:keys [status body]} (post port "/api/agent"
+                                         {:threadId "src-ok" :append [] :tools []})]
+          (is (not= 409 status))
+          (is (not= "torn-record" (:reason body))))
+        (finally (stop))))))

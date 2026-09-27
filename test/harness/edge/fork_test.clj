@@ -49,3 +49,31 @@
 (deftest a-record-with-no-compaction-has-no-fork-point
   (is (nil? (replay/fork-cut [(message {:role "user" :content "hi"})])))
   (is (nil? (replay/fork-cut []))))
+
+;; ------------------------------------------------ the envelope gate (ticket 02)
+
+(defn- wire
+  "A wire frame row (`RUN_FINISHED` and friends): an `event` whose payload IS the frame."
+  [run-id type]
+  {:ts 1 :runId run-id :type "event" :payload {:type type}})
+
+(deftest the-envelope-gate-sees-only-what-fell-out
+  (testing "a closed run with all its pairs is clean"
+    (is (nil? (replay/envelope-violations
+             [(message {:role "user" :content "hi"})
+              (assoc (fact "model/start" {}) :runId "r")
+              (assoc (fact "model/end" {}) :runId "r")
+              (assoc (fact "step/start" {}) :runId "r")
+              (assoc (fact "step/end" {}) :runId "r")
+              (wire "r" "RUN_FINISHED")]))))
+  (testing "a run that never ended is reported once, as itself"
+    (let [v (replay/envelope-violations [(message {:role "user" :content "hi"})
+                                         (assoc (fact "model/start" {}) :runId "r")])]
+      (is (= 1 (count v)))
+      (is (= "run" (:layer (first v))))
+      (is (= "r" (:run-id (first v))))))
+  (testing "a closed run missing a model/end is a violation of its own"
+    (let [v (replay/envelope-violations [(message {:role "user" :content "hi"})
+                                         (assoc (fact "model/start" {}) :runId "r")
+                                         (wire "r" "RUN_FINISHED")])]
+      (is (= [{:layer "model" :run-id "r" :started 1 :ended 0}] (vec v))))))
