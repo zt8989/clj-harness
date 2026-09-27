@@ -114,6 +114,37 @@
     ;; read a snapshot as the harness talking about itself and lose the answer's text in silence.
     "text/snapshot"})
 
+;; ------------------------------------------------------------- the file header
+
+;; ------------------------------------------------------------- the file header
+
+(def ^:private header-name
+  "The CUSTOM name the record's FIRST line carries (ticket 06 of `.scratch/event-persistence`): the
+  file's own format version and the conversation's identity. It is deliberately NOT in
+  `wire-custom-names` -- a header is not a frame the wire carried and not part of the conversation, so
+  a fold that saw it as one would be wrong in exactly the way a fold that sees a fact as a frame is.
+  It sits there INSTEAD of being skipped on parse: a future reader that wants to know what it is
+  reading asks `header-of`; one that does not never notices."
+  "record/header")
+
+(defn header?
+  "Is ROW the record's file header -- the first line, naming the file's format and conversation?
+  False for every other row, and for a record whose first line is an ordinary one (every record
+  written before this feature)."
+  [row]
+  (let [f (:payload row)]
+    (and (= "event" (:type row))
+         (map? f)
+         (= "CUSTOM" (:type f))
+         (= header-name (:name f)))))
+
+(defn header-of
+  "THE HEADER ROW carries, or nil when ROW is not the header (and nil when there is nothing -- a
+  caller asks the FIRST row of a record and reads `{:format .. :thread .. :created ..}` back, or nil
+  for a record with no header, which is every record written before this feature)."
+  [row]
+  (when (header? row) (get-in row [:payload :value])))
+
 (defn- fact-frame?
   "Is FRAME the harness speaking about itself rather than a frame the conversation is made
   of? A CUSTOM frame whose name is NOT one the wire uses (see `wire-custom-names`)."

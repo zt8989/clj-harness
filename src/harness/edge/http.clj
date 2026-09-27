@@ -102,6 +102,7 @@
             [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
+            [harness.edge.projection :as projection]
             [harness.edge.compaction :as compaction]
             [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
@@ -473,6 +474,61 @@
                          :to   (.getAbsolutePath ^java.io.File f)})
           (catch Throwable _ nil))))))
 
+
+;; ------------------------------------------------------------ the file header
+
+(def record-format
+  "THE RECORD'S FORMAT VERSION (ticket 06 of `.scratch/event-persistence`). It describes the FILE's
+  shape -- which row kinds exist and which envelope fields a reader must expect -- and it went to 2
+  in the same commit that started writing a HEADER LINE, because a reader that has to meet a
+  new-first-line is a reader that must be able to say so. It did NOT move for the text snapshot
+  (ticket 03's `text/snapshot`): that is a new CUSTOM NAME, and a reader that has never heard of one
+  ignores it by the vocabulary it already has (`kind`/`fact-frame?`), not by a version."
+  2)
+
+(defonce ^:private header-fn
+  ;; (fn [thread-id] -> payload-map | nil) -- nil means no header line.
+  (atom nil))
+
+(defn set-header!
+  "Say what a record's FIRST line carries. THE SEAM the same family always uses (`prepare-with!`,
+  `set-sink!`, `set-forcer!`): the writer knows WHEN a file's first line is due -- before any other
+  line of that file -- and the SHAPE of what it says belongs to the adapter that owns the row
+  vocabulary (`harness.edge.http/row-of`), so the composition root installs it. F answers nil for
+  'no header' (which turns the whole thing off, the way a test wants)."
+  [f]
+  (reset! header-fn (or f (constantly nil))))
+
+(defn reset-header! []
+  (reset! header-fn (constantly nil)))
+
+(defonce ^:private headers-written
+  ;; file path -> true. ONE LINE PER FILE, EVER: the header is the file's, not the
+  ;; thread's -- a conversation that MOVED (move-log!) is a new file and gets a new one,
+  ;; while two threads of one conversation (they exist: a run's and a hook's) share theirs.
+  (atom #{}))
+
+(defn reset-headers!
+  "Forget which files have their header. FOR TESTS." []
+  (reset! headers-written #{}))
+
+(defn- header-line!
+  "THE FIRST LINE OF F, if one is owed: the adapter's payload under the same envelope every row
+  has. The check and the mark are ONE ATOM OPERATION (`swap-vals!`) so two threads of one
+  conversation cannot both conclude the file has no header and write two. Answers the line or
+  nil -- and NOTHING THROWS: a missing header is not a fact a reader stumbles over (it reads the
+  row as the conversation's own first line, as it always has), so the worst case is the old
+  world, not a broken one."
+  [^java.io.File f]
+  (try
+    (let [p   (.getAbsolutePath f)
+          [before _] (swap-vals! headers-written #(if (contains? % p) % (conj % p)))]
+      (when-not (contains? before p)
+        (when-some [payload (@header-fn (str/replace (.getName f) #"\.jsonl$" ""))]
+          (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil}
+                                      (row-of "record/header" payload)))
+               "\n"))))
+    (catch Throwable _ nil)))
 (defn- log!
   "The line goes to the record writer, which appends it off this thread's own
   path (`harness.edge.record`). NOTHING HERE TOUCHES THE FILE: the File is
@@ -516,7 +572,17 @@
          ;; hands it out: the fact families of ADR 0006 are stamped with it, and `lands` -- when
          ;; it was given -- has already been called with it from inside `append!` (after THAT
          ;; namespace's lock, never inside this one).
-         offset (record/append! thread-id (locking log-lock (log-file-for thread-id)) line lands)]
+         ;; THE FILE'S OWN FIRST LINE COMES FIRST (ticket 06): one header per FILE, before any other
+         ;; line of it -- decided inside the same lock that resolves the file, because 'which file'
+         ;; and 'does that file have its header yet' are one question, and a move (move-log!) is a
+         ;; NEW file, which gets a NEW header. THE APPEND ITSELF IS OUTSIDE THE LOCK, exactly like
+         ;; the line below (ADR 0007) -- only the decision is made under it.
+         offset (let [f (locking log-lock
+                          (let [f (log-file-for thread-id)]
+                            (when-some [h (header-line! f)]
+                              (record/append! thread-id f h))
+                              f))]
+                  (record/append! thread-id f line lands))]
      ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
      ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
      ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,
@@ -5708,7 +5774,14 @@
                    ;; words -- it is the more specific statement about the session.
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
-                   (subagents/install! {:run run-subagent!})]]
+                   (subagents/install! {:run run-subagent!})
+                   ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
+                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `record/append!` must not wait for
+                   ;; a database write, and a pass that misses a tick is a NUMBER
+                   ;; (`harness.edge.projection/lag`) rather than a lost line. It HAS a teardown,
+                   ;; unlike the writer: a process that stops serving stops copying, and the next one
+                   ;; resumes at the offset it left.
+                   (projection/start!)]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.edge.record`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the
@@ -5717,6 +5790,14 @@
     ;; server this process starts, and a suite that starts a hundred must not
     ;; leave a hundred writer threads behind (or stop the one it has).
     (record/prepare-with! carry-back!)
+    ;; AND THE RECORD'S FIRST LINE (ticket 06): what a file's header says is the EDGE's to say --
+    ;; the row vocabulary is this namespace's (`row-of`) and the conversation's identity is the
+    ;; HOME's. The writer only knows WHEN one is due.
+    (set-header!
+     (fn [thread-id]
+       {:format  record-format
+        :thread  (str thread-id)
+        :created (System/currentTimeMillis)}))
     (record/start!)
     ;; THE SESSION TABLE IS LIVE FROM HERE, and it needs both of its outside facts.
     ;; THE PIN FIRST: a session whose bytes are not all on disk may not be put away, or

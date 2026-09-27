@@ -170,7 +170,12 @@
             ;; construction of run-subagent! -- so this half of the claim is the
             ;; parent's row carrying a `ts` that is not later than the child's
             ;; first row's.
-            (let [child-first (first (:lines (subagent-log thread)))]
+            (let [child-rows  (vec (remove nil? (:lines (subagent-log thread))))
+                  child-first (first (drop-while #(not (= "message" (replay/kind %))) child-rows))
+                  child-hdr   (first child-rows)]
+              ;; THE CHILD'S FILE OPENS WITH ITS OWN HEADER NOW (ticket 06) -- the first ROW is the
+              ;; file's, and the first MESSAGE row is the task it was delegated.
+              (is (replay/header? child-hdr) "the child's file opens with the file's own line")
               (is (= "where is the delegation line written"
                      (:content (replay/payload child-first)))
                   "the child's record opens with the task it was delegated")

@@ -1,0 +1,173 @@
+(ns harness.edge.projection-test
+  "The content projection (ADR 0008): the record is the truth, the store holds a copy, and the copy can
+  be thrown away and made again.
+
+  EVERY CASE BUILDS ITS OWN HOME (`support/with-temp-env`): the projection reads the log TREE and writes
+  the store, so a shared root would mean a test reading the last one's logs."
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [harness.cap.project :as project]
+            [harness.edge.projection :as projection]
+            [harness.infra.db :as db]
+            [harness.infra.home :as home]
+            [harness.test-support :as support]))
+
+;; --------------------------------------------------------------- the furniture
+
+(defn- line
+  "One record row as the writer emits it: an envelope with `ts`/`runId` outside the payload."
+  [m]
+  (str (json/write-str m) "\n"))
+
+(defn- message-line [run-id ts source role payload]
+  (line (cond-> {:ts ts :runId run-id :type "message" :source source :payload payload}
+          (contains? payload :id) (assoc :id (:id payload)))))
+
+(defn- write-log!
+  "Plant a conversation's record in the tree this home uses for an UNBOUND session, and register the
+  session -- which is what makes the projection look at it at all (the store decides which
+  conversations exist)."
+  [session-id rows]
+  (project/register-session! session-id)
+  (let [f (home/log-file (io/file (home/projects-dir) "unbound") session-id)]
+    (.mkdirs (.getParentFile f))
+    (spit f (apply str rows) :encoding "UTF-8")
+    f))
+
+(defn- messages-of [session-id]
+  (db/select "SELECT seq, run_id, source, role, content, reasoning, tool_calls, at
+                FROM messages WHERE session_id = ? ORDER BY seq"
+             session-id))
+
+(defn- calls-of [session-id]
+  (db/select "SELECT seq, call_id, name, arguments, result FROM tool_calls
+                WHERE session_id = ? ORDER BY seq, call_id"
+             session-id))
+
+(use-fixtures :each
+  (fn [f]
+    (support/with-temp-env [_root _home] (f))))
+
+;; --------------------------------------------------------------- the copy
+
+(deftest the-copy-says-what-the-record-says
+  (let [sid  "pj-basic"
+        rows [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})
+              (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "the answer"
+                                                        :reasoning_content "THINKING"})]]
+    (write-log! sid rows)
+    (let [{:keys [sessions rows]} (projection/project!)]
+      (is (= 1 sessions) "one session had a log to read")
+      (is (= 2 rows) "and both message rows were projected"))
+    (testing "one row per message row, keyed by the line it arrived in"
+      (is (= [{:seq 0 :run-id "r1" :source "client" :role "user" :content "hi"
+               :reasoning nil :tool-calls 0 :at 1}
+              {:seq 1 :run-id "r1" :source "model" :role "assistant" :content "the answer"
+               :reasoning "THINKING" :tool-calls 0 :at 2}]
+             (messages-of sid))))
+    (testing "and NOTHING of the record's non-message rows"
+      ;; an event row is not a message -- the projection is of what was said, not of the traffic.
+      (is (= 2 (count (db/select "SELECT seq FROM messages WHERE session_id = ?" sid))))
+      (is (= [] (calls-of sid))))))
+
+(deftest projecting-again-writes-the-same-thing-and-reads-nothing
+  (let [sid "pj-twice"]
+    (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})])
+    (projection/project!)
+    (let [first-pass (messages-of sid)]
+      (testing "a second pass over a log with nothing new reads no rows"
+        (is (= {:sessions 1 :rows 0 :bytes 0 :skipped 0} (projection/project!))))
+      (is (= first-pass (messages-of sid))))
+    (testing "and a line appended later is picked up ONCE, at its own offset"
+      (let [f (home/log-file (io/file (home/projects-dir) "unbound") sid)]
+        (spit f (message-line "r1" 3 "model" "assistant" {:role "assistant" :content "more"})
+              :append true :encoding "UTF-8")
+        (is (= 1 (:rows (projection/project!))))
+        (is (= 0 (:rows (projection/project!))) "and the pass after it finds nothing new"))
+      (is (= ["hi" "more"] (mapv :content (messages-of sid)))))))
+
+(deftest a-half-written-last-line-is-not-a-row
+  ;; The writer appends whole lines, but a reader can catch the newest one mid-flush. The projection
+  ;; must leave it for the next pass: half a row is either a failure or -- worse -- a row of the wrong
+  ;; shape, and the byte offset is what makes 'leave it' safe.
+  (let [sid "pj-torn"
+        f   (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})])]
+    (spit f (subs (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "half"}) 0 20)
+          :append true :encoding "UTF-8")
+    (is (= {:sessions 1 :rows 1 :bytes 98 :skipped 0} (projection/project!))
+        "the complete line is projected and nothing is claimed for the torn one")
+    (is (= 1 (count (messages-of sid))))
+    (let [offset (:byte-offset (first (db/select "SELECT byte_offset FROM projection_offsets
+                                                    WHERE session_id = ?" sid)))]
+      (spit f (subs (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "half"}) 20)
+            :append true :encoding "UTF-8")
+      (is (= 1 (:rows (projection/project!))) "and the line becomes projectable once it is whole")
+      (is (< (long offset) (:byte-offset (first (db/select "SELECT byte_offset FROM projection_offsets
+                                                             WHERE session_id = ?" sid)))))
+      (is (= ["hi" "half"] (mapv :content (messages-of sid)))))))
+
+(deftest a-tool-call-and-its-result-find-each-other
+  (let [sid  "pj-tools"
+        call {:id "c1" :type "function" :function {:name "read" :arguments "{\"path\":\"a\"}"}}]
+    (write-log! sid
+                [(message-line "r1" 1 "model" "assistant"
+                               {:role "assistant" :content "" :tool_calls [call]})
+                 (message-line "r1" 2 "tool" "tool"
+                               {:role "tool" :tool_call_id "c1" :content "the file"})])
+    (projection/project!)
+    (is (= [{:seq 0 :call-id "c1" :name "read" :arguments "{\"path\":\"a\"}" :result "the file"}]
+           (calls-of sid)))))
+
+(deftest a-log-that-shrank-or-moved-starts-over
+  (let [sid "pj-moved"
+        f   (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})
+                             (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "one"})])]
+    (projection/project!)
+    (is (= 2 (count (messages-of sid))))
+    (testing "a shorter file is not this projection's continuation"
+      (spit f (message-line "r1" 1 "client" "user" {:role "user" :content "replaced"})
+            :encoding "UTF-8")                     ; truncating write: one row, new content
+      (is (= 1 (:rows (projection/project!))))
+      (is (= ["replaced"] (mapv :content (messages-of sid)))
+          "the old rows are gone, and the new file's are the whole story"))))
+
+(deftest the-lag-is-a-number
+  (let [sid "pj-lag"
+        f   (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})])]
+    (testing "a session never projected is behind by its whole file"
+      (is (= (.length f) (:total (projection/lag)))))
+    (projection/project!)
+    (is (= 0 (:total (projection/lag))) "and a projected one is not behind at all")
+    (testing "a line appended since the last pass is what the number counts"
+      (let [appended (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "more"})]
+        (spit f appended :append true :encoding "UTF-8")
+        (is (= (alength (.getBytes appended "UTF-8"))
+               (:total (projection/lag))))))))
+
+;; --------------------------------------------------------------- rebuild
+
+(deftest rebuilding-answers-row-for-row-what-was-there
+  ;; ADR 0008 DECISION 6 IS THIS CASE. 'Recomputable' is the only thing that makes a second copy of a
+  ;; conversation's content acceptable, so it is an ACTION here and a test rather than a claim in a
+  ;; docstring.
+  (let [sid  "pj-rebuild"
+        rows [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})
+              (message-line "r1" 2 "model" "assistant"
+                            {:role "assistant" :content "the answer"
+                             :tool_calls [{:id "c1" :type "function"
+                                           :function {:name "read" :arguments "{}"}}]})
+              (message-line "r1" 3 "tool" "tool"
+                            {:role "tool" :tool_call_id "c1" :content "the file"})]]
+    (write-log! sid rows)
+    (projection/project!)
+    (let [before (messages-of sid)
+          calls  (calls-of sid)]
+      (is (seq before))
+      (projection/rebuild! sid)
+      (is (= before (messages-of sid)))
+      (is (= calls (calls-of sid)))
+      (testing "and a whole-home rebuild answers the same thing too"
+        (projection/rebuild!)
+        (is (= before (messages-of sid)))
+        (is (= calls (calls-of sid)))))))

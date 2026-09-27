@@ -902,6 +902,66 @@
               pid        INTEGER NOT NULL,
               started_at INTEGER NOT NULL,
               since      INTEGER NOT NULL)"))
+(defn- projected-content
+  "Version n -> n+1: the CONTENT TABLES, and the offset that says how far each has been fed.
+
+  ADR 0008 (`docs/adr/0008-the-log-is-the-truth-and-sqlite-projects-it.md`) OVERTURNS THE HALF OF THE
+  BOUNDARY THAT SAID 'jsonl 里的任何内容都不进库'. The owner's call (2026-09-25): queries and state
+  recovery go to the store (a range by `seq`, a search by keyword, a count by tool name), and those
+  today either read a whole record (one 68 MB session is ~1.8 s per `read-records`) or do not exist
+  at all. THE OTHER HALF IS UNTOUCHED -- the store still holds the rewriteable state (projects,
+  sessions, anchors, todos, claims), and THE RECORD IS STILL THE ONLY TRUTH: every row here must be
+  recomputable from the log alone, and `harness.edge.projection/rebuild!` is that claim as an action.
+
+  THREE TABLES, each a different question:
+
+    messages            one row per `message` row of a log, PRIMARY KEY (session_id, seq). `seq` is
+                        THE RECORD'S OWN OFFSET -- the line the message arrived in (ADR 0003
+                        decision 9) -- which is what makes the key recomputable rather than
+                        minted, and `INSERT OR REPLACE` an idempotent write.
+    tool_calls          one row per call an assistant message declared, keyed
+                        (session_id, seq, call_id): a row can carry several calls, and a call's own
+                        id is what its result finds it by (`tool_call_id` on the tool row). `result`
+                        is filled when that row arrives -- still deterministic on replay, because
+                        rows are consumed in file order.
+    projection_offsets  one row per session: the LOG PATH and the BYTE OFFSET already projected.
+                        Bytes rather than lines because that is what a reader can resume from
+                        without re-reading the file. The lag is (file size - byte_offset), and ADR
+                        0008 decision 5 is why it is a number a reader can ask for rather than
+                        silence.
+
+  NO FOREIGN KEY TO `sessions`, deliberately: a projection is derived data that has to survive its
+  session row being removed, and be rebuildable after -- it is a copy of the record kept in the same
+  file for convenience, not a dependent of the state table. Nothing on the write path reads it, and
+  deleting every row here changes no answer the record would give."
+  [^Connection c]
+  (ddl! c "CREATE TABLE messages (
+              session_id TEXT NOT NULL,
+              seq        INTEGER NOT NULL,
+              run_id     TEXT,
+              source     TEXT,
+              role       TEXT NOT NULL,
+              content    TEXT,
+              reasoning  TEXT,
+              tool_calls INTEGER NOT NULL DEFAULT 0,
+              at         INTEGER,
+              PRIMARY KEY (session_id, seq))")
+  (ddl! c "CREATE TABLE tool_calls (
+              session_id TEXT NOT NULL,
+              seq        INTEGER NOT NULL,
+              call_id    TEXT,
+              name       TEXT,
+              arguments  TEXT,
+              result     TEXT,
+              PRIMARY KEY (session_id, seq, call_id))")
+  (ddl! c "CREATE INDEX tool_calls_by_call ON tool_calls (session_id, call_id)")
+  (ddl! c "CREATE TABLE projection_offsets (
+              session_id  TEXT PRIMARY KEY NOT NULL,
+              path        TEXT NOT NULL,
+              byte_offset INTEGER NOT NULL,
+              line_offset INTEGER NOT NULL,
+              updated_at  INTEGER NOT NULL)"))
+
 
 (def migrations
   "The forward migration chain, as NAMED steps.
@@ -991,7 +1051,13 @@
    ;; docstring: LAST KNOWN, arriving empty, cleared per process at startup.
    {:name     "sessions-remember-their-run-state"
     :present? #(column? % "sessions" "run_state")
-    :run      sessions-remember-their-run-state}])
+    :run      sessions-remember-their-run-state}
+   ;; APPENDED, like every step after the first. THE TWO CONTENT TABLES AND THEIR OFFSET ARE THE ONE
+   ;; PLACE THIS STORE HOLDS WHAT A LOG HOLDS, by the owner's call (2026-09-25, ADR 0008) -- see the
+   ;; step's own docstring for what that costs and what it does not touch.
+   {:name     "projected-content"
+    :present? #(table? % "messages")
+    :run      projected-content}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

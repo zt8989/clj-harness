@@ -391,6 +391,19 @@
       (let [[r] (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
         (is (= "event" (replay/kind r)))
         (is (= frame (replay/payload r))))))
+  (testing "the record's own HEADER is a fact, and a named one"
+    ;; TICKET 06 of `.scratch/event-persistence`: the file's first line names the file's format and
+    ;; conversation. It is NOT in `wire-custom-names` -- it is not a frame the wire carried and not
+    ;; part of the conversation -- so it reads as a FACT with a name, exactly like `model/start`:
+    ;; every reader that never heard of it ignores it by the vocabulary it already has.
+    (let [line (json/write-str {:type "event" :runId nil
+                                :payload {:type "CUSTOM" :name "record/header"
+                                          :value {:format 2 :thread "t-1" :created 7}}})
+          [r]  (replay/lines->records [line])]
+      (is (= "record/header" (replay/kind r)) "the header's own name, as any fact's")
+      (is (replay/fact? r) "and it is a fact, not a frame the conversation is made of")
+      (is (replay/header? r))
+      (is (= {:format 2 :thread "t-1" :created 7} (replay/header-of r)))))
   (testing "and every other row is refused, naming the line and the reason"
     (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
                             :old-contract]
@@ -415,6 +428,33 @@
       (is (re-find #"old contract" (ex-message e)))
       (is (re-find #"start a new conversation" (ex-message e))
           "a refusal a person can act on -- 决定 3 of the spec"))))
+
+(deftest a-header-is-not-part-of-the-conversation-and-a-fold-never-sees-it
+  ;; THE CONTRACT THAT MAKES THE HEADER SAFE TO WRITE (ticket 06): a record that OPENS with the
+  ;; header line folds into exactly the conversation it folded into without it -- the header cannot be
+  ;; the first entry, cannot shift an entry's identity, and cannot break the model rows' pairing (the
+  ;; k-th assistant message the run's frames built is still the k-th assistant row the run wrote).
+  (let [hdr   {:type "event" :runId nil
+               :payload {:type "CUSTOM" :name "record/header"
+                         :value {:format 2 :thread "t-1" :created 7}}}
+        user  {:ts 1 :runId "r1" :type "message" :source "client" :id "u1"
+               :payload {:role "user" :content "hi"}}
+        model {:ts 1 :runId "r1" :type "message" :source "model"
+               :payload {:role "assistant" :content "the answer"}}
+        start {:ts 1 :runId "r1" :type "event"
+               :payload {:type "RUN_STARTED" :threadId "t" :runId "r1"}}
+        fin   {:ts 1 :runId "r1" :type "event"
+               :payload {:type "RUN_FINISHED" :threadId "t" :runId "r1"}}
+        line  (fn [m] (json/write-str m))
+        rows-with    (replay/lines->records (mapv line [hdr user start fin model]))
+        rows-without (replay/lines->records (mapv line [user start fin model]))]
+    (is (replay/header? (first rows-with)) "the header is the file's first row")
+    (testing "the conversation is the same conversation"
+      (is (= (mapv :message (replay/entries rows-with))
+             (mapv :message (replay/entries rows-without)))))
+    (testing "and so is what a provider is handed"
+      (is (= (replay/records->messages rows-with)
+             (replay/records->messages rows-without))))))
 
 (deftest a-log-that-holds-no-run-is-an-empty-conversation
   ;; The state every session passes through: bound, or configured, or archived --

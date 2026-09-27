@@ -51,4 +51,18 @@
 
 `.scratch/event-persistence/spec.md`：内容投影是它最后一张票（票 06 之后的那张），
 而票 01（记录同步写，ADR 0007）是它的前置——**同步写让 offset 与 `seq` 当场可得，投影消费者
-才不必猜「哪一行是第几行」**。
+才不必猜「哪一行是第几行」。
+
+**已落地（2026-09-26）。** 落点：
+
+- `harness.infra.db/projected-content`（迁移步骤）建三张表：`messages`（主键 `(session_id, seq)`，`seq` 就是记录里
+  那一行的行号）、`tool_calls`（主键 `(session_id, seq, call_id)`）、`projection_offsets`（路径 + 字节 + 行数）。
+- `harness.edge.projection`：按**字节 offset** 读每个会话的新增字节（半个尾行留给下一趟）、逐行投影、
+  一个会话一个事务写下行与 offset；**不在写路径上**（决策 2），由 `http/start!` 起的后台时钟每两秒跑一趟，
+  停法跟着 server 的 teardown。
+- 决策 5 的数是 `projection/lag`（按会话 + 总计，字节）；决策 6 的动作是 `projection/rebuild!`。
+- 判据：`harness.edge.projection-test`（拷贝与记录同说、幂等、半行不投影、工具结果找回自己的调用、
+  变短/换文件的日志重来、lag、**rebuild 逐行相同**）；`harness.infra.db-test` 的两条边界用例改成
+  「状态表仍然不许像记录，而投影的三张表按这份决定列名并持有内容」——**可重算**接替名字正则当那条守卫。
+- 文档：`docs/architecture/home-and-storage.md` 的「库与文件的边界」与新增的「投影的两张内容表 + 一张进度表」一节。
+
