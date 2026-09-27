@@ -51,7 +51,14 @@
   排序去重。`harness.edge.http/run-compaction!` 把这份清单附在摘要请求上，和 prompt 那一栏互为兜底
   （清单是读出来的，不靠 summarizer 的措辞）。
 - 判据：`harness.edge.compaction-test` 的 `the-produced-artifacts-are-read-off-the-tool-calls`。
-| 02 | 压缩只在 step 边界上切 | 无（step-events 已合并到 main） |
+
+## 落地（票 02，2026-09-27）
+
+**压缩的 head 只在 step 边界上收尾。**
+
+- `harness.edge.compaction/step-start-indexes` 与 `tail-anchor`：tail 从「它落在的那一步的第一个节点」开始（旧记录没有 `step/*` 时退回最近一条 user 消息），head 就收到那里。一步是一次模型调用加上它调的那些工具，所以更早的步整步留在 head 里——`assistant(tool_calls)` 不会被与回答它的工具消息切开（那个 400）。
+- `plan` 走这一个锚点；`overflow-plan` 本来就从最新 user 消息切（更窄的一刀），不变。
+- 判据：`harness.edge.compaction-test` 的 `the-head-only-ends-where-a-step-ends`。
 
 ## 落地（票 03，2026-09-27）
 

@@ -202,6 +202,36 @@ not invent anything. Be concise.")
     (inc last-i)
     0))
 
+(defn- step-start-indexes
+  "NODES + RECORDS -> the index of each step's FIRST node (the first node whose record seq is
+  at or after that step's `step/start` line), ascending and distinct. Empty for a record
+  written before steps existed -- the fallback the plans then use is a user message."
+  [nodes records]
+  (let [nodes  (vec nodes)
+        n      (count nodes)
+        starts (vec (sort (keep-indexed (fn [i r] (when (= "step/start" (replay/kind r)) i)) records)))]
+    (if (empty? starts)
+      []  ;; no `step/*` rows: a record written before steps existed
+      (loop [i 0 ss starts acc []]
+        (cond
+          (or (>= i n) (empty? ss)) (vec (distinct acc))
+          (>= (:id (nth nodes i)) (first ss)) (recur (inc i) (rest ss) (conj acc i))
+          :else (recur (inc i) ss acc))))))
+
+(defn- tail-anchor
+  "NODES + RECORDS + FROM -> the index the tail may start at, at or BEFORE FROM: the newest
+  node at or before FROM that begins a step, or -- on a record with no `step/*` rows -- a
+  user message. nil when neither exists there.
+
+  THIS IS WHAT KEEPS A CUT OFF A TOOL PAIR. A step is one model call plus the tools it asked
+  for, so a tail that starts on a step's first node leaves every earlier step whole -- no
+  `assistant(tool_calls)` is separated from the tool messages answering it, which is the
+  shape a vendor refuses (the 400 this ticket exists for)."
+  [nodes records from]
+  (let [users (keep-indexed (fn [i node] (when (= "user" (get-in node [:message :role])) i)) nodes)]
+    (or (last (filter #(<= % from) (step-start-indexes nodes records)))
+        (last (filter #(<= % from) users)))))
+
 (defn plan
   "RECORDS + WINDOW + RETAIN-RATIO -> the HEAD to compact, or nil when there is none.
 
@@ -226,10 +256,13 @@ not invent anything. Be concise.")
       (cond
         (and (pos? budget) (>= acc budget))
         (when (>= j k)
-          (let [head (subvec nodes k (inc j))]
-            {:shadowed    (mapv :id head)
-             :messages    (mapv :message head)
-             :head-tokens (reduce + 0 (map size (range k (inc j))))}))
+          (let [t (tail-anchor nodes records (inc j))
+                j (if (some? t) (dec t) j)]
+            (when (>= j k)
+              (let [head (subvec nodes k (inc j))]
+                {:shadowed    (mapv :id head)
+                 :messages    (mapv :message head)
+                 :head-tokens (reduce + 0 (map size (range k (inc j))))}))))
 
         (neg? j) nil
         :else    (recur (dec j) (+ acc (size j)))))))

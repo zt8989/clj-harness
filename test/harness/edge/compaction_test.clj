@@ -255,3 +255,26 @@
         "the worktree and the written file; a read produces nothing")
     (is (= [] (compaction/product-facts [{:role "user" :content "hi"}]))
         "a range that produced nothing says so by being empty")))
+
+(defn- step-row
+  "A step boundary as the record holds it: a CUSTOM fact named `step/start` or `step/end`."
+  [ts name]
+  {:ts ts :runId "r1" :type "event"
+   :payload {:type "CUSTOM" :name name :value {}}})
+
+(deftest the-head-only-ends-where-a-step-ends
+  ;; ticket 02 of `.scratch/compaction-by-step`: a cut between a model call and the tools it
+  ;; asked for is a request a vendor refuses (HTTP 400). The tail starts on a step's first
+  ;; node, so every earlier step stays whole.
+  (let [records [(entry 0 "u1" "one") (step-row 1 "step/start") (entry 2 "u2" "two")
+                 (step-row 3 "step/end") (entry 4 "u3" "three") (step-row 5 "step/start")
+                 (entry 6 "u4" "four") (step-row 7 "step/end")]
+        nodes   (replay/model-nodes (replay/entries (vec records))
+                                    (replay/compaction-facts (vec records))
+                                    [])
+        starts  (#'compaction/step-start-indexes nodes records)]
+    (is (= [1 3] starts) "each step's first node, in order")
+    (is (= 0 (#'compaction/tail-anchor nodes records 0)) "the first user message")
+    (is (= 1 (#'compaction/tail-anchor nodes records 2))
+        "a tail asked to start inside the second node backs off to the step it falls inside")
+    (is (= 3 (#'compaction/tail-anchor nodes records 3)))))
