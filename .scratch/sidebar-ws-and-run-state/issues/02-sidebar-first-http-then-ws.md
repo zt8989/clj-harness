@@ -11,3 +11,16 @@
 - [ ] 手动刷新按钮保留,注释说明它是 socket 不可用时的兜底而非常规路径
 - [ ] 动过 `ui/src/` 合前跑一次 `node scripts/dev.mjs --scripted` 并自开浏览器走一趟(双窗验证推送)
 - [ ] `ui` 侧单测(typecheck / vitest)过
+
+## Comments
+
+### 实现中的裁决(2026-09-26)
+
+走查发现 `lib/sidebar-refetch.ts` 的 ask-again 重读(`asked`)在推送模式下仍然必要,并且
+有第三个理由成立:慢脚本下,listing 的 `running` 可能比注册表先过期——但 `events.host`
+的 ring 里没有「运行中」的帧,于是那行 spinner 会停留到下一次重读。保留该机制,并在
+`sidebar.tsx` 的 effect 上方写明它是 `refresh` 仅剩的调用方之一,与推送不冲突。
+
+`openThread` / `archive` / `remove` / `addDirectoryAt` 的 `await refresh()` 全部去掉:
+这些路由本来就走 `rung`(`host/ring!`),推送会把新 listing 送回本页;自己再拉一次是
+重复劳动。挂载读 + 按钮兜底 + ask-again 重读是 `refresh` 仅剩的三个入口。

@@ -454,7 +454,14 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// card is a `data` part, so `toAgUiMessages` never sends it and a rebuild never brings it
 /// back. That last one is not about our module at all: it is the adapter's contract, and
 /// it is what lets a stall be shown without becoming part of the conversation.
-const EXPECTED_CASES = 160;
+/// 160 -> 159: ticket 02 of `.scratch/sidebar-ws-and-run-state` retired two
+/// `sidebar-refetch` cases. They pinned the rule's third reason -- "a listing that still
+/// says running after the run" was asked about again -- which the PUSHED listing makes
+/// unnecessary: `events.host` carries a run's start and its end now, so a `running` that
+/// is still true is a run in flight, not a stale snapshot. One case replaced them
+/// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
+/// candidates), which is why the count lands one lower rather than two.
+const EXPECTED_CASES = 159;
 
 let total = 0;
 for (const suite of SUITES) {

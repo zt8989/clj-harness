@@ -12,6 +12,15 @@
 // SCREEN, and -- the whole point of the fix -- that it is there while the run that created
 // it is STILL GOING. Those are `.scratch/new-session-appears/walkthrough.mjs`, against a
 // real Chromium and a real harness.
+//
+// AND THE THIRD REASON THIS RULE USED TO CARRY IS RETIRED (ticket 02 of
+// `.scratch/sidebar-ws-and-run-state`): it asked again about a listed row whose `running`
+// this page was not itself running, on the theory that the run had ended and the snapshot
+// was stale. The listing is PUSHED now -- `events.host` carries the run's start and its
+// end, rung by the run-state writes themselves -- so a `running` that is still `true` is a
+// run in flight, and the frame that says it stopped is what updates the row. The cases
+// that pinned the old reason are gone with it, and the ones that remain are the two writes
+// a minted row is made of.
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
@@ -23,36 +32,27 @@ import {
   type ListedRow,
 } from "../../src/lib/sidebar-refetch";
 
-/// THE FACTS A CASE IS MADE OF: the ids this page has a title for, what the listing says
-/// about each id it names, and which sessions this page is DRIVING a run in. Spelled as
-/// collections rather than as the page's objects because that is all the rule may look at.
+/// THE FACTS A CASE IS MADE OF: the ids this page has a title for, and what the listing
+/// says about each id it names. Spelled as collections rather than as the page's objects
+/// because that is all the rule may look at.
 const titles = (...ids: string[]): string[] => ids;
 
 /// A SEND TIME, for a row the store has caught up with. The value is not the point -- the
 /// rule only asks whether there IS one -- so a literal stands in for a clock.
 const SENT_AT = 1_790_000_000_000;
 
-/// WHAT THE LISTING SAYS, with the send recorded and no run in flight: the settled row,
-/// which is the state every ask is trying to reach.
+/// WHAT THE LISTING SAYS, with the send recorded: the settled row, which is the state
+/// every ask is trying to reach.
 const listed = (...ids: string[]): Map<string, ListedRow> =>
-  new Map(ids.map((id): [string, ListedRow] => [id, { lastSentAt: SENT_AT, running: false }]));
+  new Map(ids.map((id): [string, ListedRow] => [id, { lastSentAt: SENT_AT }]));
 
 /// ...AND FOR THE ROW THAT IS THERE AND STILL EMPTY: the listing names it and records no
 /// send, which is a new session's row in the moment between the two writes (the
 /// registration creates the row; the name and the time arrive with the run's input). A row
 /// in this state drawn on screen still says 还没跑过, which is the second half of the fix.
 const listedUnsent = (...ids: string[]): Map<string, ListedRow> =>
-  new Map(ids.map((id): [string, ListedRow] => [id, { lastSentAt: null, running: false }]));
+  new Map(ids.map((id): [string, ListedRow] => [id, { lastSentAt: null }]));
 
-/// ...AND FOR THE SNAPSHOT THAT OUTLIVED ITS RUN: the read was taken while the run was in
-/// flight, so the row still says `running` -- and nothing else will ever take that spinner
-/// off unless this rule asks again once the run is over.
-const listedStillRunning = (...ids: string[]): Map<string, ListedRow> =>
-  new Map(ids.map((id): [string, ListedRow] => [id, { lastSentAt: SENT_AT, running: true }]));
-
-/// WHICH SESSIONS THIS PAGE IS DRIVING A RUN IN -- its own registry, live.
-const runningNow = (...ids: string[]): Set<string> => new Set(ids);
-const nothingRunning: ReadonlySet<string> = new Set();
 const noAttempts: ReadonlyMap<string, number> = new Map();
 
 /// THE ATTEMPTS AFTER ASKING ABOUT ID ONCE, which is the state the caller is in before the
@@ -67,17 +67,18 @@ const cases: Case[] = [
       // written by the registration that precedes the run, so by the time a title is on
       // screen it is usually already in the store. A person who has just pressed send
       // should not wait a beat to see their session appear.
-      const ask = nextAsk(titles("s1"), listed(), nothingRunning, noAttempts);
+      const ask = nextAsk(titles("s1"), listed(), noAttempts);
       expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
     },
   },
   {
-    name: "an-id-the-listing-already-names-is-never-asked-about",
+    name: "an-id-the-listing-already-names-and-has-a-send-time-for-is-never-asked-about",
     run: async () => {
-      // THE ROW IS THERE. Asking again would be a request whose answer cannot change
-      // anything -- the state the effect is in for every session that has settled.
-      expect(nextAsk(titles("s1"), listed("s1"), nothingRunning, noAttempts)).toBeUndefined();
-      expect(nextAsk(titles("s1"), listed("s1", "s2"), nothingRunning, noAttempts)).toBeUndefined();
+      // THE ROW IS THERE AND FINISHED. Asking again would be a request whose answer cannot
+      // change anything -- the state the effect is in for every session that has settled,
+      // whatever its `running` (see this file's header on the retired third reason).
+      expect(nextAsk(titles("s1"), listed("s1"), noAttempts)).toBeUndefined();
+      expect(nextAsk(titles("s1"), listed("s1", "s2"), noAttempts)).toBeUndefined();
     },
   },
   {
@@ -89,11 +90,24 @@ const cases: Case[] = [
       // and still says 还没跑过 -- so "the row is there" is not "the row is finished", and
       // a rule that stopped there would settle a new session on screen with no time and
       // no title until something else happened to refresh.
-      const ask = nextAsk(titles("s1"), listedUnsent("s1"), nothingRunning, noAttempts);
+      const ask = nextAsk(titles("s1"), listedUnsent("s1"), noAttempts);
       expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
       // AND IT STOPS THE MOMENT THE SEND IS RECORDED, which is what keeps this from being
       // a poll: the row is asked about while it is HALF written, and not after.
-      expect(nextAsk(titles("s1"), listed("s1"), nothingRunning, askedOnce("s1"))).toBeUndefined();
+      expect(nextAsk(titles("s1"), listed("s1"), askedOnce("s1"))).toBeUndefined();
+    },
+  },
+  {
+    name: "an-unlisted-row-with-no-minted-title-is-asked-about-too",
+    run: async () => {
+      // THE LISTED HALF OF THE CANDIDATES, stated on its own: by the time the listing
+      // names a row the page has stopped minting a name for it (`forgetListedTitles`,
+      // because the store's own title is the authority from then on), so a rule whose only
+      // candidates were the minted ids could never ask about a listed row at all.
+      const ask = nextAsk(titles(), listedUnsent("s1"), noAttempts);
+      expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
+      // AND A SETTLED ROW THE PAGE DID NOT MINT IS NOTHING TO ASK ABOUT.
+      expect(nextAsk(titles(), listed("s1"), noAttempts)).toBeUndefined();
     },
   },
   {
@@ -101,55 +115,8 @@ const cases: Case[] = [
     run: async () => {
       // A PAGE WITH NO MINTED SESSION, which is every page load that opens an old
       // conversation: no titles, so no row can be missing.
-      expect(nextAsk(titles(), listed(), nothingRunning, noAttempts)).toBeUndefined();
-      expect(nextAsk(titles(), listed("s1"), nothingRunning, noAttempts)).toBeUndefined();
-    },
-  },
-  {
-    name: "a-listing-that-still-says-running-after-the-run-is-asked-about-again",
-    run: async () => {
-      // THE MIRROR OF THE FIRST REASON, and the one that bites AFTER the row has arrived:
-      // the listing carries the server's registry as of that read, so a read taken mid-run
-      // goes on saying `running` -- and the row drawn from it wears a spinner that nothing
-      // will ever take off, because the sidebar only redraws when it reads again. The page's
-      // OWN registry is the live half, so the two disagreeing is the signal.
-      const ask = nextAsk(
-        titles("s1"),
-        listedStillRunning("s1"),
-        nothingRunning,
-        noAttempts,
-      );
-      expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
-      // AND A ROW THIS PAGE REALLY IS RUNNING IS LEFT ALONE: asking would get the same
-      // answer, and what changes it is the run ENDING -- which arrives on its own, as a
-      // change to the registry this call is handed, and re-runs the caller's effect.
-      expect(
-        nextAsk(titles("s1"), listedStillRunning("s1"), runningNow("s1"), noAttempts),
-      ).toBeUndefined();
-      // AND ONCE THE READ CATCHES UP -- not running any more -- there is nothing to ask.
-      expect(
-        nextAsk(titles("s1"), listed("s1"), nothingRunning, askedOnce("s1")),
-      ).toBeUndefined();
-    },
-  },
-  {
-    name: "a-listed-row-that-still-says-running-outlives-the-title-the-page-minted-it-with",
-    run: async () => {
-      // THE THIRD REASON'S OWN CASE, and the half only a LISTED row can state: by the time
-      // the listing names a row, the page has stopped minting a name for it -- its live
-      // title is dropped (`forgetListedTitles`), because the store's own title is the
-      // authority from then on -- so a rule whose only candidates were the minted ids could
-      // never ask again. The row the rule is supposed to repair IS the listed one, and
-      // `titles()` here is exactly the state a new session's row is in a moment after the
-      // listing answers: no minted id left, and a snapshot that still says `running`.
-      const ask = nextAsk(titles(), listedStillRunning("s1"), nothingRunning, noAttempts);
-      expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
-      // AND A ROW THIS PAGE REALLY IS RUNNING IS STILL LEFT ALONE, minted or not.
-      expect(
-        nextAsk(titles(), listedStillRunning("s1"), runningNow("s1"), noAttempts),
-      ).toBeUndefined();
-      // AND A SETTLED ROW THE PAGE DID NOT MINT IS NOTHING TO ASK ABOUT.
-      expect(nextAsk(titles(), listed("s1"), nothingRunning, noAttempts)).toBeUndefined();
+      expect(nextAsk(titles(), listed(), noAttempts)).toBeUndefined();
+      expect(nextAsk(titles(), listed("s1"), noAttempts)).toBeUndefined();
     },
   },
   {
@@ -159,7 +126,7 @@ const cases: Case[] = [
       // served before the registration committed spent the id and the row never came
       // (它不出现，刷新才出现). A second ask is now made -- and it WAITS, because reads
       // made in the same instant land in the same window and miss together.
-      const ask = nextAsk(titles("s1"), listed(), nothingRunning, askedOnce("s1"));
+      const ask = nextAsk(titles("s1"), listed(), askedOnce("s1"));
       expect(ask).toEqual({ id: "s1", attempt: 2, after: ASK_AGAIN_AFTER_MS });
       expect(ASK_AGAIN_AFTER_MS).toBeGreaterThan(0);
     },
@@ -172,11 +139,11 @@ const cases: Case[] = [
       // one unlucky read into a permanent miss.
       let attempts: ReadonlyMap<string, number> = noAttempts;
       for (let i = 1; i <= ASK_AGAIN_LIMIT; i += 1) {
-        const ask = nextAsk(titles("s1"), listed(), nothingRunning, attempts);
+        const ask = nextAsk(titles("s1"), listed(), attempts);
         expect(ask?.attempt).toBe(i);
         attempts = countAsk(attempts, ask!);
       }
-      expect(nextAsk(titles("s1"), listed(), nothingRunning, attempts)).toBeUndefined();
+      expect(nextAsk(titles("s1"), listed(), attempts)).toBeUndefined();
       // AND IT IS MORE THAN ONE, or this rule would be the bug it replaces.
       expect(ASK_AGAIN_LIMIT).toBeGreaterThan(1);
     },
@@ -190,9 +157,9 @@ const cases: Case[] = [
       // be asked about at all, which is the same permanent miss one id over.
       let spent: ReadonlyMap<string, number> = noAttempts;
       for (let i = 0; i < ASK_AGAIN_LIMIT; i += 1) {
-        spent = countAsk(spent, nextAsk(titles("s1", "s2"), listed(), nothingRunning, spent)!);
+        spent = countAsk(spent, nextAsk(titles("s1", "s2"), listed(), spent)!);
       }
-      expect(nextAsk(titles("s1", "s2"), listed(), nothingRunning, spent)).toEqual({
+      expect(nextAsk(titles("s1", "s2"), listed(), spent)).toEqual({
         id: "s2",
         attempt: 1,
         after: 0,

@@ -903,35 +903,26 @@ export const Sidebar: FC<SidebarProps> = ({
   /// something a row may spend; it is not a reason to ask forever.
   const asked = useRef<Map<string, number>>(new Map());
   /// WHAT THE LISTING SAYS ABOUT THE SESSIONS IT NAMES, by id -- and it can be BEHIND in
-  /// both of the ways `lib/sidebar-refetch.ts` describes: a row with no send time yet (the
-  /// name and the time are the run's own write, and they land a moment after the row does)
-  /// and a row whose `running` outlived the run (that field is the server's registry as of
-  /// the read, not as of now).
+  /// the one way `lib/sidebar-refetch.ts` still describes: a row with no send time yet
+  /// (the name and the time are the run's own write, and they land a moment after the row
+  /// does). A row's `running` is NOT read here any more -- the push carries a run's start
+  /// and its end (ticket 02 of `.scratch/sidebar-ws-and-run-state`), so a listing that
+  /// says `running` is not a snapshot to be repaired but the current word.
   const listedRows = useMemo(
     () =>
       new Map<string, ListedRow>([
         ...projects.flatMap((p) =>
           p.sessions.map((s): [string, ListedRow] => [
             s.threadId,
-            { lastSentAt: s.lastSentAt, running: s.running },
+            { lastSentAt: s.lastSentAt },
           ]),
         ),
         ...tasks.map((t): [string, ListedRow] => [
           t.threadId,
-          { lastSentAt: t.lastSentAt, running: t.running },
+          { lastSentAt: t.lastSentAt },
         ]),
       ]),
     [projects, tasks],
-  );
-  /// AND WHICH SESSIONS THIS PAGE IS DRIVING A RUN IN RIGHT NOW, which is the live half:
-  /// the listing's `running` is a snapshot, and the end of a run is what puts a row that
-  /// is still wearing a spinner back in front of this effect (see the rule's third reason).
-  const liveRunning = useMemo(
-    () =>
-      new Set(
-        Object.keys(statuses).filter((id) => (statuses[id] ?? IDLE).running),
-      ),
-    [statuses],
   );
   // TICKET 02 NOTE: this is the ONE caller of `refresh` left besides the button and
   // the mount read. `refresh` here is the LISTING read the rule has always meant --
@@ -941,7 +932,7 @@ export const Sidebar: FC<SidebarProps> = ({
   // the host ring for it went out with the registration, which this page had not yet
   // drawn).
   useEffect(() => {
-    const ask = nextAsk(Object.keys(liveTitles), listedRows, liveRunning, asked.current);
+    const ask = nextAsk(Object.keys(liveTitles), listedRows, asked.current);
     if (ask === undefined) return;
     asked.current = countAsk(asked.current, ask);
     // THE FIRST ONE GOES AT ONCE: the row is usually committed by the time a title is on
@@ -955,7 +946,7 @@ export const Sidebar: FC<SidebarProps> = ({
     // sidebar going away -- so a retry nobody wants any more never goes out.
     const timer = setTimeout(() => void refresh(), ask.after);
     return () => clearTimeout(timer);
-  }, [liveTitles, listedRows, liveRunning, refresh]);
+  }, [liveTitles, listedRows, refresh]);
 
 
   return (
