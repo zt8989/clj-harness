@@ -33,6 +33,10 @@
     "messages_other": "{{count}} messages"
   },
   "injection.name": "Injected context",
+  "compaction.name": "Compacted context",
+  "compaction.tokens": "{{value}} tok",
+  "compaction.folded_one": "{{count}} message folded away",
+  "compaction.folded_other": "{{count}} messages folded away",
   "timeout.name": "Model timeout",
   "timeout.idle": "no data for {{ms}}ms",
   "timeout.retry": "retrying {{attempt}}/{{limit}}",

@@ -380,14 +380,17 @@
                                            :value {:model "scripted"}}})])]
       (is (= "model/start" (replay/kind r)) "the fact's name comes back as the reader's :kind")
       (is (= {:model "scripted"} (replay/payload r)))))
-  (testing "the WIRE's own CUSTOM name is a frame, not a fact"
-    ;; `injected-context` is the one CUSTOM name the protocol uses; reading it as a fact would
-    ;; hide a card from the conversation.
-    (let [frame {:type "CUSTOM" :name "injected-context" :messageId "session-opening-0"
-                 :value {:role "text"}}
-          [r]   (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
-      (is (= "event" (replay/kind r)))
-      (is (= frame (replay/payload r)))))
+  (testing "the WIRE's own CUSTOM names are frames, not facts"
+    ;; These are the names the protocol uses for a CARD the conversation is made of; reading one
+    ;; as a fact would hide it from the conversation (and, for the compaction card, would read the
+    ;; frame as a second account of the `context/compacted` fact it sits beside).
+    (doseq [frame [{:type "CUSTOM" :name "injected-context" :messageId "session-opening-0"
+                    :value {:role "text"}}
+                   {:type "CUSTOM" :name "compacted-context" :messageId "c-1"
+                    :value {:summary "S" :tokens 12 :messages 2}}]]
+      (let [[r] (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
+        (is (= "event" (replay/kind r)))
+        (is (= frame (replay/payload r))))))
   (testing "and every other row is refused, naming the line and the reason"
     (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
                             :old-contract]

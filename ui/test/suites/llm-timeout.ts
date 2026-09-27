@@ -9,7 +9,7 @@
 //
 // THE SECOND CASE IS NOT ABOUT OUR MODULE AT ALL, exactly like the third case of the
 // `injections` suite: it pins the ADAPTER's behaviour for OUR part name. `toAgUiMessages`
-// sends text, reasoning and tool calls and no `data` part, and `keepInjectionCards` restores
+// sends text, reasoning and tool calls and no `data` part, and `keepCardParts` restores
 // only the parts it owns. Together those are what let a stall be SEEN on screen while the
 // server keeps it out of the record (`harness.edge.http/wire-only-frame?`): the card is a
 // view of a call, never a message of the conversation.
@@ -17,7 +17,8 @@ import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { type Case, type Suite } from "../e2e";
-import { INJECTION_PART, keepInjectionCards } from "../../src/lib/injections";
+import { keepCardParts } from "../../src/lib/card-parts";
+import { INJECTION_PART } from "../../src/lib/injections";
 import {
   TIMEOUT_PART,
   timeoutOutcome,
@@ -142,7 +143,7 @@ const cases: readonly Case[] = [
         ] as never),
       ).toEqual([{ id: "a1", role: "assistant", content: "收到" }]);
 
-      // AND A REBUILD BRINGS BACK NOTHING OF IT: `keepInjectionCards` restores the parts it
+      // AND A REBUILD BRINGS BACK NOTHING OF IT: `keepCardParts` restores the parts it
       // owns, by name, and this is not one of them. The server never records this frame
       // (`harness.edge.http/wire-only-frame?`), so the two halves agree -- what is on disk
       // is the conversation, and a stall was never part of it.
@@ -154,7 +155,7 @@ const cases: readonly Case[] = [
           content: [{ type: "text" as const, text: "收到" }],
         },
       ];
-      expect(keepInjectionCards(rebuilt, converted)).toEqual(converted);
+      expect(keepCardParts(rebuilt, converted)).toEqual(converted);
     },
   },
 ];

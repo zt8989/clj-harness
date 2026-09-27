@@ -45,6 +45,7 @@ import { relativeTimeSuite } from "./suites/relative-time";
 import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { sidebarRefetchSuite } from "./suites/sidebar-refetch";
 import { injectionSuite } from "./suites/injections";
+import { compactionSuite } from "./suites/compactions";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
@@ -73,7 +74,7 @@ import { timeoutSuite } from "./suites/llm-timeout";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -465,7 +466,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// The module imports nothing, which is what lets the whole rule be a case here; that the
 /// picker DRAWS those levels, and that a switch really lands on the new vendor's list, is
 /// the browser walkthrough's half.
-const EXPECTED_CASES = 161;
+const EXPECTED_CASES = 165;
 
 let total = 0;
 for (const suite of SUITES) {

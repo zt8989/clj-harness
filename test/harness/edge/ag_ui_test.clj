@@ -742,3 +742,23 @@
       (is (empty? (frames/apply-frames [(second frames)])))
       (is (empty? (frames/apply-frames (vec (take 3 frames))))
           "nor of the pair of them, beside the run's own opening"))))
+
+(deftest a-compaction-is-a-card-the-rebuild-draws
+  ;; THE SECOND CARD FRAME (`.scratch/compaction-frames`), from the builder's side: the summary
+  ;; the model now reads in place of the folded range, what that range was estimated at, and how
+  ;; many nodes went into it. THE ID IS THE COMPACTION'S OWN -- not `<run>-<n>` like the
+  ;; injections, because a compaction is not a message that arrived in a run: its id is minted
+  ;; beside the rows it wrote (`harness.edge.compaction/perform!`), so the same card comes back
+  ;; under the same name after a rebuild and no two compactions can share one.
+  (let [frame (ag/compacted-frame {:compactionId "c-1"
+                                   :summary      "WHAT WAS FOLDED"
+                                   :tokens       1234
+                                   :shadowed     [3 4 5]})]
+    (is (= {:type "CUSTOM" :name ag/compacted-part-name :messageId "c-1"
+            :value {:summary "WHAT WAS FOLDED" :tokens 1234 :messages 3}}
+           frame))
+    (testing "and the fold that rebuilds a conversation draws exactly one card from it"
+      (is (= [{:id "c-1" :role "assistant"
+               :content [{:type "data" :name ag/compacted-part-name
+                          :data {:summary "WHAT WAS FOLDED" :tokens 1234 :messages 3}}]}]
+             (frames/apply-frames [frame]))))))

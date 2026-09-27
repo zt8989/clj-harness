@@ -41,10 +41,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 // LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
 import { WindowTop, type WindowTopProps } from "@/components/window-top";
-// LOCAL (ticket 02): the test that tells an opening entry (a `user` message that is
-// only a card) from something a person typed.
+// LOCAL (ticket 02): the test that tells an opening entry (a `user` message that is only a card)
+// from something a person typed -- and, since `.scratch/compaction-frames`, that the same is true of
+// EVERY card the server sends: the rule is over the names, not over one of them (`lib/card-parts`).
 import { InjectionCard } from "@/components/context-card";
-import { isCardOnly, isOpeningEntryId, textOfParts } from "@/lib/injections";
+import { isCardOnly } from "@/lib/card-parts";
+import { isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
