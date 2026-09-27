@@ -1,16 +1,19 @@
 // `GET /api/projects`: the sidebar's listing, typed thin.
 //
-// EVERY ROW HERE IS A STORE FACT, except one. That is the rule this shape exists to
-// keep (the owner's: "左侧所有会话信息都是从 sqlite 加载，除了运行状态"): which projects
-// and sessions exist, which session belongs where, which are archived, what each is
-// called and WHEN IT WAS LAST SENT TO all come out of the sqlite rows; the only other
-// source is the process's live-runs registry, which answers `running` because no file
-// can. Nothing in this payload is a stat().
+// EVERY ROW HERE IS A STORE FACT, FULL STOP. That is the rule this shape exists to keep
+// (the owner's sentence, completed -- ticket 01 of `.scratch/sidebar-ws-and-run-state`
+// supplied the last column it named): which projects and sessions exist, which session
+// belongs where, which are archived, what each is called, WHEN IT WAS LAST SENT TO and
+// WHETHER A RUN IS GOING all come out of the sqlite rows. `sessions.run_state` is the
+// last of them, and it is the LAST KNOWN state rather than the current one: the row is
+// what the process that answered last told the store, cleared back to `idle` at every
+// startup so a process that died mid-flight cannot leave its spinner on. Nothing in this
+// payload is a stat() and nothing is a live registry lookup.
 //
 // IT USED TO BE A JOIN, and giving that up is the feature: the listing walked the log
 // tree per row (size, mtime) and, for a task, the whole projects directory by stem --
-// so one refresh was a SELECT plus a walk. A refresh is now a SELECT plus a registry
-// lookup, and the disk half of every row is gone (`bytes`, `lastActivity`).
+// so one refresh was a SELECT plus a walk. A refresh is now ONE SELECT -- not even a
+// registry lookup -- and the disk half of every row is gone (`bytes`, `lastActivity`).
 //
 // THE ANSWER IS TWO LISTS, and they are the sidebar's two blocks: `projects`, each
 // with its sessions, and `tasks` -- conversations with no project at all, flat.
@@ -42,14 +45,16 @@ type Translate = TFunction<"errors">;
 export type SessionSummary = {
   threadId: string;
   archived: boolean;
-  /// WHETHER A RUN IS IN FLIGHT FOR THIS SESSION, and the ONE field here that is not a
-  /// store fact: it is read off the server process's live-runs registry, which is the
-  /// only place that knows. It is why the listing can light a spinner on a conversation
-  /// this browser has never opened -- a run belongs to the process, not to the tab that
-  /// started it.
+  /// WHETHER A RUN IS IN FLIGHT FOR THIS SESSION -- the store's last-known word
+  /// (`sessions.run_state`), no longer a registry lookup: it is why the listing can
+  /// light a spinner on a conversation this browser has never opened, and why a restart
+  /// cannot leave one lit. It is a fact about the PROCESS that answered, which is what
+  /// the store's column records: `running` while a run is going, `idle` again the moment
+  /// it ends, and cleared back to `idle` at every startup so a process that died
+  /// mid-flight cannot leave its spinner on.
   ///
-  /// IT IS A SNAPSHOT, like every other field: the row also draws the page's own
-  /// registry (`statuses`), which is fresher for the sessions THIS page is running.
+  /// THE ROW ALSO DRAWS THE PAGE'S OWN REGISTRY (`statuses`), which is fresher for the
+  /// sessions THIS page is running.
   /// The two are ORed rather than ranked (see `sidebar.tsx`), because either one being
   /// true means a run is in flight.
   running: boolean;
