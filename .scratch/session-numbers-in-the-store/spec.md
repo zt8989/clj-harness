@@ -95,3 +95,30 @@
 
 **验证**:浏览器首屏从空直接变「1 轮 · 1 次调用」,全程无原始 key;调用数随后自己长到 2(推送);
 后端全量 1326 tests / 0 失败;前端 160 tests + typecheck 过。
+
+## 追加:初始化那一刻不许是空的(主人 2026-09-27)
+
+> 再初始化的时候 不仅应该包含轮和次调用,tok/s 应该是0,使用tok应该预估,因为 system_prompt 和
+> 用户信息+注入上下文已经发出了,然后缓存首次也是0
+
+**做成了什么**:`model/start` 的帧现在也带 `numbers`(`live-numbers-slice` 的 `:start` 相位):
+
+- 轮次与调用数照折里的值(此刻 run 已开、调用已发,所以折里有);
+- `cacheHitPercent 0`、`outputTokensPerSecond 0`(厂商什么都还没报——0 是关于厂商的真话);
+- `usage.totalTokens` 与 `context.{usedTokens,windowTokens,percent}` = **压力带对"刚发出的这次请求"
+  的估算**(system prompt + 用户消息 + 本轮注入都已出门,`harness.edge.pressure` 本来就是量这个的);
+- 整包标 `:estimated true`,客户端把 tok 画成 `~12k tok`(与 `contextCells` 已有的 `~` 同一套写法)。
+
+**端相位永远显式带 `:estimated false`**,因为客户端的合并是一次 spread:缺的键会粘住旧值,
+一个 `:estimated true` 会永远留在实测数字上(写完这一段才想通,已由测试钉住)。
+
+**客户端改动**:`model/start` 的数字以前被丢掉(订阅里只看 `model/end`),现在两端都收;
+`StatsPayload.turns` 早已因上一个 bug 变为可选,这次新增 `estimated?: boolean`。
+
+**这是对「没报就是没有,不补 0」的一次例外**,由主人拍板;让它诚实的不是理由而是**标记**:零说的是
+厂商(确实没报),tok 说的是**发出去的东西**(是此刻的事实,不是对厂商的猜测),而 `~` 把"这是估算"
+写在脸上。
+
+**验收(真实浏览器,带 usage 的脚本)**:首屏
+`1 轮 · 1 次调用 · 0 tok/s ~8k tok · 0% 缓存` → 第一次调用回来 `208 tok/s 12k tok · 0% 缓存`
+(标记消失、数字变实测)→ 第二次 `304 tok/s 25k tok · 36% 缓存`。
