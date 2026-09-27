@@ -1043,6 +1043,38 @@
                     (assoc (payload row) :seq i)))
                 records))
 
+(defn fork-cut
+  "RECORDS + optional COMPACTION-ID -> where a fork from 'just before a compaction' cuts,
+  as {:cut N :compaction-id id}: N is the line INDEX of that compaction's `compaction/start`
+  row, and everything BEFORE it is the conversation as it stood when the compaction began.
+
+  THE START ROW IS THE CUT, not the `context/compacted` fact: the summary fact sits INSIDE
+  the compaction (start, summarize, fact, end), so cutting at the fact would keep the
+  compaction's own model call and drop the summary -- neither the before nor the after.
+
+  DEFAULT IS THE MOST RECENT COMPACTION THAT ACTUALLY PRODUCED A `context/compacted`. A
+  `compaction/start` with no fact of its own is a FAILED attempt (the writer closes it with
+  an error and writes no fact), and a failed attempt is not a point anybody forks from.
+  nil when there is no such compaction: 'no compaction' is an honest refusal, not an
+  invitation to copy the whole record."
+  ([records] (fork-cut records nil))
+  ([records compaction-id]
+   (let [starts (keep-indexed
+                 (fn [i row]
+                   (when (= "compaction/start" (kind row))
+                     {:id (:compactionId (payload row)) :idx i}))
+                 records)
+         done   (into #{} (keep (fn [row]
+                                  (when (= "context/compacted" (kind row))
+                                    (:compactionId (payload row))))
+                                records))
+         pick   (if (some? compaction-id)
+                  (first (filter #(and (= compaction-id (:id %))
+                                          (contains? done (:id %)))
+                                    starts))
+                  (last (filter #(contains? done (:id %)) starts)))]
+     (when pick {:cut (:idx pick) :compaction-id (:id pick)}))))
+
 (defn- compaction-summary
   "The message the model reads in a compacted range: one ordinary user message wrapping the
   summary text, so no consumer has to learn a new message shape."

@@ -3273,7 +3273,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
+  #{"rebuild" "compact" "fork" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3896,6 +3896,108 @@
 ;; be known before it is read: a plain `declare` rather than moving it up, because the
 ;; window section is where its argument lives and nothing here reads it before this point.
 (declare live-state)
+(defn- fork-session!
+  "Make a NEW session out of SOURCE-THREAD's record AS IT STOOD JUST BEFORE a recorded
+  compaction, and answer {:threadId .. :from .. :compactionId ..}.
+
+  THE CUT IS THE RECORD'S (`harness.edge.replay/fork-cut`), not this function's: everything
+  before the named compaction's start line is what the new file holds, byte for byte, so
+  the fork is the conversation the model was reading at that moment rather than a
+  re-rendering of it.
+
+  THE NEW FILE MUST READ, WHICH IS THE ONE THING A CUT CAN BREAK. `relieve-pressure!` runs
+  BEFORE a model call, so the compaction usually sits INSIDE a run: the lines before it end
+  with a run that never reached a terminal frame. Those runs are closed here
+  (`replay/closing-frames`) exactly as a rebuild closes them, each under its own run id, so
+  the new record is a log every reader accepts.
+
+  THE COMPACTION ID IS OPTIONAL, the newest SUCCESSFUL compaction is the default, and a
+  compaction that wrote no `context/compacted` is not a fork point. A session with no
+  recorded compaction is refused by name rather than answered with a copy of the whole log."
+  [thread-id compaction-id]
+  (let [source (replay/find-log (home/projects-dir) thread-id)]
+    (when-not source
+      (throw (ex-info (str "no record for " thread-id " in this home, so there is nothing to"
+                           " fork: a fork copies a conversation's log")
+                      {:reason :no-record :thread-id thread-id})))
+    (let [records (vec (replay/read-records source))
+          cut     (replay/fork-cut records compaction-id)]
+      (when-not cut
+        (throw (ex-info (str "no recorded compaction "
+                             (when (some? compaction-id) (str (pr-str compaction-id) " "))
+                             "in " thread-id ", so there is no moment before a compaction"
+                             " to fork from")
+                        {:reason :no-compaction :thread-id thread-id
+                         :compactionId compaction-id})))
+      (let [lines  (vec (replay/read-lines source))
+            keep   (subvec lines (if (some? (replay/header? (first records))) 1 0)
+                           (:cut cut))
+            folded (subvec records 0 (:cut cut))
+            new-id (str (java.util.UUID/randomUUID))
+            dir    (project/binding-for thread-id)
+            dest   (log-file-for new-id)]
+        (if (some? dir)
+          (project/bind! new-id dir)
+          (project/register-session! new-id))
+        ;; THE HEADER IS THE FILE'S: `header-line!` writes it for THIS path and remembers
+        ;; that it did, so the new conversation opens with its own first line while every
+        ;; line after it is the parent's.
+        (when-some [h (header-line! dest)] (record/append! new-id dest h))
+        (doseq [line keep]
+          (record/append! new-id dest (str line "\n")))
+        (log! new-id nil "session/forked"
+             {:from thread-id :compactionId (:compaction-id cut)})
+        (when-let [closures (seq (replay/closing-frames folded))]
+          (doseq [{:keys [run-id last-frame frames]} closures]
+            (log! new-id nil "session/closed-off"
+                  {:run-id run-id :last-frame last-frame
+                   :frames (mapv :type frames) :via "fork"}))
+          (doseq [{:keys [run-id frames]} closures
+                  frame frames]
+            (log! new-id run-id "event" frame)))
+        (project/set-title! new-id
+                            (str/trim (str "[fork] " (or (project/title thread-id) ""))))
+        (host/ring!)
+        {:threadId     new-id
+         :from         thread-id
+         :compactionId (:compaction-id cut)}))))
+
+(defn- fork-post
+  "POST /api/threads/<stem>/fork {compactionId?} -- make a new session from STEM's record as
+  it stood just before a recorded compaction (the newest one by default), and answer where
+  it landed. The parent is untouched: its file, row and run state stay exactly as they were.
+
+  A SESSION WITH A RUN IN FLIGHT IS REFUSED (409). The cut has to land on a boundary, and a
+  run still writing has not reached one yet -- the same reason the message menu's Fork is
+  offered only after a turn ends.
+
+  A SESSION THIS HOME HAS NEVER HEARD OF is refused the way every run on it is
+  (`refuse-unknown-session!`); a session with no recorded compaction is a 400 that names it."
+  [req stem]
+  (cond
+    (not (project/session-exists? stem))
+    (refuse-unknown-session! stem)
+
+    (running? stem)
+    (api-response 409 {:error (str "session " (pr-str stem) " has a run in flight here, so"
+                                   " it cannot be forked right now: a fork cuts the record"
+                                   " at a boundary, and a run still writing has none yet.")
+                       :threadId stem
+                       :reason   "running"})
+
+    :else
+    (let [body (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+                    (catch Throwable _ nil))
+          compaction-id (when (map? body) (:compactionId body))]
+      (try
+        (rung (api-response 200 (fork-session! stem compaction-id)))
+        (catch clojure.lang.ExceptionInfo e
+          (let [d (ex-data e)]
+            (api-response (if (= :no-record (:reason d)) 404 400)
+                          {:error    (ex-message e)
+                           :threadId stem
+                           :reason   (name (or (:reason d) :fork-refused))})))))))
+
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
   the AG-UI message list (seed + every recorded frame, reasoning and tool
@@ -5766,6 +5868,7 @@
       ;; body that was never there.
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
+        [:post "fork"]    (fork-post req stem)
         [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)

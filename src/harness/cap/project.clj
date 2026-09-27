@@ -559,6 +559,25 @@
                              " WHERE id = ?")
                       (System/currentTimeMillis) named thread-id))))))
 
+(defn title
+  "THREAD-ID's stored title, or nil -- either the column was never written or this home has
+  never heard of the session."
+  [thread-id]
+  (when (some? thread-id)
+    (:title (first (db/select "SELECT title FROM sessions WHERE id = ?" (str thread-id))))))
+
+(defn set-title!
+  "Write THREAD-ID's title, replacing whatever was there, and answer whether a row moved.
+
+  THE ONE DOOR A NAME CAN BE SET THROUGH, beside `remember-send!`'s COALESCE: a forked
+  session is named `[fork] …` the moment it is made, and its first send may never come.
+  A session this home has never heard of is left alone, the same rule `set-run-state!` and
+  `remember-numbers!` follow -- a note about a conversation never certifies that it exists."
+  [thread-id value]
+  (pos? (db/with-transaction
+          (fn [^Connection c]
+            (db/execute! c "UPDATE sessions SET title = ? WHERE id = ?" value (str thread-id))))))
+
 (defn register-session!
   "Make THREAD-ID a session of this home, belonging to no project: a row with no
   project, no path and no remembered project. Answers the id.
