@@ -454,7 +454,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// card is a `data` part, so `toAgUiMessages` never sends it and a rebuild never brings it
 /// back. That last one is not about our module at all: it is the adapter's contract, and
 /// it is what lets a stall be shown without becoming part of the conversation.
-const EXPECTED_CASES = 160;
+///
+/// 160 -> 161: the other side of the effort picker -- the `picker` suite's fourth. What a
+/// model OFFERS as its thinking levels is no longer the server's one union
+/// (`harness.cap.providers/reasoning-efforts`, the three OpenAI-compatible values, right
+/// as a wire contract and misleading as a menu): `lib/efforts.ts` holds one ladder per
+/// vendor from OpenAI through Kimi, matched by PREFIX against the model id with its
+/// `relay/` namespace dropped, plus the vendor's own default -- and a model the table
+/// does not know falls back to OpenAI's ladder, the widest one, so nothing is hidden.
+/// The module imports nothing, which is what lets the whole rule be a case here; that the
+/// picker DRAWS those levels, and that a switch really lands on the new vendor's list, is
+/// the browser walkthrough's half.
+const EXPECTED_CASES = 161;
 
 let total = 0;
 for (const suite of SUITES) {

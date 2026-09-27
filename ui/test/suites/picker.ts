@@ -26,6 +26,7 @@ import {
   modelRowKey,
   type ModelRow,
 } from "../../src/lib/model-rows";
+import { effortsForModel, effortsOffered } from "../../src/lib/efforts";
 
 /// A row carrying the shared key fact, in the shape BOTH faces hand it around: the
 /// settings row and the picker's choices row are different objects that agree on
@@ -317,6 +318,84 @@ const cases: Case[] = [
         "workbuddy/deepseek-v4.1-flash",
       ]);
       expect(unnamed.current).toBe("workbuddy/deepseek-v4.1-flash");
+    },
+  },
+  {
+    name: "the-levels-a-model-offers-follow-its-vendor",
+    run: async () => {
+      // THE OFFER IS NARROWED PER MODEL; THE VALUE IS NOT. The server refuses no
+      // level (`harness.cap.providers/reasoning-efforts`): it travels to the wire as
+      // `reasoning_effort` and the vendor decides what it means. So what a WRONG list
+      // costs is not a refusal -- it is a choice that quietly maps away, or one that
+      // never appears. `lib/efforts.ts` is the one table, and it imports nothing, so
+      // the whole rule is pinned here over literal model ids.
+      //
+      // THE TABLE RUNS FROM OPENAI TO KIMI, in the order their ladders were measured.
+      expect(effortsForModel("gpt-5").efforts).toEqual([
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+      // OpenAI alone names no default, and that is the honest answer rather than a gap:
+      // which level it uses is a fact about the model, not about the vendor.
+      expect(effortsForModel("gpt-5").default).toBeUndefined();
+      expect(effortsForModel("claude-sonnet-4.5")).toEqual({
+        name: "anthropic",
+        efforts: ["low", "medium", "high", "max"],
+        default: "high",
+      });
+      expect(effortsForModel("gemini-2.5-pro")).toEqual({
+        name: "google",
+        efforts: ["minimal", "low", "medium", "high"],
+        default: "high",
+      });
+      expect(effortsForModel("deepseek-v4.1-flash")).toEqual({
+        name: "deepseek",
+        efforts: ["low", "high", "max"],
+        default: "high",
+      });
+      expect(effortsForModel("glm-5.3-flash")).toEqual({
+        name: "glm",
+        efforts: ["low", "high", "max"],
+        default: "max",
+      });
+      expect(effortsForModel("kimi-k2")).toEqual({
+        name: "kimi",
+        efforts: ["low", "high", "max"],
+        default: "max",
+      });
+      // Moonshot is the company; `kimi` is the model family, and both ids are the same
+      // ladder.
+      expect(effortsForModel("moonshot-v1-8k").name).toBe("kimi");
+
+      // A RELAY SPELLS THE VENDOR INTO THE ID IT SERVES, so the family is everything
+      // after the LAST `/` -- OpenRouter's `deepseek-...` is DeepSeek's model, and a
+      // relay's `anthropic/claude-...` is Claude's.
+      expect(effortsForModel("openrouter/deepseek-v4.1-flash").name).toBe("deepseek");
+      expect(effortsForModel("z-ai/glm-5").name).toBe("glm");
+      expect(effortsForModel("anthropic/claude-sonnet-4.5").name).toBe("anthropic");
+      // An id is an address, so its case is not part of it.
+      expect(effortsForModel("KIMI-K2").name).toBe("kimi");
+
+      // A MODEL NO ROW KNOWS GETS OPENAI'S LADDER -- the widest one, so nothing a
+      // person could pick is missing -- and so does a session no tier has named a
+      // model for, because there is no vendor to ask.
+      expect(effortsForModel("qwen3")).toEqual(effortsForModel("gpt-5"));
+      expect(effortsForModel("qwen3").name).toBe("openai");
+      expect(effortsForModel("").name).toBe("openai");
+      expect(effortsForModel(undefined).efforts).toEqual(effortsForModel("gpt-5").efforts);
+
+      // AND THE LEVEL THIS SESSION IS ALREADY ON KEEPS ITS ROW. Switching from a model
+      // that knows `xhigh` to one that does not must not leave the trigger blank -- and a
+      // level the vendor DOES carry is not listed twice.
+      expect(effortsOffered("kimi-k2", "xhigh")).toEqual(["xhigh", "low", "high", "max"]);
+      expect(effortsOffered("kimi-k2", "high")).toEqual(["low", "high", "max"]);
+      expect(effortsOffered("kimi-k2", "")).toEqual(["low", "high", "max"]);
+      expect(effortsOffered(undefined, "max")).toEqual(effortsForModel("gpt-5").efforts);
     },
   },
 ];

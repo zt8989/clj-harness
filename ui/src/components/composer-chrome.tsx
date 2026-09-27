@@ -101,6 +101,7 @@ import {
   type ModelAnswer,
 } from "@/lib/composer";
 import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
+import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { bindThread, listSidebar, projectName } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
@@ -421,6 +422,13 @@ const ComposerTools: FC = () => {
     t("model.notInCatalog"),
   );
 
+  // WHICH LEVELS THIS MODEL TAKES, asked of the model rather than of the server's one
+  // union (`lib/efforts.ts`): the offer is narrowed per vendor, while the value still
+  // travels to the wire untouched -- the server refuses no level and the vendor decides
+  // what it means. `vendor.default` is the level the vendor picks when nobody did, and it
+  // is named on its own row below; OpenAI alone has none, because its default is per model.
+  const vendor = effortsForModel(data.model);
+
   return (
     <div data-slot="composer-tools" className="flex items-center gap-3">
       {/* THE RING AND THE MODEL ARE ONE PAIR, so their own gap is tighter than the row's:
@@ -461,15 +469,20 @@ const ComposerTools: FC = () => {
         disabled={busy}
         leading={<BrainIcon className="text-muted-foreground size-4 shrink-0" />}
         title={t("effort.title")}
-        // Three options and a default: read at a glance, so no search box (see
-        // `components/picker.tsx` on `searchable`).
+        // The levels are the ones this MODEL takes, at most eight of them -- read at a
+        // glance, so no search box (see `components/picker.tsx` on `searchable`), and the
+        // level the vendor picks on its own is named on its row.
         searchable={false}
         // The brain already leads this picker, so collapsing it is the same act as the
         // model's: on a phone the icon IS the control.
         iconOnly
         options={[
           { value: "", label: t("effort.default") },
-          ...data["reasoning-efforts"].map((effort) => ({ value: effort, label: effort })),
+          ...effortsOffered(data.model, data["reasoning-effort"]).map((effort) => ({
+            value: effort,
+            label: effort,
+            hint: effort === vendor.default ? t("effort.vendorDefault") : undefined,
+          })),
         ]}
         onPick={(option) => void change({ "reasoning-effort": option.value })}
       />
