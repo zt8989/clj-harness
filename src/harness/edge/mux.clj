@@ -150,6 +150,27 @@
          (filter (fn [[n _]] (> (long n) since)))
          (mapv second))))
 
+(def fact-types
+  "THE FRAME NAMES THE FACT FAMILY SPEAKS, IN ONE PLACE. A fact is about a conversation
+  rather than a part of it -- a turn's two ends and a model call's two ends (ADR 0006) --
+  and it rides the same socket as a run's frames, carrying the RECORD's `seq` (a line
+  number), which is what aligns the pushed half with the window half.
+
+  WHY THE LIST LIVES HERE AND NOT AT THE WRITER: `harness.edge.http/family-send!` writes
+  them, and this namespace already owns the other half of 'what a fact is' -- the bounded
+  per-conversation ring a reconnecting reader is handed (`record-fact!` / `facts-after` /
+  `fact-buffer-size`, just below). A name the writer knows and the ring does not is a
+  fact nobody can ask for again.
+
+  AND THE CLIENT HAS ITS OWN COPY (`ui/src/lib/mux.ts`'s `FACT_TYPES`, which `familyOf`
+  answers with). A name that gets into one and not the other is not a display bug: the
+  frame falls through the client's routing into the RUN family, `@ag-ui/client`'s schema
+  refuses it, and the whole run goes down. Two processes, two languages -- so the
+  agreement is pinned by a case that reads the WIRE, not by the compiler: see
+  `ui/test/suites/frames.ts`'s `the-wire-says-which-names-are-facts`.
+  `test/harness/test_support.clj` reads this Var rather than spelling the set again."
+  #{"turn/start" "turn/end" "model/start" "model/end"})
+
 (def ^:private fact-buffer-size
   "How many of a conversation's most recent FACTS (`turn/*`, `model/*`, ADR 0006) are kept for
   a reader that reconnects. A GAP IS SHORT BY NATURE -- the client re-declares a cursor it held

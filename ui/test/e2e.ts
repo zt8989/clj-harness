@@ -20,6 +20,7 @@ import type { Message } from "@ag-ui/client";
 
 import { HarnessAgent, appendOf } from "@/lib/agent";
 import { setHarnessOrigin } from "@/lib/threads";
+import { familyOf } from "@/lib/mux";
 
 /// One test: a name, and a body. Registration belongs to the driver, so the
 /// driver is also the place that can refuse to run a suite that contributed
@@ -158,14 +159,20 @@ export function content(m: Message): string {
 /// whose body is SSE -- by subscribing first, starting the run, and turning the socket's
 /// frames back into `data:` lines. `framesFromSse` below and every caller of it are unchanged:
 /// a suite still reads the wire, not an interpretation of it.
-const WINDOW_TYPES = new Set(["window", "append", "page", "tail", "end"]);
-
 /// AND THE FACT FAMILY IS NOT A RUN'S FRAME EITHER (ADR 0006): `turn/*` and `model/*` are about
 /// the conversation, they carry the record's line number, and the CLIENT routes them away from
 /// `@ag-ui/client` (`src/lib/mux.ts`'s `familyOf`). A suite that reads "the frames this run
 /// sent" has to do the same, or every case that hands them to AG-UI's schema check fails on a
 /// frame that was never meant for it -- which is the property this reader exists to keep honest.
-const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+///
+/// SO IT ASKS THE CLIENT RATHER THAN SPELLING THE FAMILIES AGAIN. This file used to carry its
+/// own `WINDOW_TYPES` and `FACT_TYPES`, and a copy of a vocabulary is the copy that goes stale:
+/// a name the server started writing and the client's list did not have would be read HERE as
+/// one of this run's frames -- the very misreading that takes a real page's run down.
+/// `familyOf` is the one judgement (`lib/mux.ts`), so a suite and a page cannot disagree.
+///
+/// WHICH IS WHY THE TWO READERS BELOW SHARE ONE SOCKET DANCE (`readRun`): one wants the run's
+/// frames, the other wants every NAME the server used -- and neither should spell the routing.
 
 /// THE DECLARATION MUST LAND BEFORE THE RUN STARTS -- the server filters run frames by it --
 /// and the socket's own `open` can beat the server's bookkeeping. This asks the route that
@@ -183,37 +190,58 @@ async function muxDeclared(token: string, tid: string): Promise<void> {
   throw new Error("events.mux never accepted this suite's declaration");
 }
 
-export async function postRun(
+/// A PARSED FRAME OFF THE DOWNLINK, plus the two things the SOCKET adds: the conversation it
+/// is about, and the downlink's own `:seq` -- the reconnect bookkeeping (ADR 0003 decision 7),
+/// which is no family's vocabulary.
+type RawFrame = Frame & { threadId?: string; seq?: number };
+
+/// ONE RUN, READ STRAIGHT OFF THE SOCKET: every frame the downlink carried for TID while the
+/// run ran, in arrival order -- the window's frames, the facts, and the run's AG-UI events,
+/// exactly as they arrived. A REFUSED RUN hands back its response instead: there was no run to
+/// follow, and a case about a refusal still reads its status and its sentence.
+///
+/// AFTERTERMINALMS IS THE ROOM A READER NEEDS WHEN IT WANTS THE CONVERSATION'S OWN FACTS TOO:
+/// the run's last fact can arrive after the frame that says the run is over, and the terminal
+/// branch below says why. Zero -- what `postRun` wants, and what this did before the option
+/// existed -- stops at the terminal.
+///
+/// THE ONE SOCKET DANCE, because the two readers below want different halves of what lands on
+/// it -- `postRun` wants the run's frames, `frameTypesFromRun` wants every name the server used.
+/// Reading once and filtering after is what keeps the two from drifting apart.
+async function readRun(
   tid: string,
   messages: readonly Message[],
   extra?: Record<string, unknown>,
-): Promise<Response> {
+  afterTerminalMs = 0,
+): Promise<{ refused: Response } | { frames: RawFrame[] }> {
   await ensureSession(tid);
   const token = crypto.randomUUID();
   const params = new URLSearchParams();
   params.set("subscriber", token);
   params.set("sessions", JSON.stringify([{ threadId: tid }]));
   const socket = new WebSocket(`${url().replace(/^http/, "ws")}api/events.mux?${params}`);
-  const frames: Frame[] = [];
+  const frames: RawFrame[] = [];
   let settle: () => void = () => {};
   const done = new Promise<void>((resolve) => {
     settle = resolve;
   });
   socket.addEventListener("message", (event) => {
-    const frame = JSON.parse(String((event as MessageEvent).data)) as Frame & {
-      threadId?: string;
-      seq?: number;
-    };
-    // THE WINDOW'S OWN AND THE FACT FAMILY ARE NEITHER OF THEM THIS RUN'S (`FACT_TYPES` above).
-    if (frame.threadId !== tid || WINDOW_TYPES.has(frame.type) || FACT_TYPES.has(frame.type)) {
-      return;
+    const frame = JSON.parse(String((event as MessageEvent).data)) as RawFrame;
+    // ANOTHER CONVERSATION'S FRAME IS NOT THIS RUN'S. The server filters by what this
+    // connection declared, so this is the belt to that pair of braces -- and this is the one
+    // place a frame about a thread nobody asked for stops rather than being handed on.
+    if (frame.threadId !== tid) return;
+    frames.push(frame);
+    // THE TERMINAL FRAME IS NOT ALWAYS THE LAST THING A RUN PUTS ON THE SOCKET, so a reader
+    // that hangs up here can miss the tail of the conversation's own facts. `turn/end` goes out
+    // in the edge's `:run/done` branch, and the frame saying the run is over comes from
+    // `:run/end` -- ONE KERNEL EVENT EARLIER (`harness.edge.http`'s drain loop notes, where it
+    // converts, that `:run/done` itself is never converted). `afterTerminalMs` is the room to
+    // wait for that tail; a reader wanting only the run's frames needs none of it.
+    if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") {
+      if (afterTerminalMs > 0) setTimeout(settle, afterTerminalMs);
+      else settle();
     }
-    // ONLY THE NUMBER IS OURS: `:seq` is the downlink's bookkeeping for the reconnect
-    // cursor, and the rest of the frame -- `threadId` included -- is the AG-UI event the
-    // server sent, exactly as a runtime would read it.
-    const { seq: _seq, ...rest } = frame;
-    frames.push(rest as Frame);
-    if (frame.type === "RUN_FINISHED" || frame.type === "RUN_ERROR") settle();
   });
   await new Promise<void>((resolve, reject) => {
     socket.addEventListener("open", () => resolve());
@@ -226,15 +254,48 @@ export async function postRun(
     body: JSON.stringify({ threadId: tid, append: appendOf(messages), tools: [], ...extra }),
   });
   if (!started.ok) {
-    // A REFUSAL IS HANDED BACK AS IT CAME, so a case about a refusal still reads its status
-    // and its sentence; there is no run to follow.
     socket.close();
-    return started;
+    return { refused: started };
   }
   await done;
   socket.close();
-  const body = frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("");
+  return { frames };
+}
+
+export async function postRun(
+  tid: string,
+  messages: readonly Message[],
+  extra?: Record<string, unknown>,
+): Promise<Response> {
+  const read = await readRun(tid, messages, extra);
+  if ("refused" in read) return read.refused;
+  // THE RUN'S OWN FRAMES, AND ONLY THEIR OWN FIELDS: `:seq` is the downlink's bookkeeping for
+  // the reconnect cursor, and the rest of a frame -- `threadId` included -- is the AG-UI event
+  // the server sent, exactly as a runtime would read it. The window's frames and the facts are
+  // the two families this SSE never carried (`familyOf` is what says so, above).
+  const body = read.frames
+    .filter((frame) => familyOf(frame.type) === "run")
+    .map(({ seq: _seq, ...rest }) => `data: ${JSON.stringify(rest)}\n\n`)
+    .join("");
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+/// EVERY DISTINCT FRAME TYPE THE SERVER PUT ON TID'S SOCKET WHILE ONE RUN RAN -- the whole
+/// vocabulary of the downlink, not just the run's half.
+///
+/// THIS IS HOW A SUITE ASKS WHAT THE SERVER CALLS THINGS. The fact family's names live in two
+/// processes and two languages (`harness.edge.mux/fact-types` writes them, `lib/mux.ts`'s
+/// `FACT_TYPES` classifies them) and no build compares the two, so the agreement can only be
+/// read off a real run: see `suites/frames.ts`'s `the-wire-says-which-names-are-facts`.
+export async function frameTypesFromRun(tid: string, messages: readonly Message[]): Promise<string[]> {
+  // A GRACE PERIOD, not a guess about ordering: the run's terminal frame has already gone out by
+  // the time `turn/end` follows it (see the terminal branch in `readRun`), and the two are one
+  // kernel event apart -- so this waits for the tail instead of hanging up on the run.
+  const read = await readRun(tid, messages, undefined, 500);
+  if ("refused" in read) {
+    throw new Error(`the run was refused: HTTP ${read.refused.status} ${await read.refused.text()}`);
+  }
+  return [...new Set(read.frames.map((frame) => frame.type))];
 }
 
 /// An SSE body -> an array of parsed data frames. Deliberately hand-rolled

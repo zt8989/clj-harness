@@ -472,7 +472,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// -- the BUG (a payload that had only ever been pushed drew the raw key `stats.turns`) and
 /// its follow-up (the `model/start` payload: counts, zeroes, and the estimate of the request
 /// that just went out, drawn as an estimate).
-const EXPECTED_CASES = 166;
+///
+/// ...166 -> 167: the `frames` suite's case for the FACT FAMILY'S TWO LISTS -- one real run's
+/// socket, read for every frame NAME the server used, so a name it writes and the client does
+/// not know is a red suite here rather than a run that dies in the browser.
+const EXPECTED_CASES = 167;
 
 let total = 0;
 for (const suite of SUITES) {

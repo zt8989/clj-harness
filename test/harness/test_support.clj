@@ -29,6 +29,7 @@
             [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
             [harness.cap.project :as project]
+            [harness.edge.mux :as mux]
             [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
             [harness.cap.system-prompt :as system-prompt]
@@ -752,8 +753,13 @@
   (ADR 0006). They ride the same socket as a run's frames and they are NOT part of the run: they
   make no message, a rebuilt conversation does not contain them, and the CLIENT drops them at the
   same seam (`ui/src/lib/mux.ts`'s `familyOf`). This reader drops them too, or every case that
-  asks 'what frames did this run send' gets a `turn/start` where it expected its terminal."
-  #{"turn/start" "turn/end" "model/start" "model/end"})
+  asks 'what frames did this run send' gets a `turn/start` where it expected its terminal.
+
+  IT IS THE SERVER'S OWN LIST, not a second copy (`harness.edge.mux/fact-types`). A copy here
+  would be a reader that can disagree with the writer: the first fact added to the wire and not
+  to this set would leak into the SSE body a suite reads as this run's frames, and the case that
+  broke would be the one that happened to assert on the frame after it."
+  mux/fact-types)
 
 (defn sse-headers
   "ACK's headers, with the Content-Type the body `mux-run!` builds actually is (SSE): a caller

@@ -13,7 +13,18 @@
 import { EventSchemas } from "@ag-ui/core";
 import { expect } from "vitest";
 
-import { type Case, type Frame, type Suite, fetchFrames, framesFromSse, postRun, script, threadId } from "../e2e";
+import {
+  type Case,
+  type Frame,
+  type Suite,
+  fetchFrames,
+  frameTypesFromRun,
+  framesFromSse,
+  postRun,
+  script,
+  threadId,
+} from "../e2e";
+import { familyOf } from "@/lib/mux";
 
 function valid(frame: Frame): boolean {
   return EventSchemas.safeParse(frame).success;
@@ -150,6 +161,58 @@ const cases: Case[] = [
       expect(frames.every(valid), "and every one of them is schema-legal").toBe(true);
       expect(last(types(frames)), "and the run is terminally an error, not a broken stream").toBe("RUN_ERROR");
       expect(last(frames)?.message ?? "", "the error names what was wrong").toContain("unknown interrupt");
+    },
+  },
+  {
+    name: "the-wire-says-which-names-are-facts",
+    // THE FACT FAMILY'S NAMES ARE WRITTEN IN TWO PROCESSES AND TWO LANGUAGES: the server
+    // writes them (`harness.edge.mux/fact-types`) and the client classifies them
+    // (`lib/mux.ts`'s `familyOf`), and nothing in either build compares the two lists. So
+    // this asks the WIRE. A name the server starts writing and the client does not know is
+    // not cosmetic: it falls through the client's routing into the RUN family, AG-UI's
+    // schema refuses it, and the run that was drawing goes down.
+    //
+    // THE THREE FAMILIES ARE TOLD APART BY THEIR SHAPE, which is what lets this read the
+    // wire without asking the client to classify first: the window speaks five lower-case
+    // words, the fact family speaks `name/name`, and AG-UI's vocabulary is upper-case
+    // (`lib/mux.ts` says exactly that where it routes). So everything on this socket that is
+    // neither the window's nor upper-case is a fact -- or it is a name somebody has to add
+    // on BOTH sides.
+    run: async () => {
+      const AG_UI_TYPE = /^[A-Z][A-Z0-9_]*$/;
+      // Two model calls and one tool: the run that puts the most of the vocabulary on the wire.
+      script([
+        {
+          reasoning: "先看一眼。",
+          content: "",
+          "tool-calls": [{ id: "c1", name: "read", arguments: { path: "deps.edn" } }],
+        },
+        { content: "看完了。" },
+      ]);
+
+      // A USER MESSAGE, BECAUSE A TURN OPENS WITH A PERSON'S WORDS (ADR 0006 decision 3): run
+      // with an empty `append` and there is no turn to hear about, so the four names below come
+      // back as two. BOTH HALVES OF THAT WERE RED FIRST: the empty `append` cost `turn/*`, and a
+      // reader that hung up at RUN_FINISHED cost `turn/end`, which the server puts on the socket
+      // after the frame that says the run is over (`readRun` in `../e2e` says why).
+      const seen = await frameTypesFromRun(threadId("fact-names"), [
+        { id: "u1", role: "user", content: "看看这个项目。" },
+      ]);
+      const facts = seen.filter((name) => familyOf(name) !== "window" && !AG_UI_TYPE.test(name)).sort();
+
+      // NOT AN EMPTY QUESTION: such a run emits every fact name there is, so a name that went
+      // missing shows up here as a missing entry rather than as a check with nothing to look at.
+      expect(facts, `the fact family on the wire, as ${JSON.stringify(seen)}`).toEqual([
+        "model/end",
+        "model/start",
+        "turn/end",
+        "turn/start",
+      ]);
+      // AND THE CLIENT'S HALF: every one of them is a frame the page routes AWAY from
+      // `@ag-ui/client`, which is the property a name added on the server alone loses.
+      for (const name of facts) {
+        expect(familyOf(name), `${name} must be the client's fact family`).toBe("fact");
+      }
     },
   },
 ];

@@ -1883,7 +1883,11 @@
                             ;; line's own number -- which `log!` now ANSWERS, because the write is
                             ;; synchronous (ADR 0007). Nothing is read off disk for the number.
                             (let [offset (log! thread-id run-id kind payload)]
-                              (when (contains? #{"model/start" "model/end"} kind)
+                              ;; A RECORDED KIND THAT IS ALSO A FACT GOES OUT HERE. The list is the
+                              ;; family's own (`harness.edge.mux/fact-types`), not a second spelling: a
+                              ;; name added to the writer and not to the ring (or the reverse) is a fact
+                              ;; nobody can ask for again (see that Var).
+                              (when (contains? mux/fact-types kind)
                                 (family-send!
                                  thread-id
                                  (cond-> {:type kind :seq offset}
