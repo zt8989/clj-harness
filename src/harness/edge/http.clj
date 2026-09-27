@@ -3763,6 +3763,10 @@
           health   (record-health stem)]
       (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"
                                         :source "memory"})
+      ;; NO RING NEEDED HERE: a rebuild changes no fact the listing carries (its row
+      ;; exists already or the id is unknown; a run's start/end rings from the
+      ;; run-state writes themselves). Same for the record-backed rebuild below --
+      ;; a log read back is not a listing fact.
       (api-response 200 (cond-> {:threadId stem
                                  :messages messages
                                  :context  (or (sessions/context stem) [])
@@ -4410,6 +4414,11 @@
   with, plus the type tag that tells this category from a window frame."
   [] (assoc (projects-body) :type "projects"))
 
+(defn host-frame-for-test
+  "The frame a host watcher's push hands its connection, as data -- a test seam, and
+  nothing else reads it (see the host-stream tests and ticket 02's push case)."
+  [] (host-frame))
+
 (defn- host-get
   "GET /api/events.host -- the host-level downlink. A WebSocket that is handed the listing
   at once and then once per host-level change; nothing is sent over it and there is no set
@@ -4418,16 +4427,16 @@
   (let [registered (atom nil)]
     (hk/as-channel req
                    {:on-open  (fn [ch]
-                               (try
-                                 (let [push (fn [] (mux-send! ch (host-frame)))]
-                                   (reset! registered push)
-                                   (host/watch! push)
-                                   ;; THE FIRST LISTING AT ONCE: a page that opens this
-                                   ;; stream must not wait for the next change to draw a
-                                   ;; sidebar.
-                                   (push))
-                                 (catch Throwable t
-                                   (log/error! :host/watch-failed t))))
+                                (try
+                                  (let [push (fn [] (mux-send! ch (host-frame)))]
+                                    (reset! registered push)
+                                    (host/watch! push)
+                                    ;; THE FIRST LISTING AT ONCE: a page that opens this
+                                    ;; stream must not wait for the next change to draw a
+                                    ;; sidebar.
+                                    (push))
+                                  (catch Throwable t
+                                    (log/error! :host/watch-failed t))))
                     :on-close (fn [_ch _status]
                                 (when-some [push @registered]
                                   (host/unwatch! push)))})))
