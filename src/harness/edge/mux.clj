@@ -169,7 +169,7 @@
   agreement is pinned by a case that reads the WIRE, not by the compiler: see
   `ui/test/suites/frames.ts`'s `the-wire-says-which-names-are-facts`.
   `test/harness/test_support.clj` reads this Var rather than spelling the set again."
-  #{"turn/start" "turn/end" "model/start" "model/end"})
+  #{"turn/start" "turn/end" "model/start" "model/end" "step/start" "step/end"})
 
 (def ^:private fact-buffer-size
   "How many of a conversation's most recent FACTS (`turn/*`, `model/*`, ADR 0006) are kept for

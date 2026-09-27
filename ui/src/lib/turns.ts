@@ -94,24 +94,29 @@ export function turnConclusion(
   return undefined;
 }
 
-/// What the turn did: its tool calls, and how many assistant messages it is.
+/// What the turn did, as the fold line asks it: HOW MANY STEPS it took.
 ///
-/// The second number counts the turn's OWN assistant messages -- the steps and
-/// the answer -- not the user message that started it: that one is already on
-/// screen above the summary line, and counting it would make every turn one
-/// longer than the reader can see.
+/// ONE MODEL REQUEST IS ONE STEP, and on the read side one request is one assistant message --
+/// so the turn's steps are the run of assistant messages `turnBounds` found, and the user
+/// message that started the turn is not one of them (it is already on screen above the line,
+/// and counting it would make every turn one longer than the reader can see).
+///
+/// THE RECORD WRITES THAT BOUNDARY DOWN NOW (`step/start` rows, `.scratch/step-events`, ADR
+/// 0011) and for a settled turn the two readings agree. They part in exactly one place: a
+/// request the vendor refused for length and made us send again is ONE step in the record and
+/// TWO messages here, because the client sees two messages and cannot see that the vendor was
+/// asked twice. Where they part the record is right -- which is what `turn/end` carrying
+/// `steps` is for.
 export function turnCounts(
   messages: readonly TurnMessage[],
   first: number,
   last: number,
-): { calls: number; messages: number } {
-  let calls = 0;
+): { steps: number } {
+  let steps = 0;
   for (let index = first; index <= last; index += 1) {
-    for (const part of messages[index]?.parts ?? []) {
-      if (part.type === "tool-call") calls += 1;
-    }
+    if (messages[index]?.role === "assistant") steps += 1;
   }
-  return { calls, messages: last - first + 1 };
+  return { steps };
 }
 
 /// The translator `turnSummaryLabel` takes, PINNED TO THE FACE THAT DRAWS IT.
@@ -123,20 +128,17 @@ export function turnCounts(
 /// makes for its own face.
 type Translate = TFunction<"thread">;
 
-/// The summary line's text: `72 tool calls · 25 messages`, or -- in Chinese --
-/// `72 次工具调用 · 25 条消息`.
+/// The summary line's text: `3 步`, or in English `3 steps`.
 ///
-/// The tool-call half is dropped when there were none: a turn of pure thought is
-/// the common case for a short answer, and `0 tool calls · 2 messages` states a
-/// fact nobody asked for. A turn with no tool calls and one message never reaches
-/// this function -- there is nothing folded to label (see `useStepFold`).
+/// IT USED TO BE TWO NUMBERS -- `72 tool calls · 25 messages` -- AND BOTH ARE GONE
+/// (`.scratch/step-events`, ticket 05). The message half was the same number as the step
+/// half (one request, one message: see `turnCounts`), and a line reading `3 步 · 3 条消息`
+/// tells nobody anything; the tool-call half said less than the step count does -- three
+/// requests, one of which may have run five tools.
 ///
-/// THE SEPARATOR IS NOT IN THE CATALOG. ` · ` sits between two phrases that each
-/// carry their own plural rule, and i18next's `count` resolves one plural per key
-/// -- so the two halves are translated separately and the punctuation joins them.
-/// That is the same line `subjectOf` draws around its ` → ` and `…`.
-export function turnSummaryLabel(calls: number, messages: number, t: Translate): string {
-  const messagesText = t("summary.messages", { count: messages });
-  if (calls === 0) return messagesText;
-  return `${t("summary.calls", { count: calls })} · ${messagesText}`;
+/// THE COUNT GOES THROUGH i18next's `count`, so English's singular form lives in the catalog
+/// (`1 step`) rather than in a hand-rolled rule -- which is what this line did before it had
+/// a language.
+export function turnSummaryLabel(steps: number, t: Translate): string {
+  return t("summary.steps", { count: steps });
 }

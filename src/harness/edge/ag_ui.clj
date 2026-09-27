@@ -355,6 +355,14 @@
     ;; message a reasoning-with-no-answer turn needs, which is the rule it always had.
     (close-reasoning s)
 
+    ;; A STEP'S TWO ENDS ARE FACTS ABOUT THE RUN, NOT FRAMES THE CONVERSATION IS MADE OF
+    ;; (`.scratch/step-events`, ADR 0011). Nothing here opens, closes or annotates a message:
+    ;; the request they bracket already has its own boundaries (`:model/start` / `:model/end`,
+    ;; above) and the tools keep theirs. This branch exists because the `case` has no default --
+    ;; without it the FIRST run that took a step would throw here.
+    (:step/start :step/end)
+    s
+
     (:tool/pre-execute :tool/execute :tool/post-execute)
     ;; The audit-only events carry no AG-UI frame at all: the edge records them as
     ;; jsonl lines. Passing the event through unchanged keeps the fold total

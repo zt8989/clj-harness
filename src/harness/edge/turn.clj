@@ -1,7 +1,18 @@
 (ns harness.edge.turn
-  "THE CURRENT TURN'S COUNTS, folded from a session's record: how many model calls it has made and
-  how many assistant messages it has written -- the two numbers the client's fold line already
-  draws (`ui/src/lib/turns.ts`'s `turnCounts`, whose keys these are).
+  "THE CURRENT TURN'S COUNTS, folded from a session's record: how many STEPS it has taken and
+  how many assistant messages it has written -- the two numbers the client's fold line draws
+  (`ui/src/lib/turns.ts`'s `turnCounts`, whose keys these are).
+
+  A STEP, NOT A CALL (`.scratch/step-events`, ADR 0011): the rows counted are `step/start`
+  ones, so a request the vendor made us send again after refusing it for length is ONE step.
+  The fold line then says what happened -- this turn walked three steps -- rather than how
+  many envelopes went out. THE TOOL-CALL COUNT THIS FOLD USED TO CARRY IS GONE with it:
+  nothing drew it any more, and a number nobody reads is the first thing to drift.
+
+  `stats` HAS A `:steps` TOO AND IT IS A DIFFERENT UNIT: that one is the whole SESSION's
+  model calls, this one is ONE TURN's steps. They live in different payloads (`/stats` and
+  `turn/end`) and are read by different faces, which is why the shared key name is not the
+  ambiguity it looks like; which payload a key rides is what says which unit it is.
 
   WHY A FOLD OF ITS OWN RATHER THAN A NUMBER `stats` COULD ALSO ANSWER. `harness.edge.stats`
   counts a whole SESSION and its `:steps` is the session's model calls. What `turn/end` carries is
@@ -16,32 +27,32 @@
   (:require [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]))
 
-(defn state-init
+(defn state-init []
   "A turn that has done nothing yet."
-  []
-  {:calls 0 :messages 0})
+  {:steps 0 :messages 0})
 
 (defn state-step
   "ONE ROW of the fold -> the next state, with CTX ignored -- the shape every consumer fold has
   (`harness.edge.stats/stats-step`), so one function drives the birth walk, the write stream, and
   a cold read.
 
-  ONE TOOL CALL IS ONE `TOOL_CALL_START` FRAME (every call hangs off an assistant message,
-  `harness.edge.ag-ui`), and ONE ASSISTANT MESSAGE IS ONE `message` ROW whose envelope says the
-  model returned it (`:source` = `model`). Those are the client's own readings of the same words."
+  A STEP IS ONE `step/start` ROW -- the kernel's own boundary, written where the request went
+  out (ADR 0011) -- and ONE ASSISTANT MESSAGE IS ONE `message` ROW whose envelope says the
+  model returned it (`:source` = `model`). Those are the client's own readings of the same
+  words."
   [st _ctx [_ row]]
   (when (some? st)
     (let [k (replay/kind row)]
       (cond
         (and (= "message" k) (= "model" (:source row))) (update st :messages inc)
-        (and (= "event" k) (= "TOOL_CALL_START" (:type (replay/payload row)))) (update st :calls inc)
+        (= "step/start" k) (update st :steps inc)
         :else st))))
 
 (defn answer
   "STATE -> the two counts `turn/end` carries, or nil for a session that does not hold the fold
   (the caller then sends the turn's end without them, rather than inventing zeroes)."
   [st]
-  (when (some? st) {:calls (:calls st) :messages (:messages st)}))
+  (when (some? st) {:steps (:steps st) :messages (:messages st)}))
 
 (defn records->turn
   "A whole record -> the counts of the LAST turn in it -- the offline twin, for tests."

@@ -205,6 +205,8 @@ const cases: Case[] = [
       expect(facts, `the fact family on the wire, as ${JSON.stringify(seen)}`).toEqual([
         "model/end",
         "model/start",
+        "step/end",
+        "step/start",
         "turn/end",
         "turn/start",
       ]);

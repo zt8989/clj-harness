@@ -26,8 +26,7 @@
     "openSubagent": "打开这个子agent 的对话"
   },
   "summary": {
-    "calls_other": "{{count}} 次工具调用",
-    "messages_other": "{{count}} 条消息"
+    "steps_other": "{{count}} 步"
   },
   "injection.name": "注入的上下文",
   "compaction.name": "压缩的上下文",

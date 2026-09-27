@@ -1037,6 +1037,14 @@
     :model/end
     ["model/end" (dissoc ev :type)]
 
+    :step/start
+    ["step/start" {}]
+
+    ;; AND THE STEP'S OWN END SAYS WHICH CALLS IT MADE, and nothing else: what became of each
+    ;; of them is on its own `tools/*` row, keyed by the same id (ADR 0011 -- one place).
+    :step/end
+    ["step/end" {:tools (:tools ev)}]
+
     nil))
 
 ;; THE RUN'S FRAMES ALSO GO OUT ON THE DOWNLINK (`events.mux`, ADR 0004). Declared here

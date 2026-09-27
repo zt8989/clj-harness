@@ -97,15 +97,15 @@ const isFoldableOf = (s: AssistantState): boolean => {
   return last > first && turnIsSettled(messages, last, s.thread.isRunning);
 };
 
-/// The two numbers the summary line prints.
-const turnCallsOf = (s: AssistantState): number => {
+/// THE NUMBERS THE SUMMARY LINE PRINTS -- and there is one, not two, since ticket 05 of
+/// `.scratch/step-events`: a step IS a model request, the read side sees one message per
+/// request, so the message count was this number said twice.
+///
+/// A `hook-safe` selector because it is read through `useAuiState`: it walks the thread's
+/// messages, and it answers the same thing every time for the same state.
+const turnStepsOf = (s: AssistantState): number => {
   const { first, last } = turnBounds(s.thread.messages, s.message.index);
-  return turnCounts(s.thread.messages, first, last).calls;
-};
-
-const turnMessagesOf = (s: AssistantState): number => {
-  const { first, last } = turnBounds(s.thread.messages, s.message.index);
-  return last - first + 1;
+  return turnCounts(s.thread.messages, first, last).steps;
 };
 
 // ------------------------------------------------------------------ the hooks
@@ -184,8 +184,7 @@ export function useFoldedAnswer(): boolean {
 export const TurnStepsTrigger: FC = () => {
   const key = useAuiState(turnKeyOf);
   const folded = useTurnFolded();
-  const calls = useAuiState(turnCallsOf);
-  const messages = useAuiState(turnMessagesOf);
+  const steps = useAuiState(turnStepsOf);
   // The line's own words live in the `thread` face; `lib/turns.ts` takes the
   // translator rather than holding one, so this row is the one place that binds it
   // to the language the page is speaking.
@@ -195,8 +194,7 @@ export const TurnStepsTrigger: FC = () => {
     <button
       type="button"
       data-slot="turn-steps-trigger"
-      data-calls={calls}
-      data-messages={messages}
+      data-steps={steps}
       aria-expanded={!folded}
       onClick={() => toggleTurn(key)}
       className="aui-turn-steps-trigger text-muted-foreground hover:text-foreground flex w-full origin-left items-center gap-1.5 py-1.5 text-[13px] transition-[color,scale] active:scale-[0.98]"
@@ -205,7 +203,7 @@ export const TurnStepsTrigger: FC = () => {
         data-slot="turn-steps-label"
         className="aui-turn-steps-label leading-none"
       >
-        {turnSummaryLabel(calls, messages, t)}
+        {turnSummaryLabel(steps, t)}
       </span>
       <ChevronDownIcon
         data-slot="turn-steps-chevron"

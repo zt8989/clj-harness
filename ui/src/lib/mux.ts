@@ -55,14 +55,24 @@ export type RunFrame = { threadId: string; type: string; [key: string]: unknown 
 export type FactFrame = {
   threadId: string;
   seq: number | null;
-  type: "turn/start" | "turn/end" | "model/start" | "model/end";
+  type: "turn/start" | "turn/end" | "model/start" | "model/end" | "step/start" | "step/end";
   payload?: unknown;
   numbers?: unknown;
 };
 
 /// THE FACT FAMILY'S TYPES, NAMED IN ONE PLACE. `harness.edge.http` writes these names and this
 /// side routes by them, so the spelling is a contract between two processes, not a detail.
-const FACT_TYPES = new Set(["turn/start", "turn/end", "model/start", "model/end"]);
+const FACT_TYPES = new Set([
+  "turn/start",
+  "turn/end",
+  "model/start",
+  "model/end",
+  // THE STEP FAMILY (`.scratch/step-events`, ADR 0011): the server writes these two names and
+  // this set is the client's copy of that contract, pinned against the wire by
+  // `test/suites/frames.ts`'s `the-wire-says-which-names-are-facts`.
+  "step/start",
+  "step/end",
+]);
 
 /// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
 /// without a socket (`test/suites/mux.ts`), and so `onmessage` states it once. The `default` is

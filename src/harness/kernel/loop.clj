@@ -610,6 +610,21 @@
         ;; rather than inside the try, because :run/done reports them whether the run
         ;; went on to the provider or died on the way.
         unplaced (atom [])
+        ;; THE STEP THAT IS OPEN (`harness.kernel.event/step-start`, ADR 0011): the calls the
+        ;; request in flight has asked for, or nil between steps. A step IS one model request
+        ;; plus the tools it calls -- the iteration of the loop below -- so it opens just
+        ;; before that request goes out and closes when those calls have outcomes, when the
+        ;; run ends under it, or in the catch at the bottom.
+        step        (atom nil)
+        ;; CLOSING IS IDEMPOTENT AND IT IS THE ONLY WRITER: the branch that ends an iteration
+        ;; normally closes it, and so do the stop, park and failure paths -- whichever gets
+        ;; there first wins, and nil means somebody already did.
+        close-step! (fn []
+                      (when-some [calls @step]
+                        (emit (ev/step-end (mapv (fn [call] {:id   (:id call)
+                                                             :name (get-in call [:function :name])})
+                                                 calls)))
+                        (reset! step nil)))
         ;; (history, thread-id) -> history, called immediately before every LLM
         ;; call. Identity when the caller passed nothing, so the code path is the
         ;; same either way -- exactly how the unbound hook sink keeps its callers
@@ -697,6 +712,12 @@
                       ;; what makes the idle guard and the stop switch both able to cut it
                       ;; short -- it owns the attempt loop, the abandoned attempt's gate and
                       ;; the stop check, so this stays one line.
+                      ;; A STEP OPENS HERE, and nowhere earlier: everything above belongs to
+                      ;; the run's own bookkeeping (skills, the stop switch, pressure), and
+                      ;; everything below is one request. A stop that arrived between steps is
+                      ;; honoured before this line, so a run somebody stopped does not open a
+                      ;; step it will never close.
+                      _         (do (reset! step []) (emit (ev/step-start)))
                       assistant (model-call-watched provider history emit thread-id cancel
                                                     {:on-overflow         on-overflow
                                                      :recoveries          retries
@@ -705,6 +726,10 @@
                                                      :tool-signature      tool-signature})
                       calls     (:tool_calls assistant)]
                   (added! history added assistant)
+                  ;; WHAT THIS STEP ASKED FOR, remembered where the closing side can see it:
+                  ;; `close-step!` runs after those calls have answered, and the failure path
+                  ;; reaches it with this list too (a request that threw asked for nothing).
+                  (reset! step (vec calls))
                   (if (seq calls)
                     ;; One buffered channel per call: the tool thread never blocks
                     ;; on put, and alts!! over them hands back results as they
@@ -808,6 +833,9 @@
                         ;; than as a call that quietly finished.
                         (doseq [{:keys [id]} calls :when (not (contains? @done id))]
                           (emit (ev/cut-off-result id (frames/cut-off-result))))
+                        ;; AND A STOPPED STEP CLOSES WITH THEM: its calls have their cut-off
+                        ;; answers now, so the step has the ending it is going to get.
+                        (close-step!)
                         (stopped!))
                       (let [results (mapv #(get @done (:id %)) calls)
                             parked  (vec (keep :parked results))]
@@ -816,10 +844,17 @@
                         (doseq [{:keys [id content] :as result} results
                                 :when (nil? (:parked result))]
                           (added! history added {:role "tool" :tool_call_id id :content content}))
+                        ;; THE STEP CLOSES HERE EITHER WAY. A parked call is a step whose tools
+                        ;; did not finish, and the run that answers them opens a NEW step -- a
+                        ;; step is one request, so what a human is answering is not continued
+                        ;; inside it (ADR 0011).
+                        (close-step!)
                         (if (seq parked)
                           parked
                           (recur))))
-                    nil))))]
+                    ;; NO CALLS MEANS THE STEP IS OVER AND SO IS THE RUN: this is the branch
+                    ;; that ends the loop, and the step closes before it does.
+                    (do (close-step!) nil)))))]
         ;; Stop is an OBSERVER, and it fires only where the run actually stops
         ;; normally -- a run that ends on an interrupt is waiting for a human,
         ;; and a run that threw ends on :run/error, which is StopFailure's
@@ -842,6 +877,11 @@
                        parked))
                 (ev/run-end))))
       (catch Throwable t
+        ;; THE STEP CLOSES BEFORE THE RUN'S OWN TERMINAL: a request that threw, or a tool
+        ;; that did, must not leave a step open -- the same reason `model-call!` closes its
+        ;; segment in its own catch. Nothing happens here for a step the stop or park path
+        ;; already closed.
+        (close-step!)
         ;; A STOP IS A TERMINAL OF ITS OWN NAME (`stopped!`), and it stays a RUN_ERROR on
         ;; the wire -- what the separate event buys is the code the frame carries, which
         ;; is how a CLIENT draws a stop as a stop instead of a failure.

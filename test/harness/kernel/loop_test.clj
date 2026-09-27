@@ -67,7 +67,9 @@
   (let [{:keys [history seen]}
         (drive (fake/scripted [{:reasoning "thinking..." :content "hello world"}]) [])]
     (testing "streams reasoning then text, then ends"
-      (is (= [:run/start :run/end]
+      ;; THE STEP IS THE WHOLE OF IT: one request, and it asked for no tools, so the two
+      ;; step boundaries sit either side of the model pair (ADR 0011).
+      (is (= [:run/start :step/start :step/end :run/end]
              (mapv :type (without-audit
                           (remove #(#{:reasoning/delta :text/delta} (:type %)) seen)))))
       (is (= "thinking..." (joined seen :reasoning/delta)))
@@ -84,7 +86,13 @@
                                {:content "done"}])
                [])]
     (testing "one serial tool round, then a final answer"
-      (is (= [:run/start :tool/call :tool/result :text/delta :run/end]
+      ;; ONE STEP PER REQUEST, AND THE TOOLS LIVE INSIDE ONE: `c1` is answered before the first
+      ;; step closes, and the second request -- the one that reads the result and answers -- is a
+      ;; step of its own (ADR 0011).
+      (is (= [:run/start
+              :step/start :tool/call :tool/result :step/end
+              :step/start :text/delta :step/end
+              :run/end]
              (mapv :type (without-audit seen))))
       (testing "the failed call's lifecycle: pre-execute refused, no execute, post closes"
         (let [pre  (first (filter #(= :tool/pre-execute (:type %)) seen))
@@ -207,7 +215,9 @@
 (deftest transport-failure-ends-the-run
   (let [{:keys [seen]}
         (drive {:protocol :explodes} [])]
-    (is (= [:run/start :model/start :model/end :run/error] (mapv :type seen)))
+    ;; A RUN THAT DIED STILL CLOSED ITS STEP: the failure path reaches the same closing side as
+    ;; a clean ending (ADR 0011), which is what makes 'a step is open' a fact a reader can trust.
+    (is (= [:run/start :step/start :model/start :model/end :step/end :run/error] (mapv :type seen)))
     (testing "the call that never answered still CLOSED its segment"
       ;; The distinction the record reader depends on: a segment with no end cannot be
       ;; told from one that is still running, so a call that dies must still leave a
@@ -589,8 +599,11 @@
         (is (= "hello" (:content (last history))) "the retry's answer is the run's answer")
         (is (= 2 @calls))
         (testing "the call's own segments are closed, in order, one pair per attempt"
-          (is (= [:run/start :model/start :model/end :model/timeout
-                  :model/start :model/end :run/end]
+          ;; AND A RETRY IS NOT A SECOND STEP: the vendor refused the request for length and this
+          ;; layer sent it again, but what a person did was walk one step -- which is the whole
+          ;; reason the step count is not the model-call count (ADR 0011).
+          (is (= [:run/start :step/start :model/start :model/end :model/timeout
+                  :model/start :model/end :step/end :run/end]
                  (mapv :type seen))))
         (testing "and the frame says what a person needs: which try it was, and that another follows"
           (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
@@ -709,4 +722,6 @@
         (is (= "answered" (:content (last history))))
         (is (= 1 @calls) "the setup window cost no attempt")
         (is (empty? (timeouts seen)))
-        (is (= [:run/start :model/start :model/end :run/end] (mapv :type seen)))))))
+        ;; THE STEP CLOSES BEFORE THE DEADLINE IS JUDGED (ADR 0011): the call was made, it
+        ;; reported nothing, and the run ended -- one step, opened and closed.
+        (is (= [:run/start :step/start :model/start :model/end :step/end :run/end] (mapv :type seen)))))))

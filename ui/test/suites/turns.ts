@@ -126,45 +126,42 @@ const cases: Case[] = [
     },
   },
   {
-    name: "the-summary-line-counts-the-turns-own-calls-and-messages",
+    name: "the-summary-line-counts-the-turns-own-steps",
     run: async () => {
-      // Tool calls are counted across the whole turn, and the message count is
-      // the turn's own assistant messages -- not the user message that started
-      // it, which is already on screen above the line.
-      expect(turnCounts(THREAD, 1, 3)).toEqual({ calls: 3, messages: 3 });
-      expect(turnCounts(THREAD, 5, 5)).toEqual({ calls: 0, messages: 1 });
+      // ONE STEP IS ONE ASSISTANT MESSAGE on this side of the wire: the client cannot see
+      // requests, only what they left behind, and a request leaves one message. So a turn's
+      // steps are the run of assistant messages `turnBounds` found, and the user message
+      // that started the turn is not one of them.
+      expect(turnCounts(THREAD, 1, 3)).toEqual({ steps: 3 });
+      expect(turnCounts(THREAD, 5, 5)).toEqual({ steps: 1 });
 
-      // A COUNTED CALL IS A `tool-call` PART, whatever else the message holds:
-      // reasoning and text are steps the same turn did, and they are not calls.
+      // AND THE PARTS DO NOT CHANGE IT: reasoning, text and a tool call in one message are
+      // still ONE request. What a request answered with is not a second step -- the record's
+      // `step/start` rows say the same thing, one per request.
       const parts: TurnMessage = {
         role: "assistant",
         status: { type: "complete" },
         parts: [{ type: "reasoning" }, { type: "text" }, { type: "tool-call" }],
       };
-      expect(turnCounts([user, parts], 1, 1)).toEqual({ calls: 1, messages: 1 });
+      expect(turnCounts([user, parts], 1, 1)).toEqual({ steps: 1 });
 
-      // A message with no parts at all (a step whose parts were evicted, an
-      // answer with nothing in it) counts as a message and no call.
+      // A message with no parts at all (a step whose parts were evicted, an answer with
+      // nothing in it) is still a request that went out.
       const bare: TurnMessage = { role: "assistant", status: { type: "complete" } };
-      expect(turnCounts([user, bare], 1, 1)).toEqual({ calls: 0, messages: 1 });
+      expect(turnCounts([user, bare], 1, 1)).toEqual({ steps: 1 });
 
-      // The line itself, in both shapes: the tool-call half goes away when there
-      // were none -- `0 tool calls · 2 messages` is a fact nobody asked for -- and
-      // the message count is never dropped. The two counts go through i18next's
-      // `count`, so English's singular form is pinned here too (a hand-rolled rule
-      // would have said `1 tool calls`).
-      expect(turnSummaryLabel(72, 25, en)).toBe("72 tool calls · 25 messages");
-      expect(turnSummaryLabel(1, 2, en)).toBe("1 tool call · 2 messages");
-      expect(turnSummaryLabel(0, 4, en)).toBe("4 messages");
+      // The line itself is just the step count now (`.scratch/step-events`, ticket 05): the
+      // message half said this same number, and the tool-call half said less. The count goes
+      // through i18next's `count`, so English's singular form is pinned here too -- a
+      // hand-rolled rule would have said `1 steps`.
+      expect(turnSummaryLabel(72, en)).toBe("72 steps");
+      expect(turnSummaryLabel(1, en)).toBe("1 step");
 
-      // THE SAME LINE IN THE OTHER LANGUAGE -- and this is what makes the catalog
-      // the thing under test rather than a decoration: the same two numbers through
-      // the same function have to come out in Chinese, where there is no singular
-      // form, and the wording is TODAY'S (the one that used to be hard-coded in
-      // `lib/turns.ts`, before the line had a language).
-      expect(turnSummaryLabel(72, 25, zh)).toBe("72 次工具调用 · 25 条消息");
-      expect(turnSummaryLabel(1, 2, zh)).toBe("1 次工具调用 · 2 条消息");
-      expect(turnSummaryLabel(0, 4, zh)).toBe("4 条消息");
+      // THE SAME LINE IN THE OTHER LANGUAGE -- and this is what makes the catalog the thing
+      // under test rather than a decoration: the same number through the same function has
+      // to come out in Chinese, where there is no singular form.
+      expect(turnSummaryLabel(72, zh)).toBe("72 步");
+      expect(turnSummaryLabel(1, zh)).toBe("1 步");
     },
   },
   {

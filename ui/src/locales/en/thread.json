@@ -27,10 +27,8 @@
     "openSubagent": "Open this subagent's conversation"
   },
   "summary": {
-    "calls_one": "{{count}} tool call",
-    "calls_other": "{{count}} tool calls",
-    "messages_one": "{{count}} message",
-    "messages_other": "{{count}} messages"
+    "steps_one": "{{count}} step",
+    "steps_other": "{{count}} steps"
   },
   "injection.name": "Injected context",
   "compaction.name": "Compacted context",

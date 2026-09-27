@@ -1,10 +1,12 @@
 (ns harness.kernel.event
-  "The kernel's whole vocabulary: thirteen event kinds. Everything AG-UI-shaped
-  is derived from these by harness.edge.ag-ui, never produced here; five kinds
+  "The kernel's whole vocabulary: fifteen event kinds. Everything AG-UI-shaped
+  is derived from these by harness.edge.ag-ui, never produced here; seven kinds
   carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
-  :tool/execute, :tool/post-execute) and the two model-call boundaries
-  (:model/start, :model/end) -- and the http edge turns those into jsonl audit
-  lines, never into AG-UI frames.
+  :tool/execute, :tool/post-execute), the two model-call boundaries
+  (:model/start, :model/end) and the two step boundaries (:step/start, :step/end)
+  -- and the http edge turns those into jsonl audit lines, never into AG-UI frames.
+  THE TWO STEP BOUNDARIES ARE ALSO FACTS ON THE SESSION'S DOWNLINK, beside `turn/*` and
+  `model/*` (`.scratch/step-events`, ADR 0011): written to the record AND pushed.
 
   :run/interrupt is the second terminal event: a run that parks calls for a
   human decision ends with it instead of :run/end, so exactly one of the two
@@ -145,6 +147,32 @@
   told from one that never ended."
   [telemetry]
   (merge {:type :model/end} telemetry))
+
+(defn step-start []
+  "ONE STEP BEGINS: a model request, plus the tools it is about to ask for
+  (`.scratch/step-events`, ADR 0011). A step is the kernel's own iteration -- one request
+  and the calls it made -- and the TURN above it is zero or more of these.
+
+  IT IS NOT A WIRE FRAME AND IT IS NOT A MESSAGE: the edge writes it as a jsonl fact row
+  and puts it on the session's downlink beside `turn/*` and `model/*`, carrying the record
+  line's own number as `:seq`. `harness.edge.ag-ui` produces nothing from it, on purpose --
+  the conversation is made of what the model said, and this is a fact about how the run went."
+  {:type :step/start})
+
+(defn step-end
+  "ONE STEP IS OVER, and TOOLS is every call it made -- `[{:id .. :name ..} ..]` in call
+  order, empty for a request that asked for nothing.
+
+  WHEN IT IS EMITTED IS THE WHOLE OF WHAT A STEP IS: after the last of those calls has an
+  outcome (its `tools/post-execute` row is on the record), or when the run ends underneath
+  the step -- a stop, a park, or a failure. A PARKED STEP IS CLOSED TOO: a step is ONE
+  request, so the request that answers a human is the NEXT step rather than this one
+  continued. That is where a step and a turn differ: a turn spans runs, a step does not.
+
+  NO OUTCOME RIDES HERE. Which call ran, parked or was cut off is on the `tools/*` rows
+  keyed by these same ids -- one place, and this is not a second one."
+  [tools]
+  {:type :step/end :tools (vec tools)})
 
 (defn model-timeout
   "One model call produced NO DATA for IDLE-MS and was cut off -- the idle guard's own
