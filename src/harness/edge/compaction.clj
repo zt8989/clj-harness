@@ -135,6 +135,19 @@ anything. Be concise.")
     (or (ag/opening-entry? m)
         (= ag/context-entry-id (:id m)))))
 
+(defn- protected-boundary
+  "The lowest node index a compaction's head may start at: ONE PAST the opening.
+
+  IT IS NOT `take-while`'s ANSWER ANY MORE, and that is the whole of the 2026-09-27 fix:
+  the opening blocks do not sit at the FRONT of the conversation -- the order the edge
+  writes is system → the person's question → the opening blocks -- so a prefix scan stopped
+  at the first node (the question) and every compaction folded the opening into its summary.
+  A protected node is protected WHEREVER it sits, so the boundary is past the LAST one."
+  [nodes]
+  (if-some [last-i (last (keep-indexed (fn [i n] (when (protected-node? n) i)) nodes))]
+    (inc last-i)
+    0))
+
 (defn plan
   "RECORDS + WINDOW + RETAIN-RATIO -> the HEAD to compact, or nil when there is none.
 
@@ -154,7 +167,7 @@ anything. Be concise.")
                                      (replay/prune-facts records))
         budget     (long (Math/floor (* (double window) (double retain-ratio))))
         size       (fn [j] (pressure/estimate-message (:message (nth nodes j))))
-        k          (count (take-while protected-node? nodes))]
+        k          (protected-boundary nodes)]
     (loop [j (dec (count nodes)) acc 0]
       (cond
         (and (pos? budget) (>= acc budget))
@@ -203,7 +216,7 @@ anything. Be concise.")
          nodes   (replay/model-nodes (replay/entries records)
                                      (replay/compaction-facts records)
                                      (replay/prune-facts records))
-         k       (count (take-while protected-node? nodes))
+         k       (protected-boundary nodes)
          start   (unit-start nodes)]
      (when (> start k)
        (let [head (subvec nodes k start)]

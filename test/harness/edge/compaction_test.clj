@@ -153,6 +153,23 @@
         "the card's own text is what the model reads in its place")
     (is (= 4 (count (:shadowed plan))) "four oldest nodes, ids unchanged")))
 
+(deftest the-opening-is-never-in-a-compaction-head
+  ;; THE FIX OF 2026-09-27: the opening blocks are NOT the conversation's first nodes -- the
+  ;; edge writes system, then the person's question, THEN the opening blocks -- so the old
+  ;; `take-while` over a protected prefix stopped at node 0 and folded the opening into
+  ;; every summary. A protected node is protected WHEREVER it sits.
+  (let [records [(entry 0 "u1" "the first question of this session")
+                 (assoc (entry 1 (str ag/opening-entry-prefix "0") "<instructions/>")
+                        :source "opening")
+                 (entry 2 "u2" "the second question of this session")
+                 (entry 3 "u3" "the third question of this session")
+                 (entry 4 "u4" "the fourth question of this session")
+                 (entry 5 "u5" "the fifth question of this session")]
+        plan    (compaction/plan (vec records) 1000 0.001)]
+    (is (some? plan) "six nodes and a one-token tail: there is a head to compact")
+    (is (not-any? #{1} (:shadowed plan)) "the opening node is never shadowed")
+    (is (<= 2 (first (:shadowed plan))) "the head starts after the opening")))
+
 (deftest the-card-is-still-in-the-conversation-the-client-reads
   (let [records [(entry 0 "u1" "one")
                  (injected 1 "r1" "r1-pre0" "user" "SKILL BODY")

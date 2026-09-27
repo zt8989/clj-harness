@@ -40,5 +40,17 @@
 | # | 票 | 依赖 |
 |---|---|---|
 | 01 | 摘要记住「已经产出了什么」 | 无 |
-| 02 | 压缩只在 step 边界上切 | step-events 票 02–06 |
-| 03 | 开场块永远不被压缩 | 无 |
+| 02 | 压缩只在 step 边界上切 | 无（step-events 已合并到 main） |
+
+## 落地（票 03，2026-09-27）
+
+**开场块不再被压进摘要。**
+
+- `harness.edge.compaction/protected-boundary`：head 的最低起点改成「最后一个受保护节点之后」——
+  原来的 `(take-while protected-node? nodes)` 假设开场块是对话的**连续前缀**，而边写的顺序是
+  **system → 提问 → 开场块**，所以前缀扫描在第一个节点就归零（`k = 0`），每次压缩都把开场块折进
+  摘要。受保护的节点无论坐在哪都受保护。
+- `plan` 与 `overflow-plan` 都走这一个边界函数。
+- 判据：`harness.edge.compaction-test` 的 `the-opening-is-never-in-a-compaction-head`（含开场块的
+  记录，压缩的 `:shadowed` 不含开场块那一节点，且 head 从它之后开始）；`compaction-test` 与
+  `compaction-run-test` 全绿。
