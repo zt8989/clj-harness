@@ -31,6 +31,8 @@
   read -- the walk a session is BORN by -- is the fold installed here."
   (:require [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
+            [harness.cap.project :as project]
+            [harness.edge.host :as host]
             [harness.edge.record :as record]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
@@ -137,8 +139,36 @@
 (def settle! session/settle!)
 (def land-at! session/land-at!)
 (def land! session/land!)
-(def run-started! session/run-started!)
-(def run-finished! session/run-finished!)
+;; THE RUN STATE'S ADAPTER HALF. The kernel owns the REGISTRY (the pins, the refusal,
+;; the stop switch -- it cannot see the store and must not), and the store's column
+;; (`sessions.run_state`) is written HERE, at the two verbs every run start and end
+;; already goes through. One seam, two facts moving together: the registry's `:runs`
+;; set and the column are written at the same two moments, so neither can drift more
+;; than one crash from the other -- and the startup cleanup below closes even that
+;; gap.
+(defn run-started!
+  "Pin THREAD-ID's run (the kernel's own verb) AND record the column: the store's
+  last-known state becomes `running` at the same moment the registry says so."
+  [thread-id run-id]
+  (session/run-started! thread-id run-id)
+  (project/set-run-state! thread-id "running")
+  ;; AND THE HOST HEARS: a run starting is a fact the sidebar's row draws (`running`),
+  ;; so every page's listing is pushed the new word -- no other page has to poll or
+  ;; press the button to see the spinner (ticket 02 of
+  ;; `.scratch/sidebar-ws-and-run-state`).
+  (host/ring!))
+
+(defn run-finished!
+  "Unpin the run AND record the column: the store's last-known state becomes
+  `idle` when the registry's last pin goes."
+  [thread-id run-id]
+  (session/run-finished! thread-id run-id)
+  (project/set-run-state! thread-id "idle")
+  ;; AND THE HOST HEARS, for the same reason the start does: the row's spinner goes
+  ;; off on every page, not only the one that ran it.
+  (host/ring!))
+
+(def clear-startup-run-state! project/clear-startup-run-state!)
 (def tail session/tail)
 (def tail-of session/tail-of)
 (def since session/since)

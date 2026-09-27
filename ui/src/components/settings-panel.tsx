@@ -76,6 +76,7 @@ import {
   type Registry,
 } from "@/lib/providers";
 import { hasKey, splitByKey } from "@/lib/provider-key";
+import { effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 import {
@@ -343,7 +344,7 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
           onChange={(e) => setEffort(e.target.value)}
         >
           <option value="">{t("defaults.noneSent")}</option>
-          {registry["reasoning-efforts"].map((r) => (
+          {effortsOffered(model, effort).map((r) => (
             <option key={r} value={r}>
               {r}
             </option>

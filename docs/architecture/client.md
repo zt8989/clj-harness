@@ -748,12 +748,50 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 而**开场那一张是 user 消息**：记录里那几条开场 `message` 行（信封 `source: "opening"`）先折出条目（user + 两张 part），帧再按同一个 id
 折一遍时被丢掉（`replay/append-new`、`sessions/append!` 都是先到先得）——所以重建之后开场卡在**人的那一栏**，
 源出派生注入的卡在助手那一栏。适配器的 `fromAgUiMessages` 只取文本与 tool-call、会把这个 part 丢掉，
-所以 `app.tsx` 的 `toThreadMessages` 让 `keepInjectionCards`（纯函数，**按 id 配对**，不是按下标——重建会把
-下标的对应挪走）把它补回来。**同一条规则也接住了快照那条路**：part 丢在适配器里，而 id 与文本留着。
+所以 `app.tsx` 的 `toThreadMessages` 让 `lib/card-parts.ts` 的 `keepCardParts`（纯函数，**按 id 配对**，不是按下标——重建会把
+下标的对应挪走）把它补回来——**那张卡与压缩那张卡是同一个名字表上的两行**，所以这条规则写在名字表那一侧，
+而不是为每种卡各写一遍。**同一条规则也接住了快照那条路**：part 丢在适配器里，而 id 与文本留着。
 
 **回发时它被丢掉**，这是整件事干净的唯一依据：`toAgUiMessages` 只回 text / reasoning / tool-call，
 `data` part 在那儿没有分支。于是卡片看得见、却进不了下一轮的请求——适配器升级时第一个要看的就是这条
-契约（`test/suites/injections.ts` 第三条）。真机证据在 `.scratch/context-frames/evidence/`。
+契约（`test/suites/injections.ts` 第三条；压缩那张卡的同一条在 `test/suites/compactions.ts` 第四条）。真机证据在
+`.scratch/context-frames/evidence/`。
+
+## 压缩在会话栏里的那张卡
+
+**一次把会话开头折成一段摘要的压缩，也在会话栏里留一张卡**——与注入卡、工具卡同一套壳：折着只有一行
+`压缩的上下文 · <摘要首行> · N tok`，点开是那段摘要（等宽、可滚动），下面一行说这次折进去几条。
+
+**它为什么值得一张卡**：压缩改的是**模型**读到的东西，不是人读到的对话——记录一行不改、轨迹照旧、人滚回去还是
+原文，而模型下一次读到的开头已经变成那段摘要了。在此之前，屏幕上一个字都不说这件事发生过。
+
+**它也是一个 `data` part**，名字是 `compacted-context`（`harness.edge.ag_ui/compacted-part-name`），值里是
+`{summary, tokens, messages}`：摘要原文、被折的那段估算 token、折进去几个节点。`lib/compactions.ts` 从 part 里
+算出首行预览与两个数（**帧没说就不画那个数**：`0 tok` 是关于大小的断言，不能凭空造），
+`components/compaction-card.tsx` 用 `makeAssistantDataUI({name: "compacted-context"})` 画它——注册同样是那个组件
+的挂载（`app.tsx` 里 `<CompactionCards />` 挂在 `<ContextCards />` 旁边）。文案进 `thread` 命名空间（中英两份）。
+
+**谁在什么时候说它。** 一处造帧（`ag_ui/compacted-frame`），三处发出去，差别只在于「这一刻有没有一条 run 的
+帧流可挂」：
+
+- **run 起点那次自动压缩**（`compact-if-pressured!`）发生在一个帧都还没发的时候，所以它**跟着这一轮的头**走
+  （`:run/start` 那一批里，排在注入那几张之前），和边自己那半注入物用的是同一个位置——`RUN_STARTED` 之前发帧，
+  客户端没有一条 run 可以挂它；
+- **跑着的那两次**（每发请求前问一次压力的 `relieve-pressure!`、厂商因为太长拒了之后的 `recover-overflow!`）
+  **当场就发**：记录已经改了、会话的模型视图已经动了，所以哪怕这一次调用最后没换用那个更短的数组，这张卡也
+  该在屏幕上；
+- **手工 `/compact` 不发**（见下）。
+
+**刷新靠重建带回来**：帧照旧进记录（`event` 行，payload 就是那一帧；`replay/wire-custom-names` 认这个名字，所以
+它读作**帧**而不是一条事实），`harness.kernel.frames/apply-frames` 把它折成一条**只带那个 part 的 assistant 消息**，
+id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确定，两次压缩不会共用一张卡），`keepCardParts` 按 id
+补回来（名字表在 `lib/card-parts.ts`，两条卡共用那三条规矩：是不是卡、只有卡的消息不画气泡、重建按 id 补回来）。
+**回发时它照样被丢掉**（`data` part 没有回发分支），所以卡片看得见、却进不了下一轮的请求
+（`test/suites/compactions.ts` 第四条）。真机证据在 `.scratch/compaction-frames/evidence/`。
+
+**手工那条路由今天没有卡，这是有意的**：`POST /api/threads/<stem>/compact` 没有 run，也就没有帧流可挂；要让它
+可见就得往记录里写一条**从未上过线**的帧行，而「记录里的帧 = 上过线的帧」是 `harness.edge.http/row-of` 明写的
+规矩。手工压缩今天也没有任何客户端入口——等它长出一个面，卡跟着它一起做。
 
 ## 轨迹（`Conversation` / `Trajectory` 两个视图）
 
@@ -775,7 +813,7 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 
 - **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、拼在它旁边的指令文件
 - **它读的是记录，不是运行时。** 这是它与对话页签的根本区别：system 消息的字节、每次调用**照发出**的工具表，
-  客户端从来没有过，AG-UI 帧里也没有（注入物是这里唯一的例外：它**会**以 `CUSTOM` 帧出来、画成上面那张卡——
+  客户端从来没有过，AG-UI 帧里也没有（两张卡是这里的例外：注入物与一次压缩都**会**以 `CUSTOM` 帧出来、画成上面那两张卡——
   但卡只是**一段字节**，`items` 的来源与分轮、这次调用带了几张表，都只有记录才有）。所以这一半由服务端从
   jsonl 折出来（`harness.edge.trajectory`，
   见 [edge](edge.md)），从 `GET /api/threads/<stem>/trajectory` 吐出去，
@@ -822,7 +860,7 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 
 **怎么跑**用 `cd ui && npm test`（vitest；三条腿与定向跑的完整入口见 `AGENTS.md`）。整套测试的
 **驱动只有一个文件**（`test/ui.test.ts`），
-`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,elicitation-card,attachments,turns,injections,picker,i18n,restore,running,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
+`test/suites/{frames,client,turn,approval,skills,stats,context,elicitation,elicitation-card,attachments,turns,injections,compactions,picker,i18n,restore,running,concurrent,sidebar,session-title,relative-time,sidebar-rows,record,window}.ts`
 是被它 import 的普通模块（`sidebar` / `record` / `window` / `elicitation-card` / `running` 那五份是 `.tsx`：它们
 `renderToStaticMarkup` 组件、把渲染出来的那句话读回来）：
 

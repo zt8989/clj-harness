@@ -17,14 +17,15 @@
 //
 // A LEAF MODULE RATHER THAN A CLOSURE INSIDE `app.tsx`: the suite can import this and pin the
 // rule over literals (see `ui/test/suites/injections.ts`), while `app.tsx` -- which reaches the
-// runtime, i18n and the DOM -- cannot be rendered in that run at all. `lib/injections.ts`'s
-// `keepInjectionCards` is here for the same reason and one more: it is the half of the
-// conversion upstream does not have.
+// runtime, i18n and the DOM -- cannot be rendered in that run at all. `lib/card-parts.ts`'s
+// `keepCardParts` is here for the same reason and one more: it is the half of the conversion
+// upstream does not have -- for EVERY card, since the injection and the compaction are dropped by
+// the adapter the same way and put back the same way.
 import { fromThreadMessageLike } from "@assistant-ui/core";
 import { fromAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { newId } from "./id";
-import { keepInjectionCards } from "./injections";
+import { keepCardParts } from "./card-parts";
 import type { SofarState } from "./threads";
 
 /// HOW FAR ALONG THE CONVERSATION IS, as the messages are built: `running` is the window's own
@@ -60,10 +61,11 @@ export function readsOf(state: string | null | undefined): Reads {
 /// snapshot-import path runs this exact pair (AgUiThreadRuntimeCore.importMessagesSnapshot), so
 /// the conversion is upstream's, quoted rather than reinvented.
 export function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads) {
-  // `fromAgUiMessages` rebuilds text, reasoning and tool calls; the injection cards are put back
-  // right after it, because upstream's converter has no case for a `data` part (see
-  // `lib/injections.ts`). Everything else about a rebuilt message is upstream's.
-  const converted = keepInjectionCards(agUiMessages, fromAgUiMessages(agUiMessages));
+  // `fromAgUiMessages` rebuilds text, reasoning and tool calls; the CARD parts are put back right
+  // after it, because upstream's converter has no case for a `data` part (see `lib/card-parts.ts`,
+  // which owns the names and the rule for both cards). Everything else about a rebuilt message is
+  // upstream's.
+  const converted = keepCardParts(agUiMessages, fromAgUiMessages(agUiMessages));
   const last = converted.length - 1;
   return converted.map((message, index) => {
     // THE STATUS A REBUILT MESSAGE ARRIVES WITH IS ITS OWN, and only the LAST one's is

@@ -58,9 +58,11 @@
         (providers/use-provider! thread-id (fake/scripted [{:content "MID SUMMARY"}]))
         (try
           (let [array (as-array (replay/read-records log))
+                said  (atom [])
                 view  (#'http/relieve-pressure! thread-id
                                                 (fake/scripted [{:content "MID SUMMARY"}])
-                                                array)]
+                                                array
+                                                (fn [frame] (swap! said conj frame)))]
             (is (until #(some #{"context/compacted"}
                               (mapv replay/kind (replay/read-records log)))
                        3000)
@@ -68,7 +70,18 @@
             (is (some? view) "and the caller is handed an array to send instead")
             (is (< (count view) (count array)))
             (is (str/starts-with? (str (:content (first view))) "<compacted-summary>")
-                "and it is the compacted conversation, not the one handed in"))
+                "and it is the compacted conversation, not the one handed in")
+            ;; AND THE RUN IS TOLD IN THE SAME BREATH (`.scratch/compaction-frames`): the frame
+            ;; names the compaction the ROWS name, so the card a client draws is the one a rebuild
+            ;; hands back afterwards.
+            (let [fact (first (filter #(contains? % :compactionId)
+                                     (map replay/payload (replay/read-records log))))
+                  card (first @said)]
+              (is (= ["compacted-context"] (mapv :name @said))
+                  "one card frame, named for the card")
+              (is (= "MID SUMMARY" (get-in card [:value :summary])))
+              (is (= (:compactionId fact) (:messageId card))
+                  "and it is folded under the id the rows carry")))
           (finally
             (providers/use-provider! thread-id nil)
             (io/delete-file log true))))
@@ -82,12 +95,16 @@
         (providers/use-provider! thread-id (fake/scripted [{:content "SHOULD NOT BE USED"}]))
         (try
           (let [array (as-array (replay/read-records log))
+                said  (atom [])
                 view  (#'http/relieve-pressure! thread-id
                                                 (fake/scripted [{:content "SHOULD NOT BE USED"}])
-                                                array)]
+                                                array
+                                                (fn [frame] (swap! said conj frame)))]
             (is (nil? view) "nothing to answer")
             (is (not-any? #{"compaction/start"} (mapv replay/kind (replay/read-records log)))
-                "no rows, no model call"))
+                "no rows, no model call")
+            (is (= [] @said)
+                "and nothing is said to the client: a run under the threshold is not told anything"))
           (finally
             (providers/use-provider! thread-id nil)
             (io/delete-file log true))))

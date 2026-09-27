@@ -104,6 +104,7 @@
             [harness.edge.pressure :as pressure]
             [harness.edge.projection :as projection]
             [harness.edge.compaction :as compaction]
+            [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
             [harness.edge.stats :as stats]
             [harness.edge.turn :as turn]
@@ -754,8 +755,10 @@
   [thread-id run-id]
   (sessions/run-started! thread-id run-id)
   ;; AND THE HOST HEARS: a run starting is one of the facts a sidebar draws, and it
-  ;; does not ride on any one conversation's window (that is what `events.host` is for).
-  (host/ring!)
+  ;; does not ride on any one conversation's window (that is what `events.host` is
+  ;; for). The ring itself lives in `sessions/run-started!` now -- the verb that moves
+  ;; both the registry and the column is the one that says the row changed -- so this
+  ;; wrapper is one call, not three.
   nil)
 
 (defn- unregister-run!
@@ -767,8 +770,8 @@
   property of the shape rather than something each call site has to arrange."
   [thread-id run-id]
   (sessions/run-finished! thread-id run-id)
-  ;; AND THE HOST HEARS for the same reason: the row's "running" dot is this registry's.
-  (host/ring!)
+  ;; AND THE HOST HEARS for the same reason: the row's "running" dot -- rung by
+  ;; `sessions/run-finished!` itself, with the column it now shares.
   nil)
 
 (defn entry-source
@@ -869,7 +872,6 @@
   [frame]
   (contains? reasoning-frames (:type frame)))
 
-
 ;; ------------------------------------------------------ the running text, snapshotted
 
 (def text-snapshot-ms
@@ -968,6 +970,36 @@
               [frame]))
 
       :else [frame])))
+
+;; ------------------------------------------------- the frames the record never keeps
+
+(def ^:private wire-only-frames
+  "The CUSTOM frames the WIRE carries and the RECORD does not. SPELLED OUT rather than
+  matched by prefix, for the reason `reasoning-frames` above is: a name nobody meant to add
+  here would otherwise be dropped from the record in silence."
+  #{ag/timeout-part-name})
+
+(defn- wire-only-frame?
+  "Is FRAME one the wire carries and the record never keeps?
+
+  THE IDLE GUARD'S FRAME IS THE WHOLE LIST TODAY, and it is a different animal from the
+  reasoning family above: those leave no line because their text comes back on the run's
+  own `message` row, while this one leaves no line because it is NOT PART OF THE
+  CONVERSATION AT ALL -- nothing a later rebuild, window or replay reader should see.
+  The frame still reaches the client: it is broadcast (`mux-broadcast!`) and kept for the
+  session's fold, where `harness.kernel.frames/apply-frames` drops the name exactly as it
+  drops every CUSTOM name it does not know.
+
+  THE PREDICATE IS SPELLED ONCE because there are two frame sinks -- the agent route and a
+  subagent's -- and a second spelling would be a second rule."
+  [frame]
+  (and (= "CUSTOM" (:type frame)) (contains? wire-only-frames (:name frame))))
+
+;; BOTH EXCEPTIONS ARE NOW THE SAME KIND OF THING (`reasoning-frame?` and
+;; `wire-only-frame?`): one says which LINES a frame becomes, the other says whether the
+;; harness's own frame about a call in flight may become a line at all. `runner` below and
+;; the subagent route ask BOTH, in that order, over whatever `text-lines` answered.
+
 (defn- lifecycle-record
   "A tool-lifecycle or model-call kernel event -> the [kind payload] jsonl line it
   becomes, keyed by toolCallId like applepi's ADR-0021 audit lines. Nil for every
@@ -1030,7 +1062,13 @@
 
   IT IS HANDS-OFF ABOUT WHO IS LISTENING. The broadcast writes to whatever connections declared
   this conversation; one that declared it and then went away costs nothing (the write is caught
-  in `mux-send!`)."
+  in `mux-send!`).
+
+  AND ONE FAMILY IS NEITHER RECORDED NOR FOLDED INTO THE CONVERSATION AT EITHER SINK: the
+  idle guard's CUSTOM frame (`wire-only-frame?`). A vendor that went quiet for too long is
+  a fact about a call IN FLIGHT -- the client is told, and the record is not, because a
+  reload that rebuilt a conversation out of it would be carrying a card about something
+  that is not in the conversation at all."
   [thread-id run-id state]
   (fn [frame]
     ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
@@ -1047,8 +1085,11 @@
     ;; THE FRAME IS NOT DROPPED, ONLY ITS LINE: it still goes to the bus and into the session's
     ;; memory, and the run's own `message` row carries the same text back (`reasoning-frame?` says
     ;; which family, and why the WHOLE family and not just its CONTENT frames).
+    ;; BOTH EXCEPTIONS APPLY TO WHAT `text-lines` ANSWERED, not to FRAME: the text family
+    ;; is one of the lines a frame becomes (`text-lines`), and a frame the record never
+    ;; keeps is a whole frame rather than a line -- so the wire-only test reads ROW.
     (doseq [row (text-lines state frame)]
-      (when-not (reasoning-frame? row)
+      (when-not (or (reasoning-frame? row) (wire-only-frame? row))
         (log! thread-id run-id "event" row
               (when (contains? terminal (:type row))
                 (fn [offset] (sessions/land! thread-id run-id offset))))))
@@ -1297,7 +1338,13 @@
           ;; AUTO COMPACTION (ticket 04): before this run derives its request, is the model's
           ;; window about to run out? At or over the threshold, compact NOW -- so `history`
           ;; below reads the compacted conversation. Below it, nothing happens.
-          (compact-if-pressured! thread-id)
+          ;;
+          ;; WHAT IT DID IS KEPT BESIDE THE RUN (`:compacted`), and that is not bookkeeping: this
+          ;; compaction changed what the model will read on this very run, and a person watching has
+          ;; no other way to be told. It cannot be said HERE either -- a frame before RUN_STARTED is
+          ;; a frame the client has no run to hang it on -- so it rides the run's first frames
+          ;; (the `:run/start` branch below, beside the injections).
+          (swap! state assoc :compacted (compact-if-pressured! thread-id))
           (let [history  (sessions/messages thread-id)
                 born?    (empty? history)
                 [opening opening-failure]
@@ -1716,7 +1763,7 @@
                                                              ;; compacts aggressively and answers a SHORTER view, or
                                                              ;; nil (the vendor's refusal then stands).
                                                              :on-overflow (fn [history t]
-                                                                            (recover-overflow! thread-id provider history t))
+                                                                            (recover-overflow! thread-id provider history t emit))
                                                              ;; THE SAME QUESTION, ASKED BEFORE EVERY CALL INSTEAD OF
                                                              ;; AFTER THE REFUSAL: is this the request to send? A run
                                                              ;; that grows between calls (one tool result can be
@@ -1725,8 +1772,15 @@
                                                              ;; the run's start, 97% thirteen seconds later, over 100%
                                                              ;; twelve minutes in (`.scratch/compaction-shape` 04).
                                                              :on-pressure (fn [history]
-                                                                            (relieve-pressure! thread-id provider history))
+                                                                            (relieve-pressure! thread-id provider history emit))
                                                              :overflow-retries (compaction/overflow-retries thread-id)
+                                                             ;; THE IDLE GUARD'S TWO KNOBS, read from the same harness.edn
+                                                             ;; and on the same terms: how long a model call may sit silent,
+                                                             ;; and how many times a call that went silent is tried again.
+                                                             ;; `harness.edge.llm-timeout` is the reader and the kernel is
+                                                             ;; handed the answer -- it reads no configuration of its own.
+                                                             :idle-timeout-ms (llm-timeout/idle-timeout-ms thread-id)
+                                                             :idle-timeout-retries (llm-timeout/retries thread-id)
                                                              ;; A JUST-PRODUCED TOOL RESULT THAT IS
                                                              ;; HUGE IS MOVED OUT OF THE CONVERSATION
                                                              ;; (`harness.cap.spill`): the model reads
@@ -1880,10 +1934,20 @@
                                                 ;; `pre` = folded in BEFORE the first call; the
                                                 ;; kernel's keep `ctx`, which is the name of the
                                                 ;; event they answer (`:context/injected`).
-                                                (cond-> (vec (map-indexed
-                                                              (fn [i message]
-                                                                (ag/injected-frame (str run-id "-pre" i) message))
-                                                              injected))
+                                                (cond-> (into (if-some [compacted (:compacted @state)]
+                                                                ;; THE COMPACTION THIS RUN WOKE UP TO ALREADY RIDES FIRST,
+                                                                ;; because it happened FIRST: the trigger at the run's head
+                                                                ;; (`compact-if-pressured!`, whose answer this key holds)
+                                                                ;; measured the record BEFORE the injections below were derived,
+                                                                ;; so the summary the model is now reading stands in front of
+                                                                ;; material derived after it. A run the trigger left alone has
+                                                                ;; no such key and this is the empty vector it takes instead.
+                                                                [(ag/compacted-frame compacted)]
+                                                                [])
+                                                              (map-indexed
+                                                               (fn [i message]
+                                                                 (ag/injected-frame (str run-id "-pre" i) message))
+                                                               injected))
                                                   ;; AND THE CONVERSATION THIS RUN WROTE
                                                   ;; PART OF rides with it, for the same
                                                   ;; reason and on the same run: the page
@@ -2301,7 +2365,12 @@
             (let [events (loop/run-chan provider messages {:thread-id  thread-id
                                                            :resume     []
                                                            :before-llm project/before-llm
-                                                           :tool-signature context/tool-signature})]
+                                                           :tool-signature context/tool-signature
+                                                           ;; A DELEGATION INHERITS THE PARENT'S TIER, so it inherits
+                                                           ;; the parent's idle guard with it -- read on the parent's
+                                                           ;; thread, which is the session harness.edn was composed for.
+                                                           :idle-timeout-ms (llm-timeout/idle-timeout-ms parent-thread-id)
+                                                           :idle-timeout-retries (llm-timeout/retries parent-thread-id)})]
               (loop []
                 (if-let [ev (async/<!! events)]
                   (if (= :run/done (:type ev))
@@ -2333,11 +2402,13 @@
                         ;; subagent thread runs exactly ONE delegation, so the run is
                         ;; the thread here). See `follow-get`.
                         (let [f (assoc frame :seq (swap! frame-seq inc))]
-                          ;; THE SAME ONE EXCEPTION AS THE AGENT ROUTE (`reasoning-frame?`): a
-                          ;; subagent's reasoning frames are broadcast and kept in memory, and NOT
-                          ;; recorded -- the delegation's own `message` rows carry the text back.
+                          ;; THE SAME TWO EXCEPTIONS AS THE AGENT ROUTE (`reasoning-frame?`,
+                          ;; `wire-only-frame?`), over the same helper: a subagent's reasoning
+                          ;; frames are broadcast and kept in memory and NOT recorded -- the
+                          ;; delegation's own `message` rows carry the text back -- and the idle
+                          ;; guard's frame is the wire's alone in a delegation too.
                           (doseq [row (text-lines text f)]
-                            (when-not (reasoning-frame? row)
+                            (when-not (or (reasoning-frame? row) (wire-only-frame? row))
                               (log! thread-id run-id "event" row
                                     (when (contains? terminal (:type row))
                                       (fn [offset] (sessions/land! thread-id run-id offset))))))
@@ -2876,12 +2947,20 @@
   A refresh of the sidebar is now one SELECT and one registry lookup instead of forty
   stat calls, which is what the panel's own frame rate was paying for.
 
-  `:running` IS THE ONE FIELD NOT IN THE STORE, and it is not an oversight: whether a
-  run is alive right now is a question about THIS PROCESS, and a file cannot answer it
-  -- a log that stops without a terminal frame belongs equally to a run still going and
-  to a process that was killed. It is asked of the run set the server keeps with the
-  session (`harness.edge.sessions`' `running?`, ADR 0002's authority) rather than of
-  disk, and read per request because the answer moves.
+  `:running` IS A STORE FACT NOW, and the rule it rode in on is the owner's own
+  sentence, completed: everything the left panel shows comes from the store -- full
+  stop. `sessions.run_state` is the LAST KNOWN run state, written by the same two
+  verbs that move the in-process registry (`harness.edge.sessions/run-started!` /
+  `run-finished!`), so inside this process the column and the registry move
+  together; across a restart the column is what SURVIVES, and the registry is gone.
+  The startup cleanup (`harness.cap.project/clear-startup-run-state!`) turns a
+  `running` the previous process died holding back into `idle`, so the honest
+  reading of a fresh process's listing is exactly what happened here -- nothing is
+  running in it yet. Within one process the two sources stay consistent because
+  they are written at the same two moments; there is deliberately no third thing
+  that ORs a live registry against a stale column (see ticket 01 of
+  `.scratch/sidebar-ws-and-run-state` for why a column that only ever says 'last
+  known' beats two answers that can disagree).
 
   A TASK AND A PROJECT'S SESSION ARE THE SAME ROW, which is why there is no
   `task-row` any more: the two differed only in where their disk facts were asked
@@ -2892,10 +2971,10 @@
   nil `:lastSentAt` is a conversation nothing has been sent to -- registered and never
   used, or a log deleted by hand. The client draws that in words rather than
   inventing a time."
-  [{:keys [id archived? title last-sent-at]}]
+  [{:keys [id archived? title last-sent-at run-state]}]
   {:threadId     id
    :archived     (boolean archived?)
-   :running      (running? id)
+   :running      (= "running" run-state)
    :lastSentAt   last-sent-at
    ;; THE NAME, from the store, nil for a session that has not been named yet (it
    ;; never ran, or it ran before the column existed and has not run since).
@@ -3766,6 +3845,10 @@
           health   (record-health stem)]
       (log! stem nil "session/rebuilt" {:messages (count messages) :via "http"
                                         :source "memory"})
+      ;; NO RING NEEDED HERE: a rebuild changes no fact the listing carries (its row
+      ;; exists already or the id is unknown; a run's start/end rings from the
+      ;; run-state writes themselves). Same for the record-backed rebuild below --
+      ;; a log read back is not a listing fact.
       (api-response 200 (cond-> {:threadId stem
                                  :messages messages
                                  :context  (or (sessions/context stem) [])
@@ -4413,6 +4496,11 @@
   with, plus the type tag that tells this category from a window frame."
   [] (assoc (projects-body) :type "projects"))
 
+(defn host-frame-for-test
+  "The frame a host watcher's push hands its connection, as data -- a test seam, and
+  nothing else reads it (see the host-stream tests and ticket 02's push case)."
+  [] (host-frame))
+
 (defn- host-get
   "GET /api/events.host -- the host-level downlink. A WebSocket that is handed the listing
   at once and then once per host-level change; nothing is sent over it and there is no set
@@ -4421,16 +4509,16 @@
   (let [registered (atom nil)]
     (hk/as-channel req
                    {:on-open  (fn [ch]
-                               (try
-                                 (let [push (fn [] (mux-send! ch (host-frame)))]
-                                   (reset! registered push)
-                                   (host/watch! push)
-                                   ;; THE FIRST LISTING AT ONCE: a page that opens this
-                                   ;; stream must not wait for the next change to draw a
-                                   ;; sidebar.
-                                   (push))
-                                 (catch Throwable t
-                                   (log/error! :host/watch-failed t))))
+                                (try
+                                  (let [push (fn [] (mux-send! ch (host-frame)))]
+                                    (reset! registered push)
+                                    (host/watch! push)
+                                    ;; THE FIRST LISTING AT ONCE: a page that opens this
+                                    ;; stream must not wait for the next change to draw a
+                                    ;; sidebar.
+                                    (push))
+                                  (catch Throwable t
+                                    (log/error! :host/watch-failed t))))
                     :on-close (fn [_ch _status]
                                 (when-some [push @registered]
                                   (host/unwatch! push)))})))
@@ -5085,7 +5173,14 @@
 
   OPTS' `:aggressive?` picks the plan: the ordinary budget-keeping one, or
   `compaction/overflow-plan` -- the one used after the vendor has ALREADY refused the request
-  for its length, which ignores the budget and keeps only the newest indivisible unit."
+  for its length, which ignores the budget and keeps only the newest indivisible unit.
+
+  IT ANSWERS WHAT IT DID, AND A CALLER THAT HAS A RUN SAYS IT OUT LOUD. The map is
+  `harness.edge.compaction/perform!`'s own, so `:compactionId` names the pair of rows just written
+  and `:tokens` is the size of the range they replace. Nothing HERE builds a frame, because the
+  manual route has no run to speak into; the callers that do build one pass this map to
+  `harness.edge.ag_ui/compacted-frame` -- including the trigger at a run's head, whose answer
+  `run-agent!` holds until the run's first frames go out."
   [stem provider records window ratios opts]
   (let [written   (atom [])
         put       (fn [kind payload]
@@ -5093,7 +5188,11 @@
                     (log! stem nil kind payload))
         summarize (fn [messages]
                     (let [specs []
-                          p     (assoc provider :tools specs)]
+                          ;; AND THIS SUMMARY IS A MODEL CALL TOO, so it carries the same
+                          ;; idle guard the run path carries -- read off the session whose
+                          ;; conversation is being summarized.
+                          p     (assoc provider :tools specs
+                                       :idle-timeout-ms (llm-timeout/idle-timeout-ms stem))]
                       (put "model/start" (dissoc (ev/model-start p specs) :type))
                       (try
                         (let [{:keys [message telemetry]}
@@ -5187,8 +5286,14 @@
 
   THE VIEW IS MEASURED BEFORE AND AFTER, over the CONVERSATION alone -- not over what was
   actually sent, whose derived injections would make any view look shorter. A pass that removed
-  nothing answers nil rather than retrying the same overflowing request."
-  [stem provider history _t]
+  nothing answers nil rather than retrying the same overflowing request.
+
+  WHAT IT FOLDED AWAY IS SAID OUT LOUD (`emit`): the vendor refused this request for its length,
+  so the run has just taken the front of the conversation off the model's view, and that is
+  precisely the moment a person watching needs to be told about. A PASS THAT ONLY PRUNED EMITS
+  NOTHING -- pruning is a different fact with its own name (`context/pruned`), and a `compacted`
+  card over it would be a card about work that did not happen."
+  [stem provider history _t emit]
   (try
     (locking compaction-lock
       (when-some [f (replay/find-log (home/projects-dir) stem)]
@@ -5199,9 +5304,16 @@
               records (or (:records pruned) records)
               ratios  (compaction/config stem)
               ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress.
-              _       (try (run-compaction! stem provider records (:context-window provider) ratios
-                                            {:aggressive? true})
-                           (catch Throwable _ nil))
+              ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress,
+              ;;    and its success is SAID OUT LOUD before the retry goes out: the run has just
+              ;;    folded the front of this conversation away, and that card belongs on screen
+              ;;    whether or not the shorter view survives the check below.
+              _       (when-some [compacted (try
+                                            (run-compaction! stem provider records
+                                                             (:context-window provider) ratios
+                                                             {:aggressive? true})
+                                            (catch Throwable _ nil))]
+                        (emit (ag/compacted-frame compacted)))
               system  (vec (take-while #(= "system" (:role %)) history))
               after   (sessions/messages stem)]
           (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
@@ -5229,8 +5341,14 @@
   because what comes back is the CONVERSATION and not this run's decorations.
 
   IT NEVER THROWS AND NEVER SHORTENS NOTHING: a failure answers nil, and so does a view the
-  estimator says is not shorter. The run then carries on with the array it had."
-  [stem provider history]
+  estimator says is not shorter. The run then carries on with the array it had.
+
+  ITS SUCCESS IS SAID OUT LOUD (`emit`), AND NOT CONDITIONALLY ON THE VIEW IT ANSWERS: the rows are
+  written and the session's own model view has already moved, so the conversation IS compacted even
+  when the shorter array is one this call declines to take (the loop refuses a view that would
+  leave a tool call unanswered). A card withheld in that case would be the harness hiding
+  something it had already done."
+  [stem provider history emit]
   (try
     (let [ratios (compaction/config stem)
           window (:context-window provider)
@@ -5241,7 +5359,12 @@
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
                   before  (pressure/estimate-messages history)]
-              (when (run-compaction! stem provider records window ratios nil)
+              (when-some [compacted (run-compaction! stem provider records window ratios nil)]
+                ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
+                ;; The rows are written and the session's own model view has already moved, so the
+                ;; conversation IS compacted; the comparison below only decides whether THIS call
+                ;; takes the shorter array.
+                (emit (ag/compacted-frame compacted))
                 (let [system (vec (take-while #(= "system" (:role %)) history))
                       view   (into system (ag/provider-messages (sessions/messages stem)))]
                   (when (< (pressure/estimate-messages view) before)
@@ -5259,7 +5382,13 @@
 
   PRUNING GOES FIRST AND MAY BE ENOUGH (ticket 06): the oversized TOOL RESULTS are elided for
   free, the pressure is MEASURED AGAIN over the pruned surface, and a view that came back under
-  the threshold skips the summary entirely -- one model call that does not happen."
+  the threshold skips the summary entirely -- one model call that does not happen.
+
+  IT ANSWERS WHAT IT COMPACTED, or nil, where it used to answer nothing at all: this compaction
+  happens BEFORE the run has emitted anything, so its card cannot go out from here -- a frame
+  before RUN_STARTED has no run to hang on -- and `run-agent!` holds this answer until the run's
+  first frames (see the `:run/start` branch there). Failing soft still answers nil, which draws no
+  card."
   [stem]
   (try
     (locking compaction-lock
@@ -5287,8 +5416,8 @@
                 (when-some [provider (providers/current-provider stem)]
                   (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))))
     (catch Throwable t
-      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})))
-  nil)
+      (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
+      nil)))
 
 (defn- compact-post
   "POST /api/threads/<stem>/compact -- one compaction, run by hand (ticket 03).
@@ -5678,9 +5807,15 @@
     (sessions/watch-unflushed! record/pending?)
     ;; AND THE SWEEPER, because the table holds conversations now: without it, every
     ;; session this process has ever been asked about would be held until it exits.
+    ;; AND THE SWEEPER, because the table holds conversations now: without it, every
+    ;; session this process has ever been asked about would be held until it exits.
     (sessions/start!)
+    ;; AND THE RUN STATE'S STARTUP CLEANUP, once, after the sweeper and before the
+    ;; socket opens: no run of any session is alive in a process that has not started
+    ;; one yet, so every `running` the column carries was left by a process that is
+    ;; gone. The kernel's registry starts empty; the store now agrees with it.
+    (sessions/clear-startup-run-state!)
     ;; THE SESSION'S OUTSIDE FACTS ARE INSTALLED HERE, not at some namespace's load: what a
-    ;; record is and what a provider may be handed are the adapter's (`harness.edge.sessions`),
     ;; and the meter's band is a consumer's fold and step (`harness.edge.pressure`). A process
     ;; that never starts a server registers neither.
     (sessions/install!)

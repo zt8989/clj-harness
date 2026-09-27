@@ -109,6 +109,45 @@
   spelling on this side would be a card that draws nowhere."
   "injected-context")
 
+(def timeout-part-name
+  "The name of the `data` part A MODEL CALL THAT WENT QUIET is carried by, on both ends:
+  the CUSTOM frame a run emits the moment the idle guard cuts a call off, and the card the
+  UI draws for it (`ui/src/lib/llm-timeout.ts`). `harness.kernel.frames/apply-frames`
+  drops it on the floor for the same reason it drops every CUSTOM name it does not know,
+  which is exactly the behaviour this frame wants.
+
+  THE WIRE ONLY, AND THAT IS THE FEATURE: `harness.edge.http/wire-only-frame?` is what
+  keeps this name out of the record. It is spelled once, there, because there are two
+  frame sinks -- the agent route and a subagent's -- and a second spelling would be a
+  second rule. The name is deliberately NOT in `harness.edge.replay/wire-custom-names`
+  either: that list is the CUSTOM names A ROW MAY CARRY, and nothing about this frame ever
+  becomes a row."
+  "llm-timeout")
+
+(def compacted-part-name
+  "The name of the `data` part A COMPACTION is carried by, on both ends: the CUSTOM frame a run
+  emits the moment the harness folds part of the conversation into one summary, and the card the
+  UI draws for it (`ui/src/lib/compactions.ts`). It is in `harness.edge.replay/wire-custom-names`
+  -- a compression IS part of what a person reads back -- and `harness.kernel.frames/apply-frames`
+  folds it into the same card-only message an injection becomes.
+
+  THE MODEL NEVER SEES IT, and that is not an oversight of `apply-frames`: the card is a `data`
+  part, and `harness.edge.replay/model-message` REALISES only an `injected-context` card (that one
+  is a message the model was handed). A compaction's summary reaches the model the ONE way it ever
+  did -- through the projection of the `context/compacted` fact, which stands where the folded
+  range stood. A second copy of it as a card would be the harness paying for its own screen.
+
+  WHAT IT VIEWS IS A FACT ABOUT THE SURFACE RATHER THAN A MESSAGE: the summary the model reads in
+  the folded range's place, how big that range was estimated at, and how many nodes went into it.
+  The three come off the `context/compacted` row (`harness.edge.compaction/perform!`), which is
+  also where the `:messageId` comes from -- the compaction's own id, so the same card comes back
+  under the same name after every rebuild.
+
+  IT IS THE SECOND NAME HERE THAT IS A CARD AND NOT A MESSAGE OF ITS OWN (`injected-context` is
+  the first), and the difference the UI cares about is which ARITHMETIC reads it: the injection
+  card measures bytes of what the model was handed, this one measures tokens of what was taken
+  away. Both are drawn with the same shell."
+"compacted-context")
 (defn- injection-value
   "One injected message -> the value both readers of `injected-part-name` take: what the
   card says (the role it arrived with and its text). Built here rather than at each
@@ -165,6 +204,35 @@
   [message-id message]
   {:type "CUSTOM" :name injected-part-name :messageId message-id
    :value (injection-value message)})
+
+(defn compacted-frame
+  "The CUSTOM frame for ONE compaction the harness ran on THIS run's conversation: the head of
+  that conversation was folded into one summary, and it is the MODEL's view -- not the
+  conversation -- that changed.
+
+  THE CONTRAST WITH `injected-frame` ABOVE IS THE WHOLE OF IT. An injection is a message the MODEL
+  was handed and the client never sent; a compaction is nothing the model was handed at all -- the
+  record changed under it, and the summary that stands where the folded range stood reaches the
+  model through the projection of the `context/compacted` fact
+  (`harness.edge.replay/model-nodes`), never through this frame. What this frame says is what the
+  screen was missing: this conversation is not what it was a moment ago.
+
+  ONE PLACE BUILDS THIS SHAPE, because three do emit it -- the edge's run-start trigger, a run's
+  mid-run pressure relief, and the recovery after a vendor refused the request for its length (see
+  `harness.edge.http`). All three hand in what `harness.edge.compaction/perform!` answered, and
+  the `:messageId` is that compaction's OWN id: unique without a counter, deterministic without a
+  clock, so the record folds one card per compaction and a rebuild hands back the same one.
+
+  WHAT IT VIEWS IS NOT A MESSAGE, so it keeps three fields of its own rather than the
+  `{role, text}` an injection card carries: the summary, what the folded range was estimated at,
+  and how many nodes went into it. The UI's arithmetic reads exactly these keys
+  (`ui/src/lib/compactions.ts`)."
+  [compaction]
+  {:type "CUSTOM" :name compacted-part-name
+   :messageId (:compactionId compaction)
+   :value {:summary  (:summary compaction)
+           :tokens   (:tokens compaction)
+           :messages (count (:shadowed compaction))}})
 
 (defn- step [s ev]
   (case (:type ev)
@@ -246,6 +314,27 @@
     (-> s (update :n inc)
           (update :frames conj (injected-frame (str (:run-id s) "-ctx" (:n s))
                                                {:role (:role ev) :content (:text ev)})))
+
+    :model/timeout
+    ;; A CUSTOM FRAME THE OTHER WAY ROUND: the injection card above is about what the MODEL
+    ;; was handed, and this is about the CALL -- a vendor that stopped answering, and what
+    ;; the harness is doing about it. Same extension point, same rules, one difference that
+    ;; is the feature: THIS FRAME IS NEVER RECORDED (`harness.edge.http/wire-only-frame?`).
+    ;; The record is what a reload rebuilds a conversation from, and a stall is not part of
+    ;; the conversation -- it is a fact about a call that was in flight, which a person
+    ;; watching wants and a reader of the log has no use for.
+    ;;
+    ;; NO `messageId`, AND ONE WOULD BE THROWN AWAY ANYWAY: the adapter hangs a CUSTOM frame
+    ;; on the message being streamed and drops the frame's own id on the way in (see
+    ;; `injected-frame` above, where the same measurement is written down) -- so an id here
+    ;; would be a field that lies about being used.
+    (update s :frames conj {:type  "CUSTOM"
+                            :name  timeout-part-name
+                            :value {:idleMs   (:idle-ms ev)
+                                    :attempt  (:attempt ev)
+                                    :limit    (:limit ev)
+                                    :retrying (:retrying ev)
+                                    :emitted  (:emitted ev)}})
 
     ;; A `:run/cut-off-result` IS THE SAME FRAME (`harness.kernel.event`), because the
     ;; RECORD does not distinguish an answer that arrived from one written at a stop -- it

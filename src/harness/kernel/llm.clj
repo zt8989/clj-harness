@@ -449,6 +449,119 @@
        (and (contains? #{400 413 422} status)
             (some #(str/includes? message %) overflow-refusals))))))
 
+;; ------------------------------------------------------------- the idle guard
+
+(def default-idle-timeout-ms
+  "How long a model call may go WITHOUT A SINGLE LINE of the vendor's stream before this
+  layer treats the connection as DEAD, in milliseconds: 500.
+
+  A KNOB, AND DELIBERATELY TIGHT. Half a second of silence is the shape a vendor's
+  stream takes when it is not coming back, and the whole point of the guard is to stop
+  waiting for it rather than to be generous. `.scratch/llm-idle-timeout/spec.md` is the
+  decision; a session that finds it too tight raises it in harness.edn --
+  `:llm :idle-timeout-ms`, read by `harness.edge.llm-timeout`, which is also the reader
+  of the retry budget that goes with it -- and `0` turns the guard off entirely.
+
+  THE NUMBER IS WRITTEN ONCE, HERE, and the edge's config reader takes its default from
+  this var: two spellings would be two chances for 'the default' to mean two things.
+
+  A PROVIDER MAP THAT CARRIES NO `:idle-timeout-ms` IS NOT GUARDED AT ALL, and that is
+  the honest reading of a missing key: nobody said, which is not the same as zero. The
+  edge always hands one down (`harness.edge.http/run-agent!`), so production is always
+  guarded; an offline run or a test's stub that says nothing waits as long as it likes."
+  500)
+
+(defn idle-timeout?
+  "Is T the idle guard's own failure -- a call that produced no data for its IDLE-MS and
+  was therefore cut off? The key, not the sentence: the RETRY decision is made on this
+  predicate (`harness.kernel.loop`), and a caller that pattern-matched the prose would be
+  one wording change away from retrying something else."
+  [t]
+  (boolean (and (instance? Throwable t) (:llm/idle-timeout (ex-data t)))))
+
+(defn- idle-deadline-error
+  "The failure of a model call that went IDLE-MS without a line."
+  [idle-ms]
+  (ex-info (str "the model produced no data for " idle-ms " ms, so the call was cut off")
+           {:llm/idle-timeout true :idle-ms idle-ms}))
+
+(defn- idle-guarded-lines
+  "READER's lines -- the vendor's SSE body -- with IDLE-MS allowed between two of them
+  and no longer. Answers `{:lines <a lazy seq> :stop! <a fn>}`; the caller MUST call
+  `:stop!`, or the watchdog below outlives the read.
+
+  WHAT 'DEAD' LOOKS LIKE, and why it takes a thread. `readLine` blocks in the socket and
+  cannot be interrupted from the outside: closing the READER would block on the very
+  monitor the blocked read is holding (`BufferedReader` synchronizes its whole read path),
+  so the thing closed here is the BODY -- the HttpResponse's own InputStream -- whose
+  `close` cancels the exchange and offers an end-of-stream marker instead. That is what
+  makes this an actual DISCONNECT rather than an abandoned wait: the vendor is told, the
+  socket goes, and the blocked `readLine` comes back as an `IOException` (the JDK's
+  `HttpResponseInputStream` answers `closed` that way rather than with -1).
+
+  SO AN IOException IS NOT ALWAYS A FAILURE: when the watchdog was the one that closed
+  the body, it is this call's own deadline and it is re-thrown as
+  `idle-deadline-error`. Any other `IOException` is the vendor's and is rethrown as it
+  stands.
+
+  THE DEADLINE MOVES WITH EVERY LINE and is polled rather than armed once: a stream that
+  is being delivered at IDLE-MS/2 per line runs for as long as it likes, which is the
+  point -- what is being watched is SILENCE, not duration. The poll interval is small
+  enough that the deadline is met to within a few tens of milliseconds."
+  [^java.io.InputStream body ^java.io.BufferedReader reader idle-ms]
+  ;; A NIL OR ZERO THRESHOLD IS 'NO GUARD', and then the lines are the reader's own: no
+  ;; thread, no atom, exactly what this layer did before the guard existed.
+  (if (and idle-ms (pos? (long idle-ms)))
+    (let [idle-ms    (long idle-ms)
+          step-ms    (long (max 1 (min 25 (quot idle-ms 4))))
+          last-at    (atom (System/currentTimeMillis))
+          timed-out? (atom false)
+          done?      (atom false)
+          watchdog   (doto (Thread.
+                            (fn []
+                              (try
+                                (loop []
+                                  (when-not (or @done? @timed-out?)
+                                    (Thread/sleep step-ms)
+                                    (if (and (not @done?)
+                                             (> (- (System/currentTimeMillis)
+                                                   (long @last-at))
+                                                idle-ms))
+                                      (do (reset! timed-out? true)
+                                          ;; THE DISCONNECT. Best-effort: the failure to
+                                          ;; close is not the failure we are reporting, and
+                                          ;; this thread must not die holding it.
+                                          (try (.close body) (catch Throwable _ nil)))
+                                      (recur))))
+                                (catch InterruptedException _ nil)
+                                (catch Throwable _ nil))))
+                            (.setDaemon true)
+                            (.setName "llm-idle-watchdog")
+                            (.start))
+          lines      (letfn [(more []
+                               (lazy-seq
+                                (let [line (try (.readLine reader)
+                                                (catch java.io.IOException e
+                                                  (if @timed-out?
+                                                    (throw (idle-deadline-error idle-ms))
+                                                    (throw e))))]
+                                  (cond
+                                    (some? line)
+                                    (do (reset! last-at (System/currentTimeMillis))
+                                        (cons line (more)))
+
+                                    @timed-out?
+                                    (throw (idle-deadline-error idle-ms))
+
+                                    :else
+                                    (do (reset! done? true) nil)))))]
+                       (more))]
+      {:lines lines
+       :stop! (fn []
+                (reset! done? true)
+                (.interrupt watchdog) nil)})
+    {:lines (line-seq reader) :stop! (fn [] nil)}))
+
 (defmethod stream! :openai-completions
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
@@ -469,19 +582,30 @@
                             :status (.statusCode resp) :body refusal})
         (throw (ex-info (str "HTTP " (.statusCode resp) ": " refusal)
                         {:status (.statusCode resp)}))))
-    ;; line-seq is lazy: it MUST be forced inside with-open, or the body leaks and
-    ;; the caller deadlocks waiting on a stream nobody is draining.
-    (with-open [r (io/reader (.body resp) :encoding "UTF-8")]
-      (let [raw (StringBuilder.)
-            out (consume-sse (tee-lines raw (line-seq r)) on-event)]
-        ;; THE RESPONSE IS LOGGED AS THE VENDOR SENT IT *AND* AS WHAT IT MEANT, and it
-        ;; takes both to be able to check either. `:body` is the raw frame text, the way
-        ;; the request line's `:body` is the raw request -- the same argument on the
-        ;; other side of the wire. `:message` and `:telemetry` stay because they are what
-        ;; a reader usually wants and what a fold is FOR; the raw text is the evidence
-        ;; behind them rather than a replacement for them. WITHOUT IT there was no way to
-        ;; tell 'the vendor never mentioned cached tokens' from 'our fold dropped them'.
-        (llm-debug/record! {:at :response :thread-id thread-id :model model
-                            :body (str raw)
-                            :message (:message out) :telemetry (:telemetry out)})
-        out))))
+    ;; line-seq is lazy: it MUST be forced inside the reader's lifetime, or the body
+    ;; leaks and the caller deadlocks waiting on a stream nobody is draining. The
+    ;; IDLE GUARD rides inside that lifetime (`idle-guarded-lines`), which is the only
+    ;; place it can: the deadline is on the lines, and the body it closes is this one.
+    (let [body  (.body resp)
+          r     (io/reader body :encoding "UTF-8")
+          guard (idle-guarded-lines body r (:idle-timeout-ms provider))]
+      (try
+        (let [raw (StringBuilder.)
+              out (consume-sse (tee-lines raw (:lines guard)) on-event)]
+          ;; THE RESPONSE IS LOGGED AS THE VENDOR SENT IT *AND* AS WHAT IT MEANT, and it
+          ;; takes both to be able to check either. `:body` is the raw frame text, the way
+          ;; the request line's `:body` is the raw request -- the same argument on the
+          ;; other side of the wire. `:message` and `:telemetry` stay because they are what
+          ;; a reader usually wants and what a fold is FOR; the raw text is the evidence
+          ;; behind them rather than a replacement for them. WITHOUT IT there was no way to
+          ;; tell 'the vendor never mentioned cached tokens' from 'our fold dropped them'.
+          (llm-debug/record! {:at :response :thread-id thread-id :model model
+                              :body (str raw)
+                              :message (:message out) :telemetry (:telemetry out)})
+          out)
+        (finally
+          ;; THE WATCHDOG FIRST, THEN THE READER: a watchdog still polling after this
+          ;; call is over would close a body nobody is reading, and a `finally` that
+          ;; threw would swallow the real failure on the way out.
+          ((:stop! guard))
+          (.close r))))))

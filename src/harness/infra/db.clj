@@ -649,6 +649,46 @@
       (execute! c "UPDATE sessions SET last_sent_at = ? WHERE id = ?"
                 (.lastModified ^java.io.File f) id))))
 
+(defn- sessions-remember-their-run-state
+  "Version n -> n+1: `sessions.run_state`, the LAST KNOWN run state of the
+  conversation: `running` while a run of it is in flight in some process, `idle`
+  from the moment the run reaches its terminal frame -- written by the same two
+  verbs that move the in-process registry (`harness.kernel.session/run-started!`
+  and `run-finished!`, through the edge adapter).
+
+  WHY THE STORE, AT ALL, when the registry already answers the question inside one
+  process: the sidebar is a CLIENT view, and after a restart the registry is gone
+  -- a listing read off `running?` alone would draw a conversation that was
+  mid-flight when the process died as idle, which happens to be right, and draw
+  NOTHING about one that was mid-flight in a process that is STILL going, which
+  is not. The column makes 'was a run going' a fact the store carries across
+  restarts, so the process that comes back KNOWS what it is picking up.
+
+  THE SEMANTICS ARE 'LAST KNOWN', NOT 'NOW', and the migration is where that is
+  settled: THE COLUMN ARRIVES EMPTY -- every existing row is NULL, read as idle,
+  never as running. A backfill would be a lie: a store that predates the column
+  says nothing about any run, and guessing 'a log without a terminal frame means
+  running' would revive every process that ever died mid-flight as a live run
+  (which is precisely the guess `harness.edge.http/running?` exists to refuse).
+  A process that STARTS takes the same honesty one step further -- it clears every
+  `running` it finds, because no run of any session is alive in a process that has
+  not started any yet: see `harness.cap.project/clear-startup-run-state!`.
+
+  THE NAME IS `run_state` AND NOT `running`, and that is deliberate: a bare
+  boolean says 'is it running NOW', which is the registry's question, while the
+  column answers 'what was the last thing the store was told' -- a state with a
+  vocabulary (`running`, `idle`), extended by adding words, not by reinterpreting
+  a flag. It is also why the values are strings and not 0/1: a third state
+  (`interrupted`, say) is a new word, not a second bit.
+
+  THIS IS STATE AND NOT A RECORD, and it rides the same argument as
+  `last_sent_at`: it is REWRITTEN in place on every transition, never appended,
+  and no history of it is kept -- the run's own record lives in the jsonl, whose
+  `run/start` and terminal lines are the authoritative story. The column is what
+  the SIDEBAR shows, not what the trajectory replays."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN run_state TEXT"))
+
 (defn- sessions-know-their-subagent
   "Version 2 -> 3: `sessions.parent_id` and `sessions.subagent`.
 
@@ -1000,9 +1040,18 @@
     :run      sessions-remember-their-last-send}
    ;; APPENDED, like every step after the first: a store written before this table
    ;; existed has no record of it, and the probe is what says whether it needs it.
+   ;; APPENDED, like every step after the first: a store written before this table
+   ;; existed has no record of it, and the probe is what says whether it needs it.
    {:name     "session-claims"
     :present? #(table? % "session_claims")
     :run      session-claims}
+   ;; THE RUN STATE, last of all and for no ordering reason (every probe is its own;
+   ;; the comment on the chain above says why the order is free). It is the column
+   ;; the sidebar's `running` reads, and the semantics are in the step's own
+   ;; docstring: LAST KNOWN, arriving empty, cleared per process at startup.
+   {:name     "sessions-remember-their-run-state"
+    :present? #(column? % "sessions" "run_state")
+    :run      sessions-remember-their-run-state}
    ;; APPENDED, like every step after the first. THE TWO CONTENT TABLES AND THEIR OFFSET ARE THE ONE
    ;; PLACE THIS STORE HOLDS WHAT A LOG HOLDS, by the owner's call (2026-09-25, ADR 0008) -- see the
    ;; step's own docstring for what that costs and what it does not touch.

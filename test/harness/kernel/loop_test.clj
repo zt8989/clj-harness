@@ -5,6 +5,7 @@
             [harness.fake :as fake]
             [harness.cap.jobs :as jobs]
             [harness.kernel.llm :as llm]
+            [harness.kernel.event :as ev]
             [harness.kernel.loop :as loop]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
@@ -554,3 +555,158 @@
         "the run carried on with its own array, tool result and all")
     (is (some #(= "tool" (:role %)) history)
         "and the call the broken view would have cut off was answered")))
+
+;; ------------------------------------------------------------- the idle guard
+;;
+;; THE LOOP'S HALF OF `.scratch/llm-idle-timeout`: a model call that goes QUIET is given up
+;; on, and -- when it had said nothing at all -- tried again. The provider layer's own
+;; disconnection is asserted in `harness.kernel.llm-test` against a real socket; what is
+;; pinned HERE is the decision: which timeouts are retried, how many times, what the wire
+;; is told, and that the abandoned attempt writes no frames of its own.
+
+(defn- timeout! [] (ex-info "the model produced no data for 500 ms, so the call was cut off"
+                            {:llm/idle-timeout true :idle-ms 500}))
+
+(defn- timeouts [seen] (filter #(= :model/timeout (:type %)) seen))
+
+(defn- ends [seen] (filter #(= :model/end (:type %)) seen))
+
+(deftest an-idle-timeout-with-nothing-emitted-is-retried
+  ;; THE ORDINARY RECOVERY, and the shape of the record it leaves: a start and an end per
+  ;; ATTEMPT. The first attempt's end came from the CALL itself (the provider layer threw,
+  ;; so `model-call!` closed its own segment); the second's is the successful one. Nothing
+  ;; is left unbalanced -- a reader pairing the nth start with the nth end reads two calls,
+  ;; which is what happened.
+  (let [calls (atom 0)]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (if (= 1 (swap! calls inc))
+                                  (throw (timeout!))
+                                  {:message {:role "assistant" :content "hello"}
+                                   :telemetry {}}))]
+      (let [{:keys [history seen]} (drive {} [] {:thread-id "t-idle-retry"
+                                                 :idle-timeout-ms 500
+                                                 :idle-timeout-retries 3})]
+        (is (= "hello" (:content (last history))) "the retry's answer is the run's answer")
+        (is (= 2 @calls))
+        (testing "the call's own segments are closed, in order, one pair per attempt"
+          (is (= [:run/start :model/start :model/end :model/timeout
+                  :model/start :model/end :run/end]
+                 (mapv :type seen))))
+        (testing "and the frame says what a person needs: which try it was, and that another follows"
+          (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
+                   :retrying true :emitted false}]
+                 (vec (timeouts seen)))))))))
+
+(deftest an-idle-timeout-spends-the-budget-and-then-ends-the-run
+  ;; THREE RETRIES IS FOUR ATTEMPTS, and the fourth one's failure is the run's: the frame
+  ;; announces it with `:retrying false` and the terminal frame follows, so the client is
+  ;; never left waiting for a fifth call nobody is going to make.
+  (let [calls (atom 0)]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (swap! calls inc)
+                                (throw (timeout!)))]
+      (let [{:keys [seen]} (drive {} [] {:thread-id "t-idle-give-up"
+                                         :idle-timeout-ms 500
+                                         :idle-timeout-retries 3})
+            ts (vec (timeouts seen))]
+        (is (= 4 @calls) "the first attempt, then the three retries")
+        (is (= [1 2 3 4] (mapv :attempt ts)))
+        (is (= [true true true false] (mapv :retrying ts)))
+        (is (= [3 3 3 3] (mapv :limit ts)))
+        (is (= 4 (count (ends seen))) "every attempt's segment is closed")
+        (testing "the run ends on the same failure, named"
+          (is (= :run/error (:type (last seen))))
+          (is (str/includes? (:message (last seen)) "500 ms"))
+          (is (str/includes? (:message (last seen)) "4 attempts")))))))
+
+(deftest a-timeout-after-the-answer-had-begun-is-not-retried
+  ;; THE HALF-WRITTEN ANSWER DECIDES IT. The client has been shown part of a message, and a
+  ;; second attempt would append to it -- two answers where the model gave one. So the run
+  ;; ends, and the frame says WHICH of the two endings this was rather than leaving a person
+  ;; to wonder why the retries did not happen.
+  (let [calls (atom 0)]
+    (with-redefs [llm/stream! (fn [_provider _messages emit _thread-id]
+                                (swap! calls inc)
+                                (emit (ev/text-delta "half"))
+                                (throw (timeout!)))]
+      (let [{:keys [seen]} (drive {} [] {:thread-id "t-idle-partial"
+                                         :idle-timeout-ms 500
+                                         :idle-timeout-retries 3})]
+        (is (= 1 @calls) "no second attempt")
+        (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
+                 :retrying false :emitted true}]
+               (vec (timeouts seen))))
+        (is (= :run/error (:type (last seen))))
+        (is (str/includes? (:message (last seen)) "half-written"))
+        (is (= 1 (count (ends seen))))))))
+
+(deftest a-call-that-says-nothing-at-all-is-cut-off-by-the-deadline
+  ;; THE OTHER HALF OF THE GUARD, and the one no provider layer can do: the call never
+  ;; throws and never reports -- it simply says nothing (a scripted provider mid-step).
+  ;; The deadline wins the wait, the attempt is ABANDONED, and what it says later is
+  ;; dropped rather than written into a run that has moved on.
+  (let [calls (atom 0)
+        released (promise)]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (if (= 1 (swap! calls inc))
+                                  (do @released
+                                      ;; A LATE ANSWER, and it is a perfectly good one: the
+                                      ;; point is that nobody is listening for it any more.
+                                      {:message {:role "assistant" :content "too late"}
+                                       :telemetry {}})
+                                  {:message {:role "assistant" :content "second"}
+                                   :telemetry {}}))]
+      (let [{:keys [history seen]} (drive {} [] {:thread-id "t-idle-silent"
+                                                 ;; THE PRODUCTION DEADLINE, so the test is
+                                                 ;; not racing a thread pool with a number
+                                                 ;; nobody ships.
+                                                 :idle-timeout-ms 500
+                                                 :idle-timeout-retries 3})]
+        (is (= "second" (:content (last history))))
+        (is (= 1 (count (timeouts seen))) "the deadline fired for a call that never threw")
+        (is (= 2 @calls))
+        ;; THE ABANDONED ATTEMPT'S OWN END, written by the loop because that call's thread
+        ;; is still running: one per attempt, in order, pairing with its start.
+        (is (= 2 (count (ends seen))))
+        (deliver released nil) ;; let the abandoned call finish, so the test leaves nothing behind
+        (is (= 2 @calls) "and its late frames changed nothing")))))
+
+(deftest a-run-handed-no-knobs-is-not-guarded
+  ;; 'NOBODY SAID' IS NOT 'ZERO MILLISECONDS': a run handed no idle knobs has no retry
+  ;; budget, and the provider's own failure is what ends it. The frame is still emitted --
+  ;; a timeout with no retry is exactly what a person needs told -- and it carries the
+  ;; deadline it was given, which is none.
+  (let [calls (atom 0)]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (swap! calls inc)
+                                (throw (timeout!)))]
+      (let [{:keys [seen]} (drive {} [] {:thread-id "t-idle-off"})]
+        (is (= 1 @calls))
+        (is (= [false] (mapv :retrying (timeouts seen))))
+        (is (= :run/error (:type (last seen))))
+        (is (str/includes? (:message (last seen)) "0 retries"))))))
+
+(deftest the-deadline-does-not-count-what-happens-before-the-call
+  ;; ARMING, and it is the difference between watching a vendor and watching the harness.
+  ;; `model-call!` resolves the session's TOOL TABLE before it emits `:model/start`, and
+  ;; resolving that table is what STARTS THE SESSION'S MCP SERVERS: a server whose command
+  ;; does not exist takes as long as the OS needs to say so, which is over half a second
+  ;; and has nothing to do with the vendor. Measured on the real thing -- a run whose broken
+  ;; MCP server took ~600 ms to fail ended on 'the model produced no data for 500 ms'
+  ;; before a single byte was sent (`mcp-wired-test/a-server-that-will-not-start-...`).
+  ;;
+  ;; SO THE CLOCK IS ARMED BY THE CALL AND NOT BY THE ATTEMPT: here the setup takes three
+  ;; times the deadline and the call answers immediately -- one attempt, no timeout frame.
+  (let [calls (atom 0)]
+    (with-redefs [tools/specs (fn [_thread-id] (Thread/sleep 300) [])
+                  llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (swap! calls inc)
+                                {:message {:role "assistant" :content "answered"}
+                                 :telemetry {}})]
+      (let [{:keys [history seen]} (drive {} [] {:thread-id "t-idle-setup"
+                                                 :idle-timeout-ms 100
+                                                 :idle-timeout-retries 3})]
+        (is (= "answered" (:content (last history))))
+        (is (= 1 @calls) "the setup window cost no attempt")
+        (is (empty? (timeouts seen)))
+        (is (= [:run/start :model/start :model/end :run/end] (mapv :type seen)))))))

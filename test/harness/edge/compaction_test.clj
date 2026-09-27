@@ -13,7 +13,9 @@
       (`start` greater than `end`) -- the case a numeric interval comparison gets wrong."
   (:require [clojure.test :refer [deftest is testing]]
             [harness.edge.replay :as replay]
-            [harness.edge.compaction :as compaction]))
+            [harness.edge.ag-ui :as ag]
+            [harness.edge.compaction :as compaction]
+            [harness.kernel.frames :as frames]))
 
 ;; ------------------------------------------------------------------ the records
 
@@ -158,3 +160,60 @@
     (is (some (fn [e] (some #(= "data" (:type %)) (:content (:message e))))
              (replay/entries (vec records)))
         "the client's view keeps the card -- only the model's view realises it")))
+
+;; ------------------------------------------------- the compaction CARD (a frame)
+
+(defn- compaction-card
+  "A compaction's CARD as the record keeps it: an `event` row whose payload is the CUSTOM frame
+  `harness.edge.ag_ui/compacted-frame` builds (`.scratch/compaction-frames`)."
+  [ts compaction-id summary tokens shadowed]
+  {:ts ts :runId "r1" :type "event"
+   :payload (ag/compacted-frame {:compactionId compaction-id
+                                 :summary      summary
+                                 :tokens       tokens
+                                 :shadowed     shadowed})})
+
+(deftest a-compaction-card-folds-into-a-message-the-model-never-reads
+  ;; THE OTHER HALF OF THE CARD RULES (`the-card-is-still-in-the-conversation-the-client-reads`,
+  ;; and `.scratch/compaction-frames`): the frame folds into ONE card-only assistant message --
+  ;; which is what a rebuild hands the page, and what the UI puts the part back into -- while
+  ;; `model-view` drops it. Both halves matter: a card the model could read would be a summary
+  ;; paid for twice, and a card the client could not read would be a compaction nobody sees.
+  (let [records [(entry 0 "u1" "one")
+                 (compaction-card 1 "c-1" "the summary" 1234 [0 1])
+                 (entry 2 "u2" "two")]
+        entries (replay/entries (vec records))
+        card    (second entries)]
+    (is (= 3 (count entries)) "the client's conversation keeps the card")
+    (is (= "assistant" (:role (:message card))))
+    (is (= [{:type "data" :name ag/compacted-part-name
+             :data {:summary "the summary" :tokens 1234 :messages 2}}]
+           (:content (:message card)))
+        "one `data` part, named for the card, carrying the summary and what it replaced")
+    (is (= [{:id "c-1"
+             :role "assistant"
+             :content [{:type "data" :name ag/compacted-part-name
+                        :data {:summary "the summary" :tokens 1234 :messages 2}}]}]
+           (frames/apply-frames [(:payload (second records))]))
+        "and the fold is what makes that message -- one card per frame, under the frame's id")
+    (is (= ["one" "two"] (mapv :content (model-view records)))
+        "and the model's view is the two entries: the card is never handed to anyone")))
+
+(deftest the-frame-of-a-real-compaction-is-the-whole-answer
+  ;; `perform!` -> the frame, END TO END: the id the rows carry is the id the card is folded
+  ;; under, which is what makes a rebuild hand back the SAME card (`sessions/append!` dedupes
+  ;; by id, first-wins), and what keeps two compactions from sharing one card.
+  (let [records (vec (map big (range 6)))
+        written (atom [])
+        result  (compaction/perform! records {:window 1000 :retain-ratio 0.16
+                                              :append    (fn [k p] (swap! written conj [k p]))
+                                              :summarize (fn [msgs] (str "SUMMARY of " (count msgs)))})
+        fact    (second (second @written))
+        frame   (ag/compacted-frame result)]
+    (is (= (:compactionId fact) (:messageId frame))
+        "the card is folded under the compaction's own id")
+    (is (= (:summary fact) (get-in frame [:value :summary])))
+    (is (= (:tokens fact) (get-in frame [:value :tokens])))
+    (is (= 4 (get-in frame [:value :messages])) "and it says how many nodes went into it")
+    (is (= (:compactionId result) (:compactionId fact))
+        "the answer names the rows it wrote, not a second id")))

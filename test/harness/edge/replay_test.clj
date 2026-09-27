@@ -380,14 +380,17 @@
                                            :value {:model "scripted"}}})])]
       (is (= "model/start" (replay/kind r)) "the fact's name comes back as the reader's :kind")
       (is (= {:model "scripted"} (replay/payload r)))))
-  (testing "the WIRE's own CUSTOM name is a frame, not a fact"
-    ;; `injected-context` is the one CUSTOM name the protocol uses; reading it as a fact would
-    ;; hide a card from the conversation.
-    (let [frame {:type "CUSTOM" :name "injected-context" :messageId "session-opening-0"
-                 :value {:role "text"}}
-          [r]   (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
-      (is (= "event" (replay/kind r)))
-      (is (= frame (replay/payload r)))))
+  (testing "the WIRE's own CUSTOM names are frames, not facts"
+    ;; These are the names the protocol uses for a CARD the conversation is made of; reading one
+    ;; as a fact would hide it from the conversation (and, for the compaction card, would read the
+    ;; frame as a second account of the `context/compacted` fact it sits beside).
+    (doseq [frame [{:type "CUSTOM" :name "injected-context" :messageId "session-opening-0"
+                    :value {:role "text"}}
+                   {:type "CUSTOM" :name "compacted-context" :messageId "c-1"
+                    :value {:summary "S" :tokens 12 :messages 2}}]]
+      (let [[r] (replay/lines->records [(json/write-str {:type "event" :payload frame})])]
+        (is (= "event" (replay/kind r)))
+        (is (= frame (replay/payload r))))))
   (testing "the record's own HEADER is a fact, and a named one"
     ;; TICKET 06 of `.scratch/event-persistence`: the file's first line names the file's format and
     ;; conversation. It is NOT in `wire-custom-names` -- it is not a frame the wire carried and not
@@ -400,12 +403,36 @@
       (is (= "record/header" (replay/kind r)) "the header's own name, as any fact's")
       (is (replay/fact? r) "and it is a fact, not a frame the conversation is made of")
       (is (replay/header? r))
-      (is (= {:format 2 :thread "t-1" :created 7} (replay/header-of r))))))
+      (is (= {:format 2 :thread "t-1" :created 7} (replay/header-of r)))))
+  (testing "and every other row is refused, naming the line and the reason"
+    (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
+                            :old-contract]
+                           ["{\"type\":\"input\",\"payload\":{}}" :unknown-type]
+                           ["{\"type\":\"event\"}" :missing-payload]
+                           ["[1,2,3]" :not-an-object]
+                           ["{\"type\":" :not-json]]]
+      ;; `doall` FORCES THE LAZY PARSE: `lines->records` reads nothing until something is
+      ;; asked for it (ticket 06), and the refusal happens DURING the parse.
+      (let [e (try (doall (replay/lines->records ["{\"type\":\"message\",\"payload\":{}}" line]))
+                   nil
+                   (catch Exception e e))]
+        (is (some? e) (str line " must be refused, not folded"))
+        (is (= 2 (:line (ex-data e))) "the line that is wrong, not the first one")
+        (is (= reason (:reason (ex-data e))))
+        (is (re-find #"line 2" (ex-message e)) "and the sentence says which line"))))
+  (testing "an old record says what to do about it, in one sentence"
+    (let [e (try (doall (replay/lines->records
+                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"]))
+                 nil
+                 (catch Exception e e))]
+      (is (re-find #"old contract" (ex-message e)))
+      (is (re-find #"start a new conversation" (ex-message e))
+          "a refusal a person can act on -- 决定 3 of the spec"))))
 
 (deftest a-header-is-not-part-of-the-conversation-and-a-fold-never-sees-it
-  ;; THE CONTRACT THAT MAKES THE HEADER SAFE TO WRITE: a record that OPENS with the header line
-  ;; folds into exactly the conversation it folded into without it -- the header cannot be the
-  ;; first entry, cannot shift an entry's identity, and cannot break the model rows' pairing (the
+  ;; THE CONTRACT THAT MAKES THE HEADER SAFE TO WRITE (ticket 06): a record that OPENS with the
+  ;; header line folds into exactly the conversation it folded into without it -- the header cannot be
+  ;; the first entry, cannot shift an entry's identity, and cannot break the model rows' pairing (the
   ;; k-th assistant message the run's frames built is still the k-th assistant row the run wrote).
   (let [hdr   {:type "event" :runId nil
                :payload {:type "CUSTOM" :name "record/header"
@@ -427,35 +454,7 @@
              (mapv :message (replay/entries rows-without)))))
     (testing "and so is what a provider is handed"
       (is (= (replay/records->messages rows-with)
-             (replay/records->messages rows-without)))))
-
-(deftest the-record-keeps-refusing-a-row-that-is-neither-message-nor-event
-  ;; THE REFUSALS THAT WERE ALREADY HERE (`.scratch/jsonl-two-kinds`), kept green through the
-  ;; header's arrival -- the header ADDS a first line, it does not change what a wrong row is.
-  (testing "and every other row is refused, naming the line and the reason"
-    (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
-                            :old-contract]
-                           ["{\"type\":\"input\",\"payload\":{}}" :unknown-type]
-                           ["{\"type\":\"event\"}" :missing-payload]
-                           ["[1,2,3]" :not-an-object]
-                           ["{\"type\":" :not-json]]]
-      ;; `doall` FORCES THE LAZY PARSE: `lines->records` reads nothing until something is
-      ;; asked for it, and the refusal happens DURING the parse.
-      (let [e (try (doall (replay/lines->records ["{\"type\":\"message\",\"payload\":{}}" line]))
-                   nil
-                   (catch Exception e e))]
-        (is (some? e) (str line " must be refused, not folded"))
-        (is (= 2 (:line (ex-data e))) "the line that is wrong, not the first one")
-        (is (= reason (:reason (ex-data e))))
-        (is (re-find #"line 2" (ex-message e)) "and the sentence says which line")))))
-  (testing "an old record says what to do about it, in one sentence"
-    (let [e (try (doall (replay/lines->records
-                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"]))
-                 nil
-                 (catch Exception e e))]
-      (is (re-find #"old contract" (ex-message e)))
-      (is (re-find #"start a new conversation" (ex-message e))
-          "a refusal a person can act on -- 决定 3 of the spec"))))
+             (replay/records->messages rows-without))))))
 
 (deftest a-log-that-holds-no-run-is-an-empty-conversation
   ;; The state every session passes through: bound, or configured, or archived --

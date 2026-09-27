@@ -18,6 +18,7 @@
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
             [harness.edge.ag-ui :as ag]
+            [harness.edge.host :as host]
             [harness.edge.http :as http]
             [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
@@ -6966,3 +6967,91 @@
                         (get-in (replay/payload (last sys-rows)) [:content]))
                   "message[0] IS the new text instead")
               (is (= "replace" (:instruction-updates (last sys-rows)))))))))))
+
+(deftest the-run-state-column-moves-with-the-registry-and-the-restart-clears-it
+  ;; Ticket 01 of `.scratch/sidebar-ws-and-run-state`, end to end through the row the
+  ;; sidebar reads: the store's `run_state` column is written at the same two moments
+  ;; the registry moves (`register-run!` / terminal), so the LISTING says running and
+  ;; stops saying it -- and a RESTARTED process clears whatever `running` a dead
+  ;; process left behind, because no run is alive in a process that has not started
+  ;; one. The first half uses the held-open window (a run is asserted alive, not
+  ;; raced); the second half seeds the column directly and calls the startup cleanup
+  ;; the server's own `start!` calls.
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-runstate"
+   (fn []
+     (bind! "alive-runstate" alive-dir)
+     (let [gate (support/window-gate #'loop/run-chan 20000)
+           sock (fire-run! "alive-runstate")]
+       (try
+         (testing "while the run is going, the store's column says so"
+           (is (until #(row-running? alive-dir "alive-runstate") 5000))
+           (is (= "running"
+                  (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                "alive-runstate"))))))
+         (finally (.close sock) ((:release gate)))))
+     (testing "and the terminal frame takes it back to idle"
+       (is (until #(false? (row-running? alive-dir "alive-runstate")) 5000))
+       (is (= "idle"
+              (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                            "alive-runstate"))))))
+     (testing "a crash mid-run leaves the word standing -- until the next startup"
+       (project/set-run-state! "alive-runstate" "running")
+       (is (= "running" (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                      "alive-runstate")))))
+       ;; THE SERVER'S OWN STARTUP STEP, exactly as `start!` calls it: the process that
+       ;; comes back starts with no runs of its own, so every `running` was left by a
+       ;; process that is gone.
+       (sessions/clear-startup-run-state!)
+       (is (= "idle" (:run-state (first (db/select "SELECT run_state FROM sessions WHERE id = ?"
+                                                   "alive-runstate")))))))))
+
+(deftest a-run-starting-and-ending-pushes-the-host-listing
+  ;; Ticket 02 of `.scratch/sidebar-ws-and-run-state`: the sidebar's `running` rides
+  ;; `events.host` as a PUSH. The adapter's run-started!/run-finished! write the
+  ;; column AND ring the host stream, so a watcher -- which is exactly what every
+  ;; events.host connection installs -- hears the listing change without anybody
+  ;; asking. The watcher here records the frame a connection would have been SENT,
+  ;; and it is installed before the run so the start's own frame cannot be missed.
+  (wipe-dir! alive-dir)
+  (with-server
+   "alive-push"
+   (fn []
+     (bind! "alive-push" alive-dir)
+     (let [frames (atom [])
+           ;; A pushed listing that names this row running, or nil.
+           running-frame?
+           (fn []
+             (some (fn [frame]
+                     (and (= "projects" (:type frame))
+                          (some (fn [p]
+                                  (some (fn [s] (and (= (:threadId s) "alive-push")
+                                                     (:running s)))
+                                        (:sessions p)))
+                                (:projects frame))))
+                   @frames))
+           ;; A pushed listing that names this row NOT running, or nil.
+           idle-frame?
+           (fn []
+             (some (fn [frame]
+                     (and (= "projects" (:type frame))
+                          (some (fn [p]
+                                  (some (fn [s] (and (= (:threadId s) "alive-push")
+                                                     (not (:running s))))
+                                        (:sessions p)))
+                                (:projects frame))))
+                   @frames))]
+       (host/watch! (fn [] (swap! frames conj (http/host-frame-for-test))))
+       (let [gate (support/window-gate #'loop/run-chan 20000)
+             sock (fire-run! "alive-push")]
+         (try
+           (testing "while the run is held, a pushed listing names it running"
+             (is (until running-frame? 5000)
+                 "no pushed frame said the run was in flight"))
+           (finally
+             (.close sock)
+             ((:release gate))))
+         (testing "and the ending pushes a listing that says it stopped"
+           (is (until idle-frame? 5000)
+               "no pushed frame said the run had ended")))))))

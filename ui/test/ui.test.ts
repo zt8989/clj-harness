@@ -45,6 +45,7 @@ import { relativeTimeSuite } from "./suites/relative-time";
 import { sidebarRowsSuite } from "./suites/sidebar-rows";
 import { sidebarRefetchSuite } from "./suites/sidebar-refetch";
 import { injectionSuite } from "./suites/injections";
+import { compactionSuite } from "./suites/compactions";
 import { recordSuite } from "./suites/record";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
@@ -55,6 +56,7 @@ import { muxSuite } from "./suites/mux";
 import { coalesceSuite } from "./suites/coalesce";
 import { rightPaneSuite } from "./suites/right-pane";
 import { threadMessagesSuite } from "./suites/thread-messages";
+import { timeoutSuite } from "./suites/llm-timeout";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -72,7 +74,7 @@ import { threadMessagesSuite } from "./suites/thread-messages";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -447,7 +449,24 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// end must not wear the dot -- the owner's third report (two dots, one per turn end). The
 /// assertion is over `lib/live-turn.ts`'s three facts (a turn is open, somebody is writing, and
 /// this is the live turn); its name and its place move with that module.
-const EXPECTED_CASES = 158;
+/// 158 -> 160: the `llm-timeout` suite, appended to `SUITES`. Two cases for the idle guard's
+/// card, both pure: what the frame's value READS (the three numbers the row says, and the
+/// three endings it can announce), and the one property the whole feature rests on -- the
+/// card is a `data` part, so `toAgUiMessages` never sends it and a rebuild never brings it
+/// back. That last one is not about our module at all: it is the adapter's contract, and
+/// it is what lets a stall be shown without becoming part of the conversation.
+///
+/// 160 -> 161: the other side of the effort picker -- the `picker` suite's fourth. What a
+/// model OFFERS as its thinking levels is no longer the server's one union
+/// (`harness.cap.providers/reasoning-efforts`, the three OpenAI-compatible values, right
+/// as a wire contract and misleading as a menu): `lib/efforts.ts` holds one ladder per
+/// vendor from OpenAI through Kimi, matched by PREFIX against the model id with its
+/// `relay/` namespace dropped, plus the vendor's own default -- and a model the table
+/// does not know falls back to OpenAI's ladder, the widest one, so nothing is hidden.
+/// The module imports nothing, which is what lets the whole rule be a case here; that the
+/// picker DRAWS those levels, and that a switch really lands on the new vendor's list, is
+/// the browser walkthrough's half.
+const EXPECTED_CASES = 165;
 
 let total = 0;
 for (const suite of SUITES) {

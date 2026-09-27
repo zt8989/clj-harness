@@ -14,7 +14,8 @@
   "effort": {
     "label": "思考档",
     "title": "思考档——只改本会话",
-    "default": "默认档"
+    "default": "默认档",
+    "vendorDefault": "厂商默认"
   },
   "skill": {
     "layer": {
