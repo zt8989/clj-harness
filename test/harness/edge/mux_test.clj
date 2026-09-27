@@ -219,8 +219,9 @@
   (let [facts (fn [sent]
                 (->> @sent
                      (mapv #(json/read-str % :key-fn keyword))
-                     (filterv #(contains? #{"turn/start" "turn/end" "model/start" "model/end"}
-                                          (:type %)))
+                     ;; THE FAMILY'S NAMES ARE THE SERVER'S OWN LIST, not a copy here that goes
+                     ;; stale the moment a name is added (`harness.edge.mux/fact-types`).
+                     (filterv #(contains? mux/fact-types (:type %)))
                      (mapv :seq)))
         sent  (atom [])
         ch    (fake-channel sent)]
@@ -233,4 +234,35 @@
             back-ch (fake-channel back)]
         (#'http/mux-attend! "tok-fact-2" back-ch [{:threadId "mux-fact" :factSince 7}])
         (is (= [8] (facts back)))))))
+
+(deftest the-step-family-rides-the-same-cursor
+  ;; TICKET 04 OF `.scratch/step-events`. The step boundaries are facts like a turn's and a model
+  ;; call's -- written to the RECORD, so their `:seq` is a real line number, which is what lets
+  ;; them be asked for through the same `factSince` cursor as the other two families. Nothing in
+  ;; the ring or the route needed a branch for them: they are names in `mux/fact-types`.
+  ;;
+  ;; AND THE WHOLE FAMILY STILL FITS IN THE RING. `fact-buffer-size` counts FRAMES, and one step
+  ;; costs two of them plus two per model call inside it (the tool-lifecycle rows are not facts
+  ;; and do not come this way): a thirty-step turn is about 62 frames, so the ring holds roughly
+  ;; sixteen such turns. A reconnect gap is a second long by nature -- the client re-declares a
+  ;; cursor it held a moment ago -- so the bound is still a bound on memory rather than a promise
+  ;; to a reader that was away for a whole turn.
+  (let [facts (fn [sent]
+                (->> @sent
+                     (mapv #(json/read-str % :key-fn keyword))
+                     (filterv #(contains? mux/fact-types (:type %)))
+                     (mapv (fn [f] [(:type f) (:seq f)]))))
+        sent  (atom [])
+        ch    (fake-channel sent)]
+    (#'http/mux-attend! "tok-step-1" ch [{:threadId "mux-step" :factSince 10}])
+    (doseq [[type n] [["step/start" 11] ["model/start" 12] ["model/end" 13] ["step/end" 14]]]
+      (#'http/family-send! "mux-step" {:type type :seq n}))
+    (is (= [["step/start" 11] ["model/start" 12] ["model/end" 13] ["step/end" 14]]
+           (facts sent))
+        "every kind reaches the reader, in the order it was written")
+    (testing "and a page that was away is handed exactly the step frames it missed"
+      (let [back    (atom [])
+            back-ch (fake-channel back)]
+        (#'http/mux-attend! "tok-step-2" back-ch [{:threadId "mux-step" :factSince 12}])
+        (is (= [["model/end" 13] ["step/end" 14]] (facts back)))))))
 

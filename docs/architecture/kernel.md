@@ -2,7 +2,7 @@
 
 这四个命名空间是内核的全部。`event` 定义词汇，`llm` 说话，`tools` 干活，`loop` 把它们串起来。
 
-## 事件：14 种，就这些
+## 事件：19 种，就这些
 
 `harness.kernel.event` 是内核唯一的输出面。**AG-UI 的帧全部由 `harness.edge.ag-ui` 从这些事件派生**，
 内核自己不知道 AG-UI 存在。
@@ -20,13 +20,18 @@
 | `:tool/post-execute` | 一次调用的生命周期闭合（同上） |
 | `:model/start` | 一次**模型调用**开始：这次调用的身份（model / base-url / 思考档）与**照发出的那张工具表**——`loop` resolve 一次，同一份既进请求体又进这条（**不上 wire**） |
 | `:model/end` | 一次模型调用结束，带**厂商回的话**（usage / finish_reason / 回声的 model；**不上 wire**） |
+| `:step/start` | **一步**开始：一次模型请求，加上**它要调的那些工具**（ADR 0011）。**不上 wire 的帧**，但它**两处都在**：落记录一行，并且上会话那条下行一条事实 |
+| `:step/end` | 一步结束，带这一步调了哪些工具（`:tools`，`[{:id :name} …]`）。每个调用后来怎么了在它自己的 `tools/*` 行上 |
+| `:model/timeout` | 厂商静默超过时限，这次调用被掐掉（只给屏幕看，见 `harness.edge.llm-timeout`） |
 | `:run/end` | 正常收尾 |
 | `:run/interrupt` | **第二种终态**：有调用 park 等人，本次 run 到此为止 |
 | `:run/error` | 出错收尾 |
+| `:run/stopped` | **人**按停的收尾：线上仍是 `RUN_ERROR`，带 `code: "stopped"`（客户端据此把停画成停、不画成故障） |
+| `:run/cut-off-result` | 一次被停的调用补给**记录**的结果（从不发给客户端）：记录必须完整，下一轮才发得出去 |
 
 `:run/end` 与 `:run/interrupt` **互斥**，一次 run 恰好发其一——客户端因此永远看得到一个终结。
 
-五个事件**没有帧**（三条工具生命周期 + 两条模型调用边界）：它们落 jsonl 审计行，
+七个事件**没有帧**（三条工具生命周期 + 两条模型调用边界 + **两条步边界**）：它们落 jsonl 审计行，
 读它们的是记录的读侧（[edge](edge.md) 那一侧），不是对话。加一帧去装一个统计量就是改协议。
 
 ## 循环：`harness.kernel.loop`

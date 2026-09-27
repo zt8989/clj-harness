@@ -120,3 +120,55 @@ turn/end        {turnId, steps, messages, conclusionId, seqFrom, seqTo}   ← �
   并出现 28 处「等了 5000ms 那扇缝还没开」这类**对负载敏感**的失败。
 
 **下一张票（或任何一次收口）要在没有别的会话抢机器的机器上复跑整轮，把那个数留下。**
+
+## 落地（票 02–06，2026-09-27）
+
+**落了。** 同一个 worktree、同一个分支，与票 01 同一台机器。
+
+| 文件 | 改了什么 |
+|---|---|
+| `harness.kernel.event` | `step-start` / `step-end` 两个构造；词表 19 种 |
+| `harness.kernel.loop` | 一步在请求之前开、在**四条收口路**上关（工具都答了 / 停止 / 悬置 / 失败），
+  `close-step!` 幂等 |
+| `harness.edge.http` | `lifecycle-record` 多两行（广播的门在票 01 已经读 `mux/fact-types`） |
+| `harness.edge.ag-ui` | `(:step/start :step/end)` → 空操作（那个 `case` 没 default，不写会抛） |
+| `harness.edge.mux` | `fact-types` 多两个名字 |
+| `harness.edge.turn` | 折 `step/start` 行成 `:steps`，`turn/end` 带它；工具调用计数去掉 |
+| `ui/src/lib/turns.ts` | `turnCounts` 数步；`turnSummaryLabel(steps, t)` 只说「3 步」 |
+| `ui/src/components/turn-steps.tsx` | `turnStepsOf`；`data-steps` |
+| `ui/src/lib/mux.ts` | 事实族多两个名字（类型联合 + `FACT_TYPES`） |
+| `ui/src/locales/{zh,en}/thread.json` | `summary.steps`；删掉没人再画的 `summary.calls` / `summary.messages` |
+| `ui/src/locales/en/format.json` | 状态带那一格从 `3 steps` 改成 `3 calls`——**同一个界面里 "step" 不能有两个意思** |
+| 测试 | `loop_test` 五条事件序列加上步两端（含「重试是一步」）；`mux_test` 新用例 + 用 `mux/fact-types`
+  替掉又一份抄写；`frames.ts` 期望六个名字；`turns.ts` / `stats.ts` 跟着改 |
+
+### 三处决定（都在 ADR 0011 里）
+
+1. **悬置关的是同一步**，回答人的那次请求是**下一步**——步不跨 run，轮才跨。内核里只有这样写才自洽：
+   悬置之后那次请求本来就是一次全新的 `model/start`。
+2. **重试是一步**（`loop_test` 的 `:model/timeout` 那条钉住）：vendor 因长度拒绝、这一层重发，步数不涨。
+   这正是折叠那一行敢只说步数的底气。
+3. **那一行只说步数**：「3 步 · 3 条消息」是把同一个数说两遍——客户端的步数就是助手消息数（一次请求一条
+   消息）。工具调用的计数一并撤掉：没人再画它。
+
+### 判据（都是实测）
+
+- `harness.kernel.loop-test` + `harness.edge.mux-test` + `harness.edge.stats-test`：52 用例 / 231 断言，**0 失败**
+- `harness.edge.mux-test` + `harness.edge.sessions-test` + `harness.edge.context-test` + `harness.edge.trajectory-test`：
+  76 用例 / 311 断言，**0 失败**
+- `harness.edge.http-test`：**115 用例 / 1240 断言，0 失败**（一次复跑；见下面那条已知情况）
+- 前端 `npm test`：**167/167**——其中 `the-wire-says-which-names-are-facts` 现在期望**六个**名字，
+  也就是说真 run 的 socket 上确实走过了 `step/start` / `step/end`
+- `npm run typecheck` / `npm run build` 通过
+- **真浏览器走查**：`node scripts/dev.mjs --scripted` + 浏览器，折起来那一行是「2 步」、展开两步的行都在
+  （`evidence/summary-line-2-steps.png` 与 `evidence/walkthrough.md`）
+
+### 两条已知情况
+
+- **票 02–05 的那一轮 `http-test` 红过一条**
+  （`an-overflow-refusal-compacts-aggressively-and-retries-in-one-turn`：重试的答案没有文本帧）。
+  单独复跑整个命名空间是**全绿**的，同一台机器上那次同时有新起的 JVM 在抢（4 核）。判成负载下的
+  flaky，**没有改任何东西**；它属于那一类「对 5000ms 窗口敏感的用例」，本机被压住时会红。
+- **记录每步多两行**：一次没有工具的请求现在是四行（`step/start` + `model/*` + `step/end`）。
+  内存里那圈事实随之涨：一步四帧起，`fact-buffer-size`（1024 帧）仍够——一次断线缺口是秒级的，
+  而 1024 帧约等于十六个三十步的轮（`mux_test` 那条新用例把这个算式的结论写在自己的注释里）。

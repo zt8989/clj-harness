@@ -7,8 +7,8 @@
   "stats": {
     "turns_one": "{{count}} turn",
     "turns_other": "{{count}} turns",
-    "steps_one": "{{count}} step",
-    "steps_other": "{{count}} steps",
+    "steps_one": "{{count}} call",
+    "steps_other": "{{count}} calls",
     "rate": "{{value}} tok/s",
     "total": "{{value}} tok",
     "totalEstimated": "~{{value}} tok",

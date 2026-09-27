@@ -133,7 +133,7 @@ lib/
                     （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
   mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
                      分发**三族**：窗口帧、run 的 AG-UI 帧，以及**关于会话的事实**（`turn/*` /
-                     `model/*`，ADR 0006）。**分派是显式的**（`familyOf(type)` → `window | fact | run`，
+                     `model/*` / `step/*`，ADR 0006 + 0011）。**分派是显式的**（`familyOf(type)` → `window | fact | run`，
                      票 04）：事实若落进 `else` 就会被交给 `@ag-ui/client`，那份 schema 校验会当场把这一轮
                      打死。事实有自己的订阅面（`subscribeFacts`——它属于**会话**而不是某一次 run，所以
                      只看着的人也想要它）；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），

@@ -73,7 +73,7 @@ const cases: Case[] = [
       };
       expect(statsCells(payload, en)).toEqual({
         turns: "1 turn",
-        steps: "2 steps",
+        steps: "2 calls",
         rate: "242 tok/s",
         total: "2k tok",
         cached: "91% cached",
@@ -83,9 +83,10 @@ const cases: Case[] = [
       // the catalog the thing under test rather than a decoration: the same payload
       // through the same function has to come out in the other language, with the
       // units (which do not translate) unchanged and the words (which do) not.
-      // `steps` is a count of MODEL CALLS: `CONTEXT.md` forbids 步, and the STRIP's own
-      // cell is the one place the phrase is shortened to 调用 -- that row gives up whole
-      // cells before it lets one of them wrap (see `components/composer-stats.tsx`).
+      // `steps` HERE IS A COUNT OF MODEL CALLS, AND THE ENGLISH CELL NOW SAYS SO (`.scratch/step-events`,
+      // ADR 0011): it used to read `3 steps`, which stopped being usable the moment a STEP became a
+      // thing of its own -- one request plus its tools. One word, one meaning, in the same page.
+      // The Chinese cell was always 调用, which is why it does not move here.
       expect(statsCells(payload, zh)).toEqual({
         turns: "1 轮",
         steps: "2 次调用",
@@ -134,7 +135,7 @@ const cases: Case[] = [
 
       // A call that reported nothing: steps are there, the tokens are not.
       const partial = statsCells({ turns: 1, steps: 3, stepsWithUsage: 2, incomplete: false }, en);
-      expect(partial?.steps).toBe("3 steps");
+      expect(partial?.steps).toBe("3 calls");
       expect(partial?.total).toBeNull();
       expect(partial?.cached).toBeNull();
 
@@ -219,7 +220,7 @@ const cases: Case[] = [
       // durations), so it is asserted as a shape.
       const cells = statsCells(body, en);
       expect(cells?.turns).toBe("1 turn");
-      expect(cells?.steps).toBe("2 steps");
+      expect(cells?.steps).toBe("2 calls");
       expect(cells?.total).toBe("2k tok");
       expect(cells?.cached).toBe("91% cached");
       expect(cells?.rate).toMatch(/^\d+ tok\/s$/);
@@ -292,7 +293,7 @@ const cases: Case[] = [
       const cells = statsCells(pushedOnly, en);
       expect(cells).not.toBeNull();
       expect(cells?.turns).toBeNull();
-      expect(cells?.steps).toBe("2 steps");
+      expect(cells?.steps).toBe("2 calls");
       expect(JSON.stringify(cells)).not.toContain("stats.turns");
 
       // AND A COUNT OF ZERO IS STILL A COUNT: an empty session draws "0 turns" rather than
@@ -328,7 +329,7 @@ const cases: Case[] = [
       } as StatsPayload;
       const cells = statsCells(opening, en);
       expect(cells?.turns).toBe("1 turn");
-      expect(cells?.steps).toBe("1 step");
+      expect(cells?.steps).toBe("1 call");
       expect(cells?.cached).toBe("0% cached");
       expect(cells?.rate).toBe("0 tok/s");
       expect(cells?.total).toBe("~12k tok");

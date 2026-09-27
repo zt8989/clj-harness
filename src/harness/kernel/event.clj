@@ -1,5 +1,5 @@
 (ns harness.kernel.event
-  "The kernel's whole vocabulary: fifteen event kinds. Everything AG-UI-shaped
+  "The kernel's whole vocabulary: nineteen event kinds. Everything AG-UI-shaped
   is derived from these by harness.edge.ag-ui, never produced here; seven kinds
   carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
   :tool/execute, :tool/post-execute), the two model-call boundaries
