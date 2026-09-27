@@ -480,7 +480,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// ...167 -> 170: the two readings of a turn's step count get their own cases (`.scratch/step-events`
 /// 第 1 条) -- the server's number only for the turn it closed, the read side everywhere else, and a
 /// live run where the two are compared to each other.
-const EXPECTED_CASES = 170;
+///
+/// ...170 -> 171: the client's half of `a dropped socket is repaired` -- how far the page got, and
+/// that the step frames are in that count (ticket 04 of `.scratch/step-events`).
+const EXPECTED_CASES = 171;
 
 let total = 0;
 for (const suite of SUITES) {

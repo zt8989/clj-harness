@@ -20,7 +20,7 @@ import { expect } from "vitest";
 
 import { type Case, type Suite, agentFor, content, script, threadId } from "../e2e";
 import { type HarnessAgent } from "@/lib/agent";
-import { subscribeFacts } from "@/lib/mux";
+import { declaredSet, subscribeFacts } from "@/lib/mux";
 import { turnBounds, turnCounts } from "@/lib/turns";
 
 async function newAgent(tid: string): Promise<{ agent: HarnessAgent; failed: () => string | null }> {
@@ -152,6 +152,60 @@ const cases: Case[] = [
       const foldedView = agent.messages.filter((m) => m.role !== "tool");
       const { first, last } = turnBounds(foldedView, foldedView.length - 1);
       expect(turnCounts(foldedView, first, last).steps, "and the view counts the same two").toBe(server);
+    },
+  },
+  {
+    name: "a-reconnect-would-ask-for-the-gap-and-the-step-frames-are-in-it",
+    // TICKET 04: THE CLIENT'S HALF OF 'A DROPPED SOCKET IS REPAIRED'. The server's half has its
+    // own case (`harness.edge.mux-test/the-step-family-rides-the-same-cursor`: `facts-after`
+    // hands back exactly the gap). This half is the question the PAGE answers -- HOW FAR IT GOT.
+    run: async () => {
+      const tid = threadId("facts-cursor");
+      const { agent } = await newAgent(tid);
+      const facts: { type: string; seq: number | null }[] = [];
+      const { unsubscribe } = subscribeFacts(tid, (fact) => {
+        facts.push({ type: fact.type, seq: fact.seq });
+      });
+      script([
+        {
+          reasoning: "先看一眼。",
+          content: "",
+          "tool-calls": [{ id: "c1", name: "read", arguments: { path: "deps.edn" } }],
+        },
+        { content: "看完了。" },
+      ]);
+      await send(agent, "看看这个项目。");
+      for (let tries = 0; tries < 100 && !facts.some((f) => f.type === "turn/end"); tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      // THE FAMILY'S SHAPE, MEASURED -- one turn, two requests, one tool: TEN facts. The turn's
+      // own ends, and per request a step pair around the model pair.
+      //
+      // IT IS ALSO THE RING'S ARITHMETIC (`harness.edge.mux/fact-buffer-size` is 1024 frames):
+      // about a hundred turns of this shape fit, and a reconnect gap is a second long by nature --
+      // so the bound stays a bound on MEMORY rather than a promise to a reader that was away for a
+      // whole turn. Before the step family the same turn cost six.
+      expect(facts.map((f) => f.type)).toEqual([
+        "turn/start",
+        "step/start", "model/start", "model/end", "step/end",
+        "step/start", "model/start", "model/end", "step/end",
+        "turn/end",
+      ]);
+      // AND EVERY ONE CARRIES A RECORD LINE -- the step pair included, which is the whole reason
+      // ADR 0011 writes them into the record: it is what aligns the pushed half with the window
+      // half (ADR 0006 decision 5).
+      expect(facts.every((f) => typeof f.seq === "number")).toBe(true);
+
+      // SO THE GAP A RECONNECT ASKS FOR STARTS AT THE LAST ONE IT SAW. `declaredSet` is what the
+      // handshake URL and every re-declare spell (`lib/mux.ts`), so this is the `factSince` a
+      // socket comes back with after a drop.
+      const declared = declaredSet().find((d) => d.threadId === tid);
+      expect(declared?.factSince).toBe(Math.max(...facts.map((f) => f.seq as number)));
+      // (AND THE CLAIM IS DROPPED LAST: `declaredSet` is 'what this page still wants', so reading
+      // it for a thread nobody is claiming any more answers nothing -- which is the other half of
+      // the same rule.)
+      unsubscribe();
     },
   },
 ];
