@@ -467,7 +467,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// is still true is a run in flight, not a stale snapshot. One case replaced them
 /// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
 /// candidates), which is why the count lands one lower rather than two.
-const EXPECTED_CASES = 164;
+///
+/// ...164 -> 166: the `stats` suite's two cases for `.scratch/session-numbers-in-the-store`
+/// -- the BUG (a payload that had only ever been pushed drew the raw key `stats.turns`) and
+/// its follow-up (the `model/start` payload: counts, zeroes, and the estimate of the request
+/// that just went out, drawn as an estimate).
+const EXPECTED_CASES = 166;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -105,7 +105,13 @@ function useSessionNumbers(threadId: string): SessionNumbersValue {
   // subscription (`lib/mux.ts` routes by `familyOf`).
   useEffect(() => {
     const { unsubscribe } = subscribeFacts(threadId, (fact) => {
-      if (fact.type !== "model/end") return;
+      // BOTH ENDS OF A CALL CARRY THEM NOW, and the START is the one that matters for the
+      // conversation's opening: a request that has just gone out has a size nobody has reported
+      // yet, so the server sends the counts, zeroes for cache and rate, and the ESTIMATE of what
+      // was sent (see `live-numbers-slice`'s `:start` phase). The END replaces those with the
+      // vendor's numbers -- including `:estimated false`, which is what stops the mark sticking
+      // to a measured figure.
+      if (fact.type !== "model/end" && fact.type !== "model/start") return;
       const numbers = fact.numbers as Partial<StatsPayload> | undefined;
       if (numbers !== undefined) setPushed(numbers);
     });
@@ -121,6 +127,12 @@ function useSessionNumbers(threadId: string): SessionNumbersValue {
   // -- so without this ask the ring would keep a single-coloured arc, and the panel
   // would keep an empty one, until the NEXT run. NOT POLLING: it is one ask per run,
   // and a run that never ends asks nothing.
+  //
+  // AND THE SERVER WRITES ITS OWN SNAPSHOT AT `:run/done` TOO (ticket 01 of
+  // `.scratch/session-numbers-in-the-store`), which is why this ask is cheap as well as
+  // necessary: by the time it goes out (400ms) the row it reads is the one taken after
+  // the tail landed -- the same numbers, one SELECT (or the process's own folds, when
+  // this page's server holds the session).
   const wasRunning = useRef(false);
   useEffect(() => {
     const ended = wasRunning.current && !isRunning;

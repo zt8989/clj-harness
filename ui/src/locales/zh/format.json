@@ -9,6 +9,7 @@
     "steps_other": "{{count}} 次调用",
     "rate": "{{value}} tok/s",
     "total": "{{value}} tok",
+    "totalEstimated": "~{{value}} tok",
     "cached": "{{value}}% 缓存"
   },
   "context": {

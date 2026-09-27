@@ -903,3 +903,33 @@
       (is (= "idle" (get (project/run-states) running)))
       (is (= "idle" (get (project/run-states) idle)) "an idle row is not rewritten")
       (is (= "idle" (get (project/run-states) never))))))
+
+(deftest the-numbers-are-one-json-value-the-store-hands-back-whole
+  ;; `remember-numbers!` / `numbers-for` (ticket 01 of `.scratch/session-numbers-in-the-store`):
+  ;; the strip's last-known snapshot, stored as ONE JSON value rather than a column per cell --
+  ;; so a new cell is a new key and not a migration, and a reader must not be able to tell a
+  ;; stored answer from a folded one except by the `:numbersAt` the stored one carries.
+  (let [watched   "numbers-watched"
+        unwatched "numbers-unwatched"]
+    (project/register-session! watched)
+    (testing "a session nobody has watched has nothing stored"
+      (is (nil? (project/numbers-for watched))))
+    (let [payload {:turns 3
+                   :steps 5
+                   :cacheHitPercent 91
+                   :outputTokensPerSecond 42
+                   ;; THE NESTED SHAPE MATTERS: the context ring is a map of its own, and a
+                   ;; round trip that flattened it would hand the client something else.
+                   :context {:usedTokens 76300 :windowTokens 262144 :percent 29
+                             :parts {:system 1200 :tools 800 :conversation 74300}}
+                   :numbersAt 1790000000000}]
+      (project/remember-numbers! watched payload)
+      (testing "and what was written comes back as the same value, whole"
+        (is (= payload (project/numbers-for watched))))
+      (testing "including a key added later -- the value is opaque to this namespace"
+        (project/remember-numbers! watched (assoc payload :somethingNew {:a [1 2 3]}))
+        (is (= {:a [1 2 3]} (:somethingNew (project/numbers-for watched))))))
+    (testing "writing for an id this home has never heard of writes nothing"
+      (project/remember-numbers! unwatched {:turns 1 :numbersAt 1})
+      (is (nil? (project/numbers-for unwatched)))
+      (is (nil? (project/numbers-for nil)) "and the no-session slot is answered, not looked up"))))

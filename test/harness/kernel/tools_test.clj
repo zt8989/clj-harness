@@ -23,6 +23,16 @@
 (defn- call [name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}}))
 
+(defn- what-it-printed
+  "What the command ITSELF printed: the answer without the ending line every `bash`
+  answer ends on, whatever that ending is (`[exit N]`, the timeout's line). Cases about
+  the command's own words read it this way, so they say nothing about the ending.
+
+  `str/trim` because the ending is appended after a newline of its own: a body that
+  already ended on one (`echo` always does) keeps a blank line in front of the ending."
+  [content]
+  (str/trim (str/join "\n" (drop-last (str/split-lines content)))))
+
 (defn- background
   "`job` -- the verb that starts a job, and the ONE way to start one now that starting
   is its own name again. The answer is the id-and-path pair the cases below parse, and
@@ -174,7 +184,7 @@
     ;; sitting in the same directory the JVM considers its own. Git Bash reports
     ;; POSIX paths (/c/Users/...) where the JVM says C:\Users\..., so compare the
     ;; normalized tail -- the drive letter is the only legitimate difference.
-    (let [pwd  (str/trim (:content (call "bash" {:command "pwd"})))
+    (let [pwd  (what-it-printed (:content (call "bash" {:command "pwd"})))
           cwd  (System/getProperty "user.dir")
           norm (fn [p] (-> p (str/replace "\\" "/") (str/replace #"^[A-Za-z]:" "")
                            (str/replace #"^/c/" "/") (str/replace #"/+$" "")))]
@@ -183,6 +193,23 @@
     (let [{:keys [content error]} (call "bash" {:command "exit 3"})]
       (is (false? error))
       (is (str/includes? content "[exit 3]")))))
+
+(deftest every-answer-ends-on-how-the-command-ended
+  ;; ONE FACT, WRITTEN ONCE AND ALWAYS. `[exit 0]` used to be left out, so `echo hi` and a
+  ;; command that had not finished looked alike, and the only answer that named an ending
+  ;; was the one whose output did not fit. Every answer ends on it now, and it is the LAST
+  ;; line -- one shape to read, not two.
+  (testing "a command that succeeded says so"
+    (let [{:keys [content error]} (call "bash" {:command "echo hi"})]
+      (is (false? error))
+      (is (= "[exit 0]" (last (str/split-lines content))))))
+  (testing "and so does one that printed nothing: the ending is not the output"
+    (let [{:keys [content]} (call "bash" {:command "true"})]
+      (is (= "(no output)" (first (str/split-lines content))))
+      (is (= "[exit 0]" (last (str/split-lines content))))))
+  (testing "a failure keeps its own number, still last"
+    (let [{:keys [content]} (call "bash" {:command "echo boom >&2; exit 3"})]
+      (is (= "[exit 3]" (last (str/split-lines content)))))))
 
 (deftest a-double-quoted-word-survives-the-trip-into-the-shell
   ;; THE TOOL'S OWN HALF of the quoting bug (`harness.infra.shell` has the rule, and
@@ -371,13 +398,13 @@
   ;; command with output, and a command that failed.
   (let [{:keys [content error]} (call "bash" {:command "echo hi"})]
     (is (false? error))
-    (is (= "hi" (str/trim content))))
+    (is (= "hi" (what-it-printed content))))
   (let [{:keys [content error]} (call "bash" {:command "echo boom >&2; exit 3"})]
     (is (false? error))
     (is (str/includes? content "boom"))
     (is (str/includes? content "[exit 3]"))
     (is (not (str/includes? content "timed out"))))
-  (is (= "(no output)" (str/trim (:content (call "bash" {:command "true"}))))))
+  (is (= "(no output)" (what-it-printed (:content (call "bash" {:command "true"}))))))
 ;; ----------------------------------------------------------- the way in
 ;;
 ;; A `bash` call could only ever say things BY the command string: feeding a program
@@ -391,7 +418,7 @@
   ;; the case is that the text got there AND that the stream was closed after it.
   (let [{:keys [content error]} (call "bash" {:command "sort" :stdin "b\na\n"})]
     (is (false? error))
-    (is (= ["a" "b"] (str/split-lines content)))))
+    (is (= ["a" "b"] (str/split-lines (what-it-printed content))))))
 
 (deftest stdin-reaches-the-executor-as-the-call-gave-it
   ;; Through a stand-in, so the assertion is about what the TOOL asked for rather
@@ -421,10 +448,10 @@
                                                   :arguments (json/write-str args)}}
                                       "tt-workdir"))]
         (testing "`workdir` is resolved the way every other path in this table is"
-          (is (= "the-subdirectory" (str/trim (:content (run {:command "cat marker.txt"
+          (is (= "the-subdirectory" (what-it-printed (:content (run {:command "cat marker.txt"
                                                               :workdir "sub"}))))))
         (testing "and no `workdir` still means the project directory"
-          (is (= "project-root" (str/trim (:content (run {:command "cat marker.txt"})))))))
+          (is (= "project-root" (what-it-printed (:content (run {:command "cat marker.txt"})))))))
       (finally (project/bind! "tt-workdir" nil)))))
 
 (deftest a-workdir-that-is-not-a-directory-is-refused-by-name
@@ -474,7 +501,7 @@
 (deftest leaving-the-shell-out-is-exactly-what-it-was
   (let [{:keys [content error]} (call "bash" {:command "echo hi"})]
     (is (false? error))
-    (is (= "hi" (str/trim content))
+    (is (= "hi" (what-it-printed content))
         "no `shell` is not a new default -- it is no change at all")))
 
 (deftest a-shell-name-that-is-not-one-of-them-is-refused-as-a-word
@@ -532,8 +559,9 @@
 
 ;; ------------------------------------------------------- what an answer may carry
 ;;
-;; THE CEILING HAS A FLOOR: below it nothing changes at all -- `echo hi` is still
-;; `hi`, with no path and no file -- which is why that is asserted first. Above it the
+;; THE CEILING HAS A FLOOR: below it nothing changes at all -- `echo hi` is still `hi`,
+;; plus the ending line every answer ends on, and no path and no file -- which is why
+;; that is asserted first. Above it the
 ;; answer is a tail, a count of the bytes left out and where the rest of them are.
 
 (deftest a-command-that-fits-is-answered-as-it-always-was-and-writes-nothing
@@ -542,7 +570,7 @@
     (let [before (files)
           {:keys [content error]} (call "bash" {:command "echo hi"})]
       (is (false? error))
-      (is (= "hi" (str/trim content)) "byte for byte what it always was")
+      (is (= "hi" (what-it-printed content)) "the command's own output, exactly what it was")
       (is (not (str/includes? content "[truncated")))
       (is (= before (files)) "echoing `hi` is not worth a file"))))
 
@@ -572,7 +600,7 @@
         ;; The record is in the configuration home, which the fence lists as free --
         ;; so all three readers reach it, and the path in the answer is a live one.
         (let [cmd (str "grep -c '^199999$' " (support/shell-path path))]
-          (is (= "1" (str/trim (:content (call "bash" {:command cmd}))))))
+          (is (= "1" (what-it-printed (:content (call "bash" {:command cmd}))))))
         (is (some #(str/includes? % "199999")
                   (read-lines (:content (call "read" {:path path :offset 199990}))))
             "the `read` tool reads the same file")
@@ -766,7 +794,7 @@
     (let [found  (:content (call "bash" {:command (str "grep two " (support/shell-path path))}))
           tailed (:content (call "bash" {:command (str "tail -1 " (support/shell-path path))}))]
       (is (str/includes? found "two") "`bash` can search the record")
-      (is (= "two" (str/trim tailed)) "and read its last line"))
+      (is (= "two" (what-it-printed tailed)) "and read its last line"))
     (jobs/shutdown!)))
 
 (deftest a-job-says-when-the-command-sends-its-own-output-away

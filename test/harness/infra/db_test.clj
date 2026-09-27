@@ -961,7 +961,16 @@
                                       ;; lines are the story). It is what the sidebar's
                                       ;; `running` reads across a restart; see
                                       ;; harness.infra.db/sessions-remember-their-run-state.
-                                      "run_state"}
+                                      "run_state"
+                                      ;; `numbers` is the strip's last-known snapshot of a
+                                      ;; FOLD over the record (turns, model calls, the vendor's
+                                      ;; cache share, the context ring), written whole as one
+                                      ;; JSON value at every `model/end` and at every `:run/done`
+                                      ;; -- rewritten in place, never appended, no history. It is
+                                      ;; what makes the strip's first read one SELECT; the fold
+                                      ;; stays as the repair path. See
+                                      ;; harness.infra.db/sessions-remember-their-numbers.
+                                      "numbers"}
                ;; The anchor store (harness.cap.hashline.store).
                "hashline_snapshots" #{"path" "thread_id" "file_checksum" "line_count"
                                       "anchors" "line_checksums" "served" "updated_at"}
@@ -1154,3 +1163,28 @@
           (is (nil? (:run_state (first (db/select "SELECT run_state FROM sessions WHERE id = ?" id)))))
           (testing "and the readers read that NULL as idle, not as a third thing"
             (is (= {"ran-before-run-states" "idle"} (project/run-states)))))))))
+
+(deftest a-store-written-before-the-numbers-has-none
+  ;; `sessions-remember-their-numbers`, and the contract its docstring argues: THE COLUMN
+  ;; ARRIVES EMPTY AND IS NEVER BACKFILLED. There is nothing to backfill FROM -- the column's
+  ;; whole content is a claim about a moment nobody recorded, and a migration that folded
+  ;; every log would be inventing exactly the moment this design refuses to invent.
+  (let [dir   (fresh-root)
+        older (chain-up-to "sessions-remember-their-numbers")
+        id    "watched-before-the-numbers"]
+    (with-root
+      dir
+      (fn []
+        (is (= (count older) (db/migrate! older)) "a store one step behind")
+        (with-open [c (raw-connection (home/db-file))]
+          (with-open [st (.createStatement c)]
+            (.execute st (str "INSERT INTO sessions (id, project_id, path, archived, created_at)
+                                 VALUES ('" id "', NULL, NULL, 0, 1)"))))
+        (is (= (db/target-version) (db/migrate!)) "today's harness walks it up")
+        (testing "the column is there"
+          (is (some #(= "numbers" (:name %))
+                    (db/select "PRAGMA table_info(sessions)"))))
+        (testing "and the session that predates it stores nothing rather than a guess"
+          (is (nil? (:numbers (first (db/select "SELECT numbers FROM sessions WHERE id = ?" id)))))
+          (is (nil? (project/numbers-for id))
+              "which the reader answers as 'nothing stored', sending the caller to the fold"))))))

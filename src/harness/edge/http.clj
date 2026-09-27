@@ -794,7 +794,7 @@
 
 ;; THE FACT FAMILY'S WRITER AND THE NUMBERS ITS `model/end` CARRIES (ADR 0006): both are defined
 ;; with the downlink machinery, far below the emitter that calls them.
-(declare family-send! live-numbers-slice)
+(declare family-send! live-numbers-slice numbers-snapshot)
 
 (defn speaks-for-a-person?
   "Whether MESSAGE is something A PERSON said, as the record spells it: a `user` message whose
@@ -1857,6 +1857,15 @@
                         ;; began'. `set-fold-value!` is the door an on-demand consumer comes
                         ;; through, and the write stream takes it from here.
                         (sessions/set-fold-value! thread-id :turn (turn/state-init)))
+                      ;; AND THE NUMBERS ARE WRITTEN ONE LAST TIME FOR THIS RUN, HERE AND NOT AT
+                      ;; THE TERMINAL FRAME (ticket 01 of `.scratch/session-numbers-in-the-store`):
+                      ;; the returned tail has just landed (`log-messages!` above), and the context
+                      ;; split is counted from the tail -- so a snapshot taken at the terminal
+                      ;; frame would be the one the old `reload`-after-the-run existed to correct.
+                      ;; A session this process does not hold writes nothing (`numbers-snapshot`
+                      ;; answers nil).
+                      (when-some [snap (numbers-snapshot thread-id)]
+                        (project/remember-numbers! thread-id snap))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -1878,12 +1887,29 @@
                                 (family-send!
                                  thread-id
                                  (cond-> {:type kind :seq offset}
-                                   (= "model/start" kind) (assoc :payload payload)
+                                   ;; THE START CARRIES THEM TOO, and that is the whole point of
+                                   ;; the `:start` phase: the request has just gone out, so the
+                                   ;; strip can be initialized (counts, zeroes, and the estimate
+                                   ;; of what was sent) instead of drawing nothing until the
+                                   ;; vendor answers. See `initial-numbers`.
+                                   (= "model/start" kind) (assoc :payload payload
+                                                                :numbers (live-numbers-slice
+                                                                          thread-id :start))
                                    ;; THE NUMBERS RIDE ON THE END, and they are the session's own
                                    ;; folds at this moment -- ADR 0006 decision 8: the fold has to
                                    ;; be in memory for this to have anything to say.
                                    (= "model/end" kind) (assoc :payload payload
-                                                              :numbers (live-numbers-slice thread-id))))))
+                                                              :numbers (live-numbers-slice thread-id))))
+                                ;; AND THE STORE IS TOLD THE SAME THING, AFTER THE PUSH (ticket 01
+                                ;; of `.scratch/session-numbers-in-the-store`): the snapshot the
+                                ;; strip's FIRST read answers from is written at the one moment a
+                                ;; fold has just moved -- no timer, nothing folded twice -- and it
+                                ;; is written after the frame so that a store that refuses cannot
+                                ;; swallow a frame the client is waiting for. Both readings come
+                                ;; from the same folds, so they cannot disagree.
+                                (when (= "model/end" kind)
+                                  (when-some [snap (numbers-snapshot thread-id)]
+                                    (project/remember-numbers! thread-id snap)))))
                             ;; WHAT THE RUN IS DOING, KEPT FOR THE WAY OUT. Only the
                             ;; close handler and the drop warning read it, and both
                             ;; are read when the run is over -- a run that stops
@@ -3353,6 +3379,36 @@
 ;; read: a plain `declare` rather than moving it up, because the live answer reads like the
 ;; fallback it guards -- the record read comes second, only when there is no live answer.
 (declare live-numbers)
+(defn- fold-requested?
+  "Does this stats request ask for the RECORD's own fold rather than the stored snapshot?
+  `?fold=1` is that question. IT IS THE REPAIR DOOR: the stored numbers are a last-known
+  snapshot of a fold, so a record that disagrees with it -- edited by hand, or rebuilt --
+  can be asked about directly, and a test can compare the two. The answer is NOT written
+  back: a GET writes nothing, here as everywhere else on this edge."
+  [req]
+  (= "1" (get (query-params (:query-string req)) "fold")))
+
+(defn- numbers-snapshot
+  "THREAD-ID's numbers as the store would keep them: the folds this process holds, minus the
+  two keys that are facts about a READ rather than numbers, plus WHEN the snapshot was taken.
+
+  WHAT IS LEFT OUT, and why it is not a detail:
+
+    - `:pressure` is the edge's pre-flight estimate of the NEXT request
+      (`harness.edge.pressure`) -- a fact about a request nobody has made yet, so a stored
+      one would be a lie the moment it was written. Nothing in the client reads it (it is
+      not on `StatsPayload`).
+    - `:incomplete` is 'the record's last frame is not terminal' AS OF A READ
+      (`harness.edge.stats`). A snapshot cannot know it: the run it describes may have
+      finished since, and the next reader would be told about a moment that is over. It is
+      the one key a stored answer deliberately lacks, and `stats-get`'s docstring says so.
+
+  NIL when this process does not hold the conversation, which is what makes both writers
+  no-ops for a session another process is serving."
+  [thread-id]
+  (when-some [live (live-numbers thread-id)]
+    (assoc (dissoc live :pressure :incomplete) :numbersAt (System/currentTimeMillis))))
+
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
   (harness.edge.stats): turns, model calls, what those calls reported, how much of
@@ -3371,7 +3427,9 @@
 
   THE ANSWER IS THE WHOLE ANSWER: what the fold could not establish is ABSENT, not
   zero (see harness.edge.stats/records->stats). The client renders the gaps by
-  leaving them out; it does not fill them in.
+  leaving them out; it does not fill them in. That is also why the stored answer has no
+  `:incomplete`: the record's last frame is not something a snapshot can know, and the store
+  does not pretend to (a reader that needs it asks `?fold=1`).
 
   AND IT CARRIES THE CONTEXT SECTION (harness.edge.context): how full the model's
   window is right now and what filled it. One question per fold, one read of the
@@ -3380,8 +3438,18 @@
   moments of the same log. The composer's own contract (mount / session change /
   assistant message added / run over) is what asks, and asking once asks both.
 
+  THREE SOURCES, IN THIS ORDER (ticket 01 of `.scratch/session-numbers-in-the-store`), and
+  the order is what the route's cost is: THE LIVE FOLDS when this process holds the
+  conversation (no file at all), then THE STORE ROW (`sessions.numbers`, one SELECT, written
+  at every `model/end` and at every `:run/done` by this same edge), and finally THE RECORD --
+  which is now the REPAIR path rather than the ordinary one: it answers when there is no row
+  (a session nobody has watched, or a store that predates the column) and when the caller
+  asks for it with `?fold=1`. A stored answer carries `:numbersAt`, the moment it was taken,
+  because it is a LAST KNOWN value and not a live one; the live and folded answers carry no
+  such key, since they are read at the moment they are sent.
+
   IT ASKS THE SESSION FOR THE RECORD (ticket 05): the READ half of a session's two streams
-  locates the log, walks the tree and drops a torn tail, so this route no longer opens the
+  locates the log, walks the tree and drops a torn tail, so the folding path never opens the
   file itself. What it then folds are facts ABOUT THE RECORD -- which model a call went to,
   what the vendor reported, where the gaps are -- and the rows are the session's to give.
   `:behind` is the other half, and it is the session's too: the number of lines the writer
@@ -3389,15 +3457,22 @@
   line and for the same reason -- a `:behind 0` would be a field nobody reads). A count that
   is there is a warning that the numbers below it are that many record lines short of the
   conversation."
-  [stem]
+  [req stem]
   ;; THE LIVE ANSWER FIRST, and it is the whole of ticket 01: a session this process holds has
   ;; both folds on it (installed at birth above), so answering reads no file -- no locate, no
-  ;; walk, no torn tail. A session this process does NOT hold has no folds, and `live-numbers`
-  ;; answers nil, which sends the read below to the record exactly as it always did.
+  ;; walk, no torn tail.
   (if-some [live (live-numbers stem)]
     (api-response 200 (cond-> (assoc live :threadId stem)
                         (pos? (record/pending-count stem))
                         (assoc :behind (record/pending-count stem))))
+    ;; ...THEN THE STORE (`sessions-remember-their-numbers`), which is what makes the FIRST
+    ;; read of a session nobody here holds ONE SELECT instead of a walk of the whole record.
+    ;; The stored value is a LAST KNOWN snapshot and says when it was taken (`:numbersAt`), so
+    ;; a reader can judge it; `?fold=1` asks for the record's own word instead (the repair
+    ;; door, and the door a test compares through). A GET STILL WRITES NOTHING, whichever
+    ;; door was used -- that rule is older than this column (`docs/rules/panel-data.md`).
+    (if-some [stored (when-not (fold-requested? req) (project/numbers-for stem))]
+      (api-response 200 (assoc stored :threadId stem))
     (let [read (sessions/read-records stem)]
     (cond
       (some? (:missing read))
@@ -3417,7 +3492,7 @@
           (api-response 400 {:error (:error folded) :threadId stem})
           (let [behind (record/pending-count stem)]
             (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                                (pos? behind) (assoc :behind behind))))))))))
+                                (pos? behind) (assoc :behind behind)))))))))))
 (defn- live-numbers
   "THREAD-ID's numbers as THIS PROCESS holds them -- the stats payload, the context section and
   the meter's band, all from the folds the session installed at birth -- or NIL, which is 'this
@@ -4239,28 +4314,98 @@
   [ch frame]
   (try (hk/send! ch (json/write-str frame)) (catch Throwable _ nil)))
 
+(defn- initial-numbers
+  "THE NUMBERS A CONVERSATION STARTS WITH, for the moment its first request has just gone out
+  and nothing has reported anything yet: the fold's counts as they stand, `0` for the vendor's
+  cache share and for the rate, and an ESTIMATE of the tokens that request carries -- which is
+  what `harness.edge.pressure`'s band already measures (it prices the request an edge has
+  assembled, and at a call's start that request is the one on its way to the vendor). The
+  payload is marked `:estimated`, so a client draws the estimate as one (see `statsCells`).
+
+  THE OWNER ASKED FOR THIS (2026-09-27), and it is worth writing down as a DELIBERATE
+  EXCEPTION to this repo's oldest rule about numbers -- 'not reported is not zero' -- because a
+  strip that draws nothing until the first vendor reply is a strip that looks broken for as
+  long as the first call takes. What makes the exception honest rather than a lie is that the
+  estimate is MARKED as one: the zeroes are the truth about the vendor (it has reported
+  nothing), and the token figures say what was SENT, which is a fact about this moment and not
+  a guess about the vendor.
+
+  BASE IS `owned-numbers` OF THE FOLD'S ANSWER -- the keys a push owns and nothing else, so
+  this cannot leak a read-fact (`:incomplete`) onto the wire by passing a bigger map in. BAND is
+  the pressure band at this moment."
+  [base band]
+  (let [tokens (:pressureTokens band)]
+    (cond-> (assoc base :cacheHitPercent 0 :outputTokensPerSecond 0 :estimated true)
+      (number? tokens)
+      (assoc :usage {:totalTokens tokens}
+             :context (cond-> {:usedTokens tokens}
+                        (number? (:windowTokens band))
+                        (assoc :windowTokens (:windowTokens band)
+                               :percent (:percent band)))))))
+
+(defn- owned-numbers
+  "THE KEYS A PUSH OWNS, out of the fold's whole answer: the numbers a fold can move, and none
+  of the facts about a READ (`:incomplete`, `:pressure`). One place, so the two phases of a
+  call cannot disagree about what a push is allowed to say -- see `live-numbers-slice`."
+  [n]
+  (cond-> {}
+    ;; THE FLAG IS ALWAYS ON THE WIRE, both ways: an end-phase push says `false` out loud so that
+    ;; merging it over a `:start` push REPLACES the estimate rather than leaving a stale mark on
+    ;; a measured number (`withPushedNumbers` is a spread, and a key nobody sends is a key that
+    ;; stays).
+    true (assoc :estimated false)
+    (contains? n :turns) (assoc :turns (:turns n))
+    (contains? n :steps) (assoc :steps (:steps n))
+    (contains? n :usage) (assoc :usage (:usage n))
+    (contains? n :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent n))
+    (contains? n :outputTokensPerSecond)
+    (assoc :outputTokensPerSecond (:outputTokensPerSecond n))
+    (seq (:context n)) (assoc :context (:context n))))
+
 (defn- live-numbers-slice
-  "The slice of `live-numbers` that `model/end` puts on the wire (ADR 0006 decision 4): the
-  session's numbers AT THIS MOMENT -- how many calls so far, what they reported, how fast the
-  answers came, and the context ring's four fields.
+  "The slice of `live-numbers` that the `model/*` facts put on the wire (ADR 0006 decision 4):
+  the session's numbers AT THIS MOMENT -- how many turns, how many calls so far, what they
+  reported, how fast the answers came, and the context ring's four fields.
+
+  PHASE IS WHICH END OF A CALL THIS IS, and it decides ONE thing: at `:start` with nothing yet
+  reported by the vendor, the payload is `initial-numbers` -- the counts, zeroes for cache and
+  rate, and the ESTIMATE of the request that just went out (see that function, and the owner's
+  decision recorded there). Anywhere else the fold's own answer is sent as it stands, absent
+  keys included.
 
   WHY A SLICE RATHER THAN THE WHOLE PAYLOAD: the wire's fact is about a MODEL CALL, while the
   pressure band (the third fold `live-numbers` carries) is the edge's own pre-flight estimate --
   a different question, answered by a different reader. Narrowing here keeps 'one key does not
   mean two things' true across the two families.
 
+  `:turns` RIDES ALONG TOO, and it is here because of WHEN the first push of a session goes
+  out: the strip under the composer has no snapshot yet at the first `model/end` of a
+  conversation somebody has just started, and a payload with no turn count used to draw the
+  RAW KEY `stats.turns` instead of a number (a plural lookup with NO count is not a plural
+  lookup at all, so the catalog answered with the key itself -- measured 2026-09-27). It is the same fold's
+  answer as the snapshot's, sent a moment earlier, so this is not a second clock; it is the
+  existing one arriving in time to be drawn. ('A turn is counted where a run is opened' is
+  still true -- by this moment it HAS opened, which is why the fold has the count to give.)
+
   NIL WHEN THIS PROCESS HOLDS NOTHING, and the caller then sends NO numbers rather than zeroes:
-  'not reported' is not zero, which is `harness.edge.stats`'s oldest rule."
-  [stem]
-  (when-some [n (live-numbers stem)]
-    (let [s (:stats n)]
-      (cond-> {}
-        (contains? s :steps) (assoc :steps (:steps s))
-        (contains? s :usage) (assoc :usage (:usage s))
-        (contains? s :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent s))
-        (contains? s :outputTokensPerSecond)
-        (assoc :outputTokensPerSecond (:outputTokensPerSecond s))
-        (seq (:context n)) (assoc :context (:context n))))))
+  'not reported' is not zero, which `harness.edge.stats`'s oldest rule.
+
+  IT READS `live-numbers`' OWN SHAPE, and that sentence is here because the first version did
+  not: it looked under `(:stats n)` for numbers that `live-numbers` returns FLAT (`stats-answer`
+  assoc'd with `:context` and `:pressure`). Every key was therefore missing from a payload that
+  was present, the slice was `{}`, and `model/end` had been pushing AN EMPTY MAP since the day
+  it was written -- invisible while a snapshot was in hand (merging `{}` changes nothing), and
+  the reason a page that had only ever been PUSHED drew a raw catalog key instead of a number
+  (measured 2026-09-27). One shape, read as itself."
+  ([stem] (live-numbers-slice stem :end))
+  ([stem phase]
+   (when-some [n (live-numbers stem)]
+     (let [base (owned-numbers n)]
+       (if (and (= :start phase) (zero? (long (or (:stepsWithUsage n) 0))))
+         ;; NOTHING REPORTED YET: this is the conversation's opening request (or one whose
+         ;; vendor has told us nothing), and the strip is initialized rather than left blank.
+         (initial-numbers base (:pressure n))
+         base)))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
@@ -5612,7 +5757,7 @@
         [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
-        [:get "stats"]    (stats-get stem)
+        [:get "stats"]    (stats-get req stem)
         [:get "jobs"]    (jobs-get stem)
         [:post "jobs"]   (jobs-post req stem)
         [:get "trajectory"] (trajectory-get req stem)

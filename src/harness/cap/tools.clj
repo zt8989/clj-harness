@@ -328,7 +328,7 @@
   the shell.
 
   A timeout is not an error: the command's own output is returned, with the limit
-  appended in the same shape a non-zero exit gets. The model learns what happened and
+  appended where every answer's ending goes. The model learns what happened and
   can try something narrower -- the same judgement `cap.git` makes about a git that
   hung ('a fact the caller may want to report').
 
@@ -369,25 +369,25 @@
                                                             (fn [p]
                                                               (when-let [stop kernel-tools/*stop*]
                                                                 (reset! stop #(shell/stop-tree! p))))})
-        ;; THE ENDING IS ONE FACT, WRITTEN ONCE. Below the budget the answer's
-        ;; shape is exactly what it was (`[exit N]` only for a non-zero one); when
-        ;; the output did not fit, the record ends on this line and so does the
-        ;; answer, so the two can never disagree about how the command ended.
+        ;; THE ENDING IS ONE FACT, WRITTEN ONCE -- AND ALWAYS. Every answer ends on how
+        ;; the command ended, `[exit 0]` included: a successful command and a command
+        ;; that is not talking any more used to look alike, and the over-budget answer
+        ;; was the only one that said which it was. A reader now never has to guess,
+        ;; and the record and the answer carry the same sentence.
         ending (cond stopped (str "[timed out after " limit "ms — the command was stopped]")
-                     (not (zero? exit)) (str "[exit " exit "]"))
+                     :else (str "[exit " exit "]"))
         out*  (jobs/tail-within-budget out jobs/answer-budget-bytes)
         err*  (jobs/tail-within-budget err jobs/answer-budget-bytes)
         body  (str (:text out*) (:text err*))]
     (if (and (zero? (:omitted out*)) (zero? (:omitted err*)))
       (str (if (str/blank? body) "(no output)" body)
-           (when ending (str "\n" ending)))
+           "\n" ending)
       ;; Over budget: the whole of it goes to a record, the answer keeps the tail of
       ;; each stream -- they are counted separately, so a single line of stderr is
       ;; never squeezed out by a loud stdout -- and the bytes left out are said out
       ;; loud, per stream, next to where the rest can be read.
-      (let [ending (or ending "[exit 0]")
-            path   (jobs/spill! kernel-tools/*thread-id*
-                                (record-text out err ending))]
+      (let [path (jobs/spill! kernel-tools/*thread-id*
+                              (record-text out err ending))]
         (str body
              (when (pos? (:omitted out*))
                (str "\n" (jobs/truncation-line (:omitted out*) path "stdout")))

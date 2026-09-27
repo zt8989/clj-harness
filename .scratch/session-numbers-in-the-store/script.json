@@ -1,0 +1,8 @@
+{"turns": [
+  {"content": "", "tool-calls": [{"id": "c1", "name": "bash", "arguments": {"command": "sleep 5"}}],
+   "usage": {"prompt_tokens": 12000, "completion_tokens": 30, "total_tokens": 12030,
+             "prompt_tokens_details": {"cached_tokens": 0}}},
+  {"content": "（脚本厂商的回答：第二轮带上缓存命中，便于看首屏估算与到货数字的差别。）",
+   "usage": {"prompt_tokens": 13000, "completion_tokens": 40, "total_tokens": 13040,
+             "prompt_tokens_details": {"cached_tokens": 9000}}}
+]}

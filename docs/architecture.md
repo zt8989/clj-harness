@@ -114,8 +114,9 @@
 6. **[projects](architecture/projects.md)** — 项目、会话、绑定、围栏
 7. **[hooks](architecture/hooks.md)** — 27 个点、契约、三个来源、会话 overlay、`SystemPrompt` 与内建的两条行、eval 与晋升
 8. **[skills-and-instructions](architecture/skills-and-instructions.md)** — 一场会话开场拿到什么：指令文件、技能清单、`skill` 工具（结果即正文）、人的 `/name` 的派生正文、围栏里的技能根
-9. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
-10. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
+9. **[system-prompt](architecture/system-prompt.md)** — 一场会话的 system message 从头到尾是什么样：冻结的开头、每次 run 派生的三块、只进一次的开场段
+10. **[mcp](architecture/mcp.md)** — 外部服务器：声明、连接、桥接、elicitation、账本与界面
+11. **[client](architecture/client.md)** — TypeScript 前端：运行时、侧边栏、审批门、样式体系、测试
 
 ## 验证
 

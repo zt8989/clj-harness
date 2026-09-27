@@ -11,6 +11,7 @@
     "steps_other": "{{count}} steps",
     "rate": "{{value}} tok/s",
     "total": "{{value}} tok",
+    "totalEstimated": "~{{value}} tok",
     "cached": "{{value}}% cached"
   },
   "context": {

@@ -137,7 +137,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存（**有 run 正在跑时读记录**，见下），不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
 | `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一轮一行，`fold-trajectory` 折完一轮就吐一轮 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
-| `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的记录折出来的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读） |
+| `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度 + 上下文圈）。**三个来源按序**：进程内持有该会话时读它的活折；否则读 `sessions.numbers`（**一次 SELECT**，快照带 `:numbersAt` 说明它是哪个时刻写的）；都没有才折记录。`?fold=1` 强制折记录（修复/对照用的门）。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读，且**从不写**） |
 | `/api/threads/<stem>/jobs` | GET | **本进程为这一场跑着的后台作业**：id、命令、状态、起点、记录的路径。读的是**进程内的作业注册表**，不是日志——没有作业、或作业随上一个进程死掉，都是 `:jobs []`（**不 404**）；状态就是记录末行（`[running]` / `[exit N]` / `[stopped]`，与 `job_output` 同一处出处） | 无（只读） |
 | `/api/threads/<stem>/jobs` | POST | **人从面板停掉一条**：body `{job}`。停的是同一处（`cap.jobs/stop!`），但发起人是**人**——不认领「告知」，改在条目标 `:stopped-by`，于是下一通调用前多一条 `by="user"` 的注入。未知 id 是既有的 `unknown-job`（404）、坏 body 400；不带审批（照 `cancel`） | 无 |
 | `/api/projects` | GET | 侧边栏的数据，**两块一次给全**：`{projects: [每个项目 + 它的会话], tasks: [未绑定的会话，平铺]}`。任务 = 库里没有项目**且不记得任何目录**的会话。**每一行都只由库回答**：`firstUserText`（`sessions.title`，第一次收到消息的那次 run 写的、**只写一次**）、`lastSentAt`（`sessions.last_sent_at`，**每一次 run 的动作到达时重写**）、`archived`、归属；排序按 `lastSentAt` 降序、NULL 沉底。唯一不是库的是 `running`（进程内的 live-runs 注册表）。这里**不再 stat 任何日志**：体积与 mtime 都退场了，也不再为任务走那棵树——刷新从此是一次 SELECT 加一次注册表查（`.scratch/store-backed-sidebar/spec.md`） | 无 |
@@ -215,7 +215,13 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 见 [client](client.md)）。
 **它容忍半行**：日志的最后一行可能正在被写，那行丢掉、其余照折——条子最常被问的时刻正是会话跑着的时候。
 （`replay` 相反：重建宁可整个拒绝，因为少一截的对话比没有更坏。）
-**它不写任何东西**，所以它是这条形状上唯一一个 GET；同一个 stem 问多少次都只是再读一遍日志。
+**它不写任何东西**，所以同一个 stem 问多少次都只是再读一遍——**读也不写库**，这条规矩比这张表老
+（`docs/rules/panel-data.md`）：那些数由**运行自己**在 `model/end` 与 `:run/done` 两个写点上落进
+`sessions.numbers`（`.scratch/session-numbers-in-the-store`，票 01），读侧只是把行读出来。
+**所以「首次一次 SELECT」是这份统计的常规成本**：页面上打开一场别处正在服务的会话，不再走一遍日志。
+**快照是「上次已知」不是「现在」**，答案带着 `:numbersAt`；`?fold=1` 是那扇「我不信这行，给我记录自己的
+答案」的门（也不写回）。**`:incomplete` 只有折那一侧答得出来**（它是「这次读到的最后一帧是不是终局」），
+快照没有它——两个读者各自说得出什么，就说得出什么。
 「这份日志完了没有」是**两个读者共用的一条规则**（`stats/incomplete?`），不是各算一遍。
 
 **同一个载荷里还带着 `context` 那一节**（`harness.edge.context`，见 [client](client.md) 里那颗圈）：
