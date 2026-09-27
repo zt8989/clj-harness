@@ -121,6 +121,12 @@ function useSessionNumbers(threadId: string): SessionNumbersValue {
   // -- so without this ask the ring would keep a single-coloured arc, and the panel
   // would keep an empty one, until the NEXT run. NOT POLLING: it is one ask per run,
   // and a run that never ends asks nothing.
+  //
+  // AND THE SERVER WRITES ITS OWN SNAPSHOT AT `:run/done` TOO (ticket 01 of
+  // `.scratch/session-numbers-in-the-store`), which is why this ask is cheap as well as
+  // necessary: by the time it goes out (400ms) the row it reads is the one taken after
+  // the tail landed -- the same numbers, one SELECT (or the process's own folds, when
+  // this page's server holds the session).
   const wasRunning = useRef(false);
   useEffect(() => {
     const ended = wasRunning.current && !isRunning;

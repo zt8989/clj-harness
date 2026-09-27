@@ -137,7 +137,13 @@ export interface StatsPayload {
   };
   cacheHitPercent?: number;
   outputTokensPerSecond?: number;
-  incomplete: boolean;
+  /// WHETHER THE RECORD'S LAST FRAME IS TERMINAL -- and OPTIONAL, unlike the rest of this
+  /// payload's facts, because it is a fact about a READ and not a number: only the fold can
+  /// answer it. The stored snapshot the strip usually starts from cannot (a run may have
+  /// ended since it was written), so that answer leaves the key out rather than guessing;
+  /// a reader that needs it asks the fold (`?fold=1` on the stats route). Nothing draws it
+  /// today -- the trajectory payload has its own (`lib/trajectory.ts`).
+  incomplete?: boolean;
   /// HOW FULL THE MODEL'S WINDOW IS, beside the session's totals above.
   ///
   /// IT IS NOT A SIXTH CELL OF THE STRIP: it answers a different question -- what the

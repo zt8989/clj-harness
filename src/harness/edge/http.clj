@@ -728,7 +728,7 @@
 
 ;; THE FACT FAMILY'S WRITER AND THE NUMBERS ITS `model/end` CARRIES (ADR 0006): both are defined
 ;; with the downlink machinery, far below the emitter that calls them.
-(declare family-send! live-numbers-slice)
+(declare family-send! live-numbers-slice numbers-snapshot)
 
 (defn speaks-for-a-person?
   "Whether MESSAGE is something A PERSON said, as the record spells it: a `user` message whose
@@ -1785,6 +1785,15 @@
                         ;; began'. `set-fold-value!` is the door an on-demand consumer comes
                         ;; through, and the write stream takes it from here.
                         (sessions/set-fold-value! thread-id :turn (turn/state-init)))
+                      ;; AND THE NUMBERS ARE WRITTEN ONE LAST TIME FOR THIS RUN, HERE AND NOT AT
+                      ;; THE TERMINAL FRAME (ticket 01 of `.scratch/session-numbers-in-the-store`):
+                      ;; the returned tail has just landed (`log-messages!` above), and the context
+                      ;; split is counted from the tail -- so a snapshot taken at the terminal
+                      ;; frame would be the one the old `reload`-after-the-run existed to correct.
+                      ;; A session this process does not hold writes nothing (`numbers-snapshot`
+                      ;; answers nil).
+                      (when-some [snap (numbers-snapshot thread-id)]
+                        (project/remember-numbers! thread-id snap))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -1811,7 +1820,17 @@
                                    ;; folds at this moment -- ADR 0006 decision 8: the fold has to
                                    ;; be in memory for this to have anything to say.
                                    (= "model/end" kind) (assoc :payload payload
-                                                              :numbers (live-numbers-slice thread-id))))))
+                                                              :numbers (live-numbers-slice thread-id))))
+                                ;; AND THE STORE IS TOLD THE SAME THING, AFTER THE PUSH (ticket 01
+                                ;; of `.scratch/session-numbers-in-the-store`): the snapshot the
+                                ;; strip's FIRST read answers from is written at the one moment a
+                                ;; fold has just moved -- no timer, nothing folded twice -- and it
+                                ;; is written after the frame so that a store that refuses cannot
+                                ;; swallow a frame the client is waiting for. Both readings come
+                                ;; from the same folds, so they cannot disagree.
+                                (when (= "model/end" kind)
+                                  (when-some [snap (numbers-snapshot thread-id)]
+                                    (project/remember-numbers! thread-id snap)))))
                             ;; WHAT THE RUN IS DOING, KEPT FOR THE WAY OUT. Only the
                             ;; close handler and the drop warning read it, and both
                             ;; are read when the run is over -- a run that stops
@@ -3271,6 +3290,36 @@
 ;; read: a plain `declare` rather than moving it up, because the live answer reads like the
 ;; fallback it guards -- the record read comes second, only when there is no live answer.
 (declare live-numbers)
+(defn- fold-requested?
+  "Does this stats request ask for the RECORD's own fold rather than the stored snapshot?
+  `?fold=1` is that question. IT IS THE REPAIR DOOR: the stored numbers are a last-known
+  snapshot of a fold, so a record that disagrees with it -- edited by hand, or rebuilt --
+  can be asked about directly, and a test can compare the two. The answer is NOT written
+  back: a GET writes nothing, here as everywhere else on this edge."
+  [req]
+  (= "1" (get (query-params (:query-string req)) "fold")))
+
+(defn- numbers-snapshot
+  "THREAD-ID's numbers as the store would keep them: the folds this process holds, minus the
+  two keys that are facts about a READ rather than numbers, plus WHEN the snapshot was taken.
+
+  WHAT IS LEFT OUT, and why it is not a detail:
+
+    - `:pressure` is the edge's pre-flight estimate of the NEXT request
+      (`harness.edge.pressure`) -- a fact about a request nobody has made yet, so a stored
+      one would be a lie the moment it was written. Nothing in the client reads it (it is
+      not on `StatsPayload`).
+    - `:incomplete` is 'the record's last frame is not terminal' AS OF A READ
+      (`harness.edge.stats`). A snapshot cannot know it: the run it describes may have
+      finished since, and the next reader would be told about a moment that is over. It is
+      the one key a stored answer deliberately lacks, and `stats-get`'s docstring says so.
+
+  NIL when this process does not hold the conversation, which is what makes both writers
+  no-ops for a session another process is serving."
+  [thread-id]
+  (when-some [live (live-numbers thread-id)]
+    (assoc (dissoc live :pressure :incomplete) :numbersAt (System/currentTimeMillis))))
+
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
   (harness.edge.stats): turns, model calls, what those calls reported, how much of
@@ -3289,7 +3338,9 @@
 
   THE ANSWER IS THE WHOLE ANSWER: what the fold could not establish is ABSENT, not
   zero (see harness.edge.stats/records->stats). The client renders the gaps by
-  leaving them out; it does not fill them in.
+  leaving them out; it does not fill them in. That is also why the stored answer has no
+  `:incomplete`: the record's last frame is not something a snapshot can know, and the store
+  does not pretend to (a reader that needs it asks `?fold=1`).
 
   AND IT CARRIES THE CONTEXT SECTION (harness.edge.context): how full the model's
   window is right now and what filled it. One question per fold, one read of the
@@ -3298,8 +3349,18 @@
   moments of the same log. The composer's own contract (mount / session change /
   assistant message added / run over) is what asks, and asking once asks both.
 
+  THREE SOURCES, IN THIS ORDER (ticket 01 of `.scratch/session-numbers-in-the-store`), and
+  the order is what the route's cost is: THE LIVE FOLDS when this process holds the
+  conversation (no file at all), then THE STORE ROW (`sessions.numbers`, one SELECT, written
+  at every `model/end` and at every `:run/done` by this same edge), and finally THE RECORD --
+  which is now the REPAIR path rather than the ordinary one: it answers when there is no row
+  (a session nobody has watched, or a store that predates the column) and when the caller
+  asks for it with `?fold=1`. A stored answer carries `:numbersAt`, the moment it was taken,
+  because it is a LAST KNOWN value and not a live one; the live and folded answers carry no
+  such key, since they are read at the moment they are sent.
+
   IT ASKS THE SESSION FOR THE RECORD (ticket 05): the READ half of a session's two streams
-  locates the log, walks the tree and drops a torn tail, so this route no longer opens the
+  locates the log, walks the tree and drops a torn tail, so the folding path never opens the
   file itself. What it then folds are facts ABOUT THE RECORD -- which model a call went to,
   what the vendor reported, where the gaps are -- and the rows are the session's to give.
   `:behind` is the other half, and it is the session's too: the number of lines the writer
@@ -3307,15 +3368,22 @@
   line and for the same reason -- a `:behind 0` would be a field nobody reads). A count that
   is there is a warning that the numbers below it are that many record lines short of the
   conversation."
-  [stem]
+  [req stem]
   ;; THE LIVE ANSWER FIRST, and it is the whole of ticket 01: a session this process holds has
   ;; both folds on it (installed at birth above), so answering reads no file -- no locate, no
-  ;; walk, no torn tail. A session this process does NOT hold has no folds, and `live-numbers`
-  ;; answers nil, which sends the read below to the record exactly as it always did.
+  ;; walk, no torn tail.
   (if-some [live (live-numbers stem)]
     (api-response 200 (cond-> (assoc live :threadId stem)
                         (pos? (record/pending-count stem))
                         (assoc :behind (record/pending-count stem))))
+    ;; ...THEN THE STORE (`sessions-remember-their-numbers`), which is what makes the FIRST
+    ;; read of a session nobody here holds ONE SELECT instead of a walk of the whole record.
+    ;; The stored value is a LAST KNOWN snapshot and says when it was taken (`:numbersAt`), so
+    ;; a reader can judge it; `?fold=1` asks for the record's own word instead (the repair
+    ;; door, and the door a test compares through). A GET STILL WRITES NOTHING, whichever
+    ;; door was used -- that rule is older than this column (`docs/rules/panel-data.md`).
+    (if-some [stored (when-not (fold-requested? req) (project/numbers-for stem))]
+      (api-response 200 (assoc stored :threadId stem))
     (let [read (sessions/read-records stem)]
     (cond
       (some? (:missing read))
@@ -3335,7 +3403,7 @@
           (api-response 400 {:error (:error folded) :threadId stem})
           (let [behind (record/pending-count stem)]
             (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
-                                (pos? behind) (assoc :behind behind))))))))))
+                                (pos? behind) (assoc :behind behind)))))))))))
 (defn- live-numbers
   "THREAD-ID's numbers as THIS PROCESS holds them -- the stats payload, the context section and
   the meter's band, all from the folds the session installed at birth -- or NIL, which is 'this
@@ -5493,7 +5561,7 @@
         [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)
-        [:get "stats"]    (stats-get stem)
+        [:get "stats"]    (stats-get req stem)
         [:get "jobs"]    (jobs-get stem)
         [:post "jobs"]   (jobs-post req stem)
         [:get "trajectory"] (trajectory-get req stem)

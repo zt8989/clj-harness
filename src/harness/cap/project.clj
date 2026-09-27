@@ -45,7 +45,8 @@
   with the session's binding, and this is the only namespace that can see the
   config reader, the binding, and both of their (deliberately pure, deliberately
   project-free) consumers."
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.infra.db :as db]
@@ -480,6 +481,46 @@
   (db/with-transaction
     (fn [^Connection c]
       (db/execute! c "UPDATE sessions SET run_state = 'idle' WHERE run_state = 'running'"))))
+
+;; ---------------------------------------------------- the numbers the strip draws
+;;
+;; THE COLUMN'S WRITER AND ITS READER, beside the entity like every other query over
+;; `sessions`. The numbers themselves are the EDGE's to fold (`harness.edge.stats` /
+;; `harness.edge.context`); this namespace only keeps the last snapshot of them, which
+;; is why the payload crosses this boundary as an opaque map. See
+;; `harness.infra.db/sessions-remember-their-numbers` for why storing a fold is a
+;; decision and what it costs.
+
+(defn remember-numbers!
+  "Record the numbers THREAD-ID's strip draws, as the LAST KNOWN snapshot: PAYLOAD is
+  stored whole as one JSON value (so it may grow keys without a migration), and it is
+  the caller's job to have stamped WHEN it was taken (`:numbersAt`) -- this namespace
+  does not read the clock for it, because the edges that fold the numbers already do.
+
+  A session this home has never heard of is left alone rather than created, the same
+  rule `set-run-state!` follows: a note about a conversation never certifies that the
+  conversation exists."
+  [thread-id payload]
+  (db/with-transaction
+    (fn [^Connection c]
+      (db/execute! c "UPDATE sessions SET numbers = ? WHERE id = ?"
+                   (json/write-str payload) (str thread-id))))
+  nil)
+
+(defn numbers-for
+  "The stored numbers for THREAD-ID, parsed, or NIL when there are none -- either the
+  column was never written for it, or this home has never heard of it. Nil is the
+  ordinary answer for a session nobody has watched, and the reader falls back to
+  folding the record (`harness.edge.http/stats-get`).
+
+  IT IS READ BACK WITH KEYWORD KEYS, which is the shape the fold's payload has: a
+  reader must not be able to tell a stored answer from a folded one except by the
+  `:numbersAt` the stored one carries."
+  [thread-id]
+  (when (some? thread-id)
+    (when-some [stored (:numbers (first (db/select "SELECT numbers FROM sessions WHERE id = ?"
+                                        (str thread-id))))]
+      (json/read-str stored :key-fn keyword))))
 
 (defn remember-send!
   "THE PERSON PRESSED SEND in THREAD-ID's conversation: stamp the time, and let

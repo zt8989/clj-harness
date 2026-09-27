@@ -15,6 +15,8 @@
             [harness.cap.providers :as providers]
             [harness.edge.http :as http]
             [harness.edge.stats :as stats]
+            [harness.cap.project :as project]
+            [harness.infra.db :as db]
             [harness.fake :as fake]
             [harness.test-support :as support]
             [harness.infra.home :as home])
@@ -356,3 +358,78 @@
             resp (.send (HttpClient/newHttpClient) req
                         (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
         (is (= 405 (.statusCode resp)) "GET rebuild is still not a thing")))))
+
+;; ----------------------------------------------------- the stored snapshot (ticket 01)
+
+(deftest the-first-read-of-a-session-nobody-holds-is-one-select
+  ;; TICKET 01 of `.scratch/session-numbers-in-the-store`: the strip's first read answers from
+  ;; `sessions.numbers` -- the snapshot the edge writes at every `model/end` and every
+  ;; `:run/done` -- instead of walking the record.
+  ;;
+  ;; THE PROOF IS A SESSION WITH NO LOG AT ALL. A registered session whose numbers were planted
+  ;; in the store has nothing for the fold to read: the folding path can only answer 404
+  ;; ('nothing found'), so a 200 carrying the planted values can only have come from the row.
+  ;; And the answer says WHEN it was taken, because it is a LAST KNOWN value and not a live one.
+  (let [thread-id "numbers-stored"]
+    (with-server thread-id [{:content "unused"}]
+      (fn [port]
+        (let [payload {:turns 7 :steps 9 :cacheHitPercent 88
+                       :context {:usedTokens 10 :windowTokens 100 :percent 10}
+                       :numbersAt 1790000000000}]
+          (project/remember-numbers! thread-id payload)
+          (let [[status body] (get-json port (str "/api/threads/" thread-id "/stats"))]
+            (is (= 200 status)
+                (str "the stored snapshot answers where the fold has no record: " (:error body)))
+            (is (= thread-id (:threadId body)))
+            (is (= 7 (:turns body)) "the planted numbers, not a fold over nothing")
+            (is (= 9 (:steps body)))
+            (is (= 1790000000000 (:numbersAt body)) "and WHEN they were taken"))
+          (testing "while `?fold=1` still asks the record, and gets its 404"
+            (let [[status body] (get-json port (str "/api/threads/" thread-id "/stats?fold=1"))]
+              (is (= 404 status)
+                  "the repair door does not consult the store -- here there is no record at all")
+              (is (string? (:error body))))))))))
+
+(deftest a-run-writes-the-numbers-the-same-folds-would-answer-with
+  ;; THE CONSISTENCY CRITERION: what the writers store and what the route answers must be the
+  ;; SAME numbers from the SAME folds -- otherwise the first read (a SELECT) and the live read
+  ;; (the folds) would be two truths about one session, which is the failure the whole
+  ;; `sessions.numbers` design rests on avoiding.
+  ;;
+  ;; THE WAIT IS PART OF THE SUBJECT, not test scaffolding: the last write of a run happens at
+  ;; `:run/done`, which the record writer reaches a beat AFTER the terminal frame the client
+  ;; sees -- the very gap the old post-run `GET` existed to cover, and which ticket 01 is
+  ;; supposed to make unnecessary for a PAGE (the push carries the numbers) while the SNAPSHOT
+  ;; still lands one beat later. So the case waits for the snapshot to catch up with the folds
+  ;; the route answers from, and then compares them key for key.
+  (let [thread-id "numbers-written-by-a-run"
+        stored    (fn []
+                    (some-> (:numbers (first (db/select "SELECT numbers FROM sessions WHERE id = ?"
+                                                        thread-id)))
+                            (json/read-str :key-fn keyword)))]
+    (with-server thread-id
+      [{:content "hello"
+        :usage {:prompt_tokens 100 :completion_tokens 20 :total_tokens 120}}]
+      (fn [port]
+        (send-run! port thread-id)
+        ;; ...AND WHICH WRITE IT IS WAITING FOR IS THE `:run/done` ONE, not the `model/end`
+        ;; one: both carry the same `:steps`, so a wait on the count would pass on the
+        ;; MID-RUN snapshot -- the one taken before the returned tail landed, which by design
+        ;; has no `:parts` (the split needs the run's message side). The split is therefore
+        ;; the marker, and it is also the thing the old post-run `GET` existed to fix.
+        (let [deadline (+ (System/currentTimeMillis) 5000)]
+          (while (and (< (System/currentTimeMillis) deadline)
+                      (nil? (get-in (stored) [:context :parts])))
+            (Thread/sleep 25)))
+        (let [stored  (stored)
+              [_ live]   (get-json port (str "/api/threads/" thread-id "/stats"))
+              [_ folded] (get-json port (str "/api/threads/" thread-id "/stats?fold=1"))]
+          (is (some? stored) "the run wrote a snapshot at :run/done")
+          (is (number? (:numbersAt stored)) "and stamped when it was taken")
+          (is (= (dissoc live :pressure :incomplete :threadId)
+                 (dissoc stored :numbersAt))
+              "the stored snapshot and the live folds are the same answer")
+          (let [folded (dissoc folded :threadId :behind :pressure)]
+            (is (= (dissoc stored :numbersAt :incomplete)
+                   (dissoc folded :incomplete))
+                "and the record's own fold agrees with both, key for key")))))))

@@ -689,6 +689,39 @@
   [^Connection c]
   (ddl! c "ALTER TABLE sessions ADD COLUMN run_state TEXT"))
 
+(defn- sessions-remember-their-numbers
+  "Version n -> n+1: `sessions.numbers`, the numbers the strip under the composer draws --
+  `turns`, `steps`, the vendor's cache share, the rate, and the context ring -- as ONE
+  JSON value: the LAST KNOWN snapshot, not a live read.
+
+  WHY A CACHE AND NOT A DERIVATION. Every one of these numbers is a FOLD over the
+  session's record (`harness.edge.stats` and `harness.edge.context`), so the record can
+  always produce them again -- which is exactly what makes storing them a decision worth
+  arguing rather than an obvious win. What it buys is the FIRST READ: `GET
+  /api/threads/<stem>/stats` used to walk the whole jsonl for a payload the strip draws
+  every time a page opens a session, while every change AFTER that already arrives as a
+  push (`model/end` has carried the same numbers since ticket 04b of
+  `.scratch/turn-and-model-events`). With this column the first read of a session nobody
+  is holding is ONE SELECT, and the walk is kept only as the REPAIR path -- the answer
+  when there is no row at all, and `?fold=1` when a reader wants the record's own word.
+
+  WHAT THAT COSTS, stated rather than discovered: a record edited by hand, or a rebuild
+  that changes what the fold sees, can make this column disagree with the record. So the
+  value is 'last known', every answer made from it carries WHEN it was taken
+  (`:numbersAt`), and nothing here is read as 'now' -- the same semantics
+  `sessions-remember-their-run-state` settled for the run state, one column earlier.
+  A row is NEVER backfilled: a store that predates this column has no numbers, reads as
+  'nothing stored', and falls back to the fold -- which is the honest answer, since the
+  column's whole content is a claim about a moment nobody recorded.
+
+  ONE JSON VALUE RATHER THAN A COLUMN PER NUMBER, for the reason `todos.items` is one
+  value: the set of cells GROWS (a cache share, a rate, and the context split all arrived
+  at different times), this column is written and read WHOLE, and it is never queried by
+  element. A column per cell would mean a migration per new cell and a reader that has to
+  know which of them exist -- the same information the JSON already carries in its keys."
+  [^Connection c]
+  (ddl! c "ALTER TABLE sessions ADD COLUMN numbers TEXT"))
+
 (defn- sessions-know-their-subagent
   "Version 2 -> 3: `sessions.parent_id` and `sessions.subagent`.
 
@@ -991,7 +1024,13 @@
    ;; docstring: LAST KNOWN, arriving empty, cleared per process at startup.
    {:name     "sessions-remember-their-run-state"
     :present? #(column? % "sessions" "run_state")
-    :run      sessions-remember-their-run-state}])
+    :run      sessions-remember-their-run-state}
+   ;; AND THE NUMBERS THE STRIP DRAWS, appended for the same reason as every step here:
+   ;; a store written before this column has no memory of it, and the probe is what says
+   ;; whether it needs it. Reading is one SELECT; the record fold stays the repair path.
+   {:name     "sessions-remember-their-numbers"
+    :present? #(column? % "sessions" "numbers")
+    :run      sessions-remember-their-numbers}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."
