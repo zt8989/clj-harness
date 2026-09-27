@@ -24,7 +24,9 @@
   (:require [harness.edge.pressure :as pressure]
             [harness.cap.project :as project]
             [harness.edge.ag-ui :as ag]
-            [harness.edge.replay :as replay]))
+            [harness.edge.replay :as replay]
+            [clojure.data.json :as json]
+            [clojure.string :as str]))
 
 (def summary-instruction
   "What the summarizer is told. It asks for the facts a continuing model needs and for
@@ -32,8 +34,60 @@
   was already decided (including what was tried and failed)."
   "Summarize the conversation above so another model can continue the work from it. Keep
 exact file paths, commands, error strings, identifiers, numbers, function signatures and
-decisions already made, including anything that was tried and failed. Do not invent
-anything. Be concise.")
+decisions already made, including anything that was tried and failed. Then, under a heading
+`Already produced`, list the concrete things this range has produced -- branches and
+worktrees created, files written or edited, anything left uncommitted -- verbatim, because a
+model that cannot see what it already made mistakes its own work for somebody else's. Do
+not invent anything. Be concise.")
+
+(def ^:private shell-productions
+  "The shell shapes that CREATE an artifact a later model must not re-create, as patterns
+  over a command. A short list on purpose: a command that only READS changes nothing, and
+  guessing about the rest would put an invented fact into the summary."
+  [#"(?m)git\s+worktree\s+add\s+(\S+)"
+   #"(?m)git\s+switch\s+-c\s+(\S+)"
+   #"(?m)git\s+checkout\s+-b\s+(\S+)"])
+
+(defn- tool-arguments
+  "CALL's arguments as a map, or nil when they are absent or not JSON (a vendor may hand
+  back a call whose arguments were cut off)."
+  [call]
+  (try
+    (let [a (get-in call [:function :arguments])]
+      (when (string? a) (json/read-str a :key-fn keyword)))
+    (catch Throwable _ nil)))
+
+(defn product-facts
+  "MESSAGES (the model view of the range about to be folded) -> the ARTIFACTS that range has
+  already produced, as a sorted, de-duplicated vector of one-line strings: files written or
+  edited, worktrees and branches created.
+
+  IT IS A PROJECTION OF THE TOOL CALLS, not a summary -- the exact paths and branch names,
+  read off the calls themselves. The summarizer is ALSO asked to write an `Already produced`
+  section (see `summary-instruction`); this is the half that cannot be forgotten, and a
+  caller appends it to the summary request so the two agree on the facts that matter most.
+
+  A `/tmp/...` path is still reported: it is what the call said, and dropping it would be
+  this function deciding what mattered."
+  [messages]
+  (let [calls (for [m    messages
+                    :when (= "assistant" (:role m))
+                    call (:tool_calls m)]
+                call)]
+    (->> calls
+         (mapcat (fn [call]
+                   (let [name (get-in call [:function :name])
+                         args (tool-arguments call)]
+                     (cond
+                       (#{"write" "replace" "insert"} name) [(:path args)]
+                       (= "bash" name)
+                       (mapcat (fn [re] (map second (re-seq re (str (:command args)))))
+                               shell-productions)
+                       :else []))))
+         (remove str/blank?)
+         distinct
+         sort
+         vec)))
 
 (defn check-ratios!
   "Validate a merged compaction pair, or throw naming what is wrong. Split out so the

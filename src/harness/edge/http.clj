@@ -5468,7 +5468,17 @@
                               ;; vendor bills instead of dropping it.
                               (llm/stream! p
                                            (conj (vec (ag/provider-messages messages))
-                                                 {:role "user" :content compaction/summary-instruction})
+                                                 {:role "user"
+                                                  ;; AND THE ARTIFACTS THE RANGE ALREADY
+                                                  ;; PRODUCED ride with the instruction, read
+                                                  ;; off the tool calls (ticket 01: a model
+                                                  ;; that cannot see what it already made
+                                                  ;; mistakes its own work for somebody
+                                                  ;; else's).
+                                                  :content (str compaction/summary-instruction
+                                                                (when-some [facts (seq (compaction/product-facts messages))]
+                                                                  (str "\n\nAlready produced (read off the tool calls above):\n"
+                                                                       (str/join "\n" facts))))})
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)
                           (let [content (:content message)]

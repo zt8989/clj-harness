@@ -39,7 +39,18 @@
 
 | # | 票 | 依赖 |
 |---|---|---|
-| 01 | 摘要记住「已经产出了什么」 | 无 |
+
+## 落地（票 01，2026-09-27）
+
+**摘要与摘要请求都带上「已产出物」。**
+
+- `harness.edge.compaction/summary-instruction` 明确要求摘要写出 `Already produced` 一栏：建/切过的
+  分支与 worktree、写/改过的文件、未提交的改动。
+- `harness.edge.compaction/product-facts`：从被折范围的**工具调用**里投影出产物——`write`/`replace`/
+  `insert` 的 `:path`，`bash` 里 `git worktree add` / `git switch -c` / `git checkout -b` 的目标，
+  排序去重。`harness.edge.http/run-compaction!` 把这份清单附在摘要请求上，和 prompt 那一栏互为兜底
+  （清单是读出来的，不靠 summarizer 的措辞）。
+- 判据：`harness.edge.compaction-test` 的 `the-produced-artifacts-are-read-off-the-tool-calls`。
 | 02 | 压缩只在 step 边界上切 | 无（step-events 已合并到 main） |
 
 ## 落地（票 03，2026-09-27）

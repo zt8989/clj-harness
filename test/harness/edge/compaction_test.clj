@@ -234,3 +234,24 @@
     (is (= 4 (get-in frame [:value :messages])) "and it says how many nodes went into it")
     (is (= (:compactionId result) (:compactionId fact))
         "the answer names the rows it wrote, not a second id")))
+
+(deftest the-produced-artifacts-are-read-off-the-tool-calls
+  ;; ticket 01 of `.scratch/compaction-by-step`: a model that cannot see what the folded
+  ;; range already made mistakes its own work for somebody else's (thread 068fd63f).
+  (let [msgs [{:role "assistant"
+               :tool_calls [{:id "c1" :type "function"
+                             :function {:name "bash"
+                                        :arguments "{\"command\":\"git worktree add .worktrees/x -b x main\"}"}}]}
+              {:role "assistant"
+               :tool_calls [{:id "c2" :type "function"
+                             :function {:name "write"
+                                        :arguments "{\"path\":\"src/a.clj\",\"content\":\"x\"}"}}]}
+              {:role "tool" :content "ok"}
+              {:role "assistant"
+               :tool_calls [{:id "c3" :type "function"
+                             :function {:name "read" :arguments "{\"path\":\"src/b.clj\"}"}}]}]
+        facts (compaction/product-facts msgs)]
+    (is (= [".worktrees/x" "src/a.clj"] facts)
+        "the worktree and the written file; a read produces nothing")
+    (is (= [] (compaction/product-facts [{:role "user" :content "hi"}]))
+        "a range that produced nothing says so by being empty")))
