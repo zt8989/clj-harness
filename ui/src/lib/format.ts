@@ -126,7 +126,15 @@ export function formatMillis(ms: number, t: Translate): string {
 /// `cacheHitPercent` when no call reported the pair), so `undefined` here means
 /// "not reported" and must never be turned into 0.
 export interface StatsPayload {
-  turns: number;
+  /// HOW MANY TURNS THE SESSION HAS RUN -- OPTIONAL, like everything below it, and that took
+  /// a bug to learn. The first payload a page can hold is the PUSH from a run's first
+  /// `model/end`, and the slice a push carries is about that model call; a snapshot has not
+  /// answered yet, so an early build of this shipped payloads with no turn count -- and
+  /// `t("stats.turns", { count: undefined })` is not a plural lookup, so i18next answered with
+  /// the KEY and the strip said `stats.turns` (measured 2026-09-27). Both halves are fixed: the
+  /// server's slice now carries the count, and this type says out loud that a payload may
+  /// arrive without one -- a reader leaves that cell out rather than inventing a zero.
+  turns?: number;
   steps?: number;
   stepsWithUsage?: number;
   usage?: {
@@ -159,7 +167,10 @@ export interface StatsPayload {
 /// of numbers to show, or nothing worth a line yet -- NO CELLS, which is not the same as no
 /// strip: `components/composer-stats.tsx` keeps the row and fills it when these arrive.
 export interface StatsCells {
-  turns: string;
+  /// NULL WHEN THE PAYLOAD DID NOT CARRY A COUNT -- which is a payload that has only ever been
+  /// pushed. The strip draws the cells it has and leaves this one out; what it must NOT do is
+  /// ask the catalog for a plural it cannot form (see `StatsPayload.turns`).
+  turns: string | null;
   steps: string | null;
   rate: string | null;
   total: string | null;
@@ -180,11 +191,15 @@ export interface StatsCells {
 /// can see it.
 export function statsCells(payload: StatsPayload | null, t: Translate): StatsCells | null {
   if (payload === null) return null;
-  if (payload.turns === 0 && payload.steps === undefined) return null;
+  const turns = payload.turns;
+  if ((turns ?? 0) === 0 && payload.steps === undefined) return null;
 
   const total = payload.usage?.totalTokens;
   return {
-    turns: t("stats.turns", { count: payload.turns }),
+    // THE COUNT IS ASKED FOR ONLY WHEN IT IS THERE: a `count` of `undefined` is not a plural
+    // lookup, and i18next answers a missing key with the KEY ITSELF -- the strip said
+    // `stats.turns` on screen until this guard existed.
+    turns: turns === undefined ? null : t("stats.turns", { count: turns }),
     steps: payload.steps === undefined ? null : t("stats.steps", { count: payload.steps }),
     rate:
       payload.outputTokensPerSecond === undefined

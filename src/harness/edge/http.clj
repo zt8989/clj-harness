@@ -4227,26 +4227,43 @@
 
 (defn- live-numbers-slice
   "The slice of `live-numbers` that `model/end` puts on the wire (ADR 0006 decision 4): the
-  session's numbers AT THIS MOMENT -- how many calls so far, what they reported, how fast the
-  answers came, and the context ring's four fields.
+  session's numbers AT THIS MOMENT -- how many turns, how many calls so far, what they
+  reported, how fast the answers came, and the context ring's four fields.
 
   WHY A SLICE RATHER THAN THE WHOLE PAYLOAD: the wire's fact is about a MODEL CALL, while the
   pressure band (the third fold `live-numbers` carries) is the edge's own pre-flight estimate --
   a different question, answered by a different reader. Narrowing here keeps 'one key does not
   mean two things' true across the two families.
 
+  `:turns` RIDES ALONG TOO, and it is here because of WHEN the first push of a session goes
+  out: the strip under the composer has no snapshot yet at the first `model/end` of a
+  conversation somebody has just started, and a payload with no turn count used to draw the
+  RAW KEY `stats.turns` instead of a number (a plural lookup with NO count is not a plural
+  lookup at all, so the catalog answered with the key itself -- measured 2026-09-27). It is the same fold's
+  answer as the snapshot's, sent a moment earlier, so this is not a second clock; it is the
+  existing one arriving in time to be drawn. ('A turn is counted where a run is opened' is
+  still true -- by this moment it HAS opened, which is why the fold has the count to give.)
+
   NIL WHEN THIS PROCESS HOLDS NOTHING, and the caller then sends NO numbers rather than zeroes:
-  'not reported' is not zero, which is `harness.edge.stats`'s oldest rule."
+  'not reported' is not zero, which `harness.edge.stats`'s oldest rule.
+
+  IT READS `live-numbers`' OWN SHAPE, and that sentence is here because the first version did
+  not: it looked under `(:stats n)` for numbers that `live-numbers` returns FLAT (`stats-answer`
+  assoc'd with `:context` and `:pressure`). Every key was therefore missing from a payload that
+  was present, the slice was `{}`, and `model/end` had been pushing AN EMPTY MAP since the day
+  it was written -- invisible while a snapshot was in hand (merging `{}` changes nothing), and
+  the reason a page that had only ever been PUSHED drew a raw catalog key instead of a number
+  (measured 2026-09-27). One shape, read as itself."
   [stem]
   (when-some [n (live-numbers stem)]
-    (let [s (:stats n)]
-      (cond-> {}
-        (contains? s :steps) (assoc :steps (:steps s))
-        (contains? s :usage) (assoc :usage (:usage s))
-        (contains? s :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent s))
-        (contains? s :outputTokensPerSecond)
-        (assoc :outputTokensPerSecond (:outputTokensPerSecond s))
-        (seq (:context n)) (assoc :context (:context n))))))
+    (cond-> {}
+      (contains? n :turns) (assoc :turns (:turns n))
+      (contains? n :steps) (assoc :steps (:steps n))
+      (contains? n :usage) (assoc :usage (:usage n))
+      (contains? n :cacheHitPercent) (assoc :cacheHitPercent (:cacheHitPercent n))
+      (contains? n :outputTokensPerSecond)
+      (assoc :outputTokensPerSecond (:outputTokensPerSecond n))
+      (seq (:context n)) (assoc :context (:context n)))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).

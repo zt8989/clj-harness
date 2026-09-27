@@ -258,12 +258,15 @@ const cases: Case[] = [
       expect(merged.steps).toBe(5);
       expect(merged.context?.usedTokens).toBe(10);
 
-      // AND IT DOES NOT OWN THE REST: a turn is counted where a run is opened, and
-      // 'incomplete' is a fact about the log as the reader found it -- neither is a number a
-      // fold can update, so both stay the snapshot's.
-      expect(merged.turns).toBe(3);
+      // AND WHAT IT DOES NOT CARRY STAYS THE SNAPSHOT'S: 'incomplete' is a fact about the log
+      // as the reader found it, not a number a fold can update.
       expect(merged.incomplete).toBe(false);
       expect(merged.usage?.totalTokens).toBe(100);
+
+      // A PUSH THAT DOES CARRY `turns` REPLACES IT LIKE ANY OTHER NUMBER (`turns` rides the
+      // slice since the follow-up in `.scratch/session-numbers-in-the-store`: the first fact
+      // of a just-started conversation can land before the page's first ask answers).
+      expect((withPushedNumbers(snapshot, { turns: 4, steps: 9 }) as StatsPayload).turns).toBe(4);
 
       // NO PUSH YET IS THE SNAPSHOT (a page that just opened, and no call has ended), and no
       // snapshot yet is the push (the first fact can arrive before the ask answers).
@@ -273,6 +276,36 @@ const cases: Case[] = [
       // NOT REPORTED IS NOT ZERO: a push that carries nothing leaves the snapshot's number
       // where it is rather than blanking it.
       expect((withPushedNumbers(snapshot, {}) as StatsPayload).steps).toBe(4);
+    },
+  },
+
+  {
+    name: "a-payload-that-has-only-been-pushed-leaves-the-turn-cell-out-instead-of-a-raw-key",
+    run: async () => {
+      // THE BUG, PINNED WHERE IT WAS SEEN (2026-09-27): the strip said `stats.turns` on screen.
+      // The first payload of a conversation somebody has just sent in is a PUSH -- the page's
+      // own ask has not answered yet -- and it may arrive without a turn count. `statsCells`
+      // must then leave that cell out (nothing is invented), and it must NOT ask the catalog
+      // for a plural it cannot form: `t("stats.turns", { count: undefined })` is not a plural
+      // lookup, so i18next answers with the key, which is exactly the English text on screen.
+      const pushedOnly = { steps: 2, incomplete: false } as StatsPayload;
+      const cells = statsCells(pushedOnly, en);
+      expect(cells).not.toBeNull();
+      expect(cells?.turns).toBeNull();
+      expect(cells?.steps).toBe("2 steps");
+      expect(JSON.stringify(cells)).not.toContain("stats.turns");
+
+      // AND A COUNT OF ZERO IS STILL A COUNT: an empty session draws "0 turns" rather than
+      // falling into the same branch (the server sends 0 for a session whose record says so).
+      expect(statsCells({ turns: 0, incomplete: false } as StatsPayload, en)).toBeNull();
+      expect(statsCells({ turns: 0, steps: 0, incomplete: false } as StatsPayload, en)?.turns).toBe(
+        "0 turns",
+      );
+
+      // AND THE TWO ARE JOINED BY THE SNAPSHOT, NOT BY A GUESS: once the ask answers, the
+      // turn cell appears with it.
+      const merged = withPushedNumbers({ turns: 3, incomplete: false } as StatsPayload, pushedOnly);
+      expect(statsCells(merged, en)?.turns).toBe("3 turns");
     },
   },
 ];

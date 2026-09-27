@@ -433,3 +433,24 @@
             (is (= (dissoc stored :numbersAt :incomplete)
                    (dissoc folded :incomplete))
                 "and the record's own fold agrees with both, key for key")))))))
+
+(deftest the-push-carries-the-turn-count-and-not-only-the-calls
+  ;; TICKET 01's follow-up, and it is a BUG'S test: `live-numbers-slice` used to omit `:turns`,
+  ;; on the reasoning that a turn is counted where a run is opened while the push is about a
+  ;; model call. True, and beside the point -- a page that has just started a conversation has
+  ;; no snapshot yet at the first `model/end`, so its first payload had no turn count, and
+  ;; `t("stats.turns", { count: undefined })` is not a plural lookup: i18next answered with the
+  ;; KEY and the strip drew `stats.turns` (measured 2026-09-27).
+  ;;
+  ;; The count is the same fold's answer the snapshot carries, sent earlier -- by this moment the
+  ;; run HAS opened, which is why the fold has it to give.
+  (let [thread-id "push-carries-turns"]
+    (with-server thread-id
+      [{:content "hello"
+        :usage {:prompt_tokens 10 :completion_tokens 2 :total_tokens 12}}]
+      (fn [port]
+        (send-run! port thread-id)
+        (let [slice (#'http/live-numbers-slice thread-id)]
+          (is (some? slice) "this process holds the session, so the folds answer")
+          (is (= 1 (:turns slice)) "one user turn, and the push says so")
+          (is (= 1 (:steps slice)) "beside the call count it always carried"))))))

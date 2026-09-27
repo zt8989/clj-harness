@@ -158,13 +158,20 @@ export const ComposerStats: FC = () => {
   const shed = useShedCells(row);
   const gone = new Set<Shed>(GIVE_UP.slice(0, shed));
 
+  /// THE TURN COUNT, read once and only when there is one: it is the cell the stopwatch
+  /// introduces, and both are drawn or neither (`statsCells` answers null when the payload
+  /// carried no count -- see `StatsPayload.turns`).
+  const turns = cells?.turns ?? null;
+
   /// WHAT THE ROW DRAWS: two lists, because their LENGTH is what the give-up rule
   /// changes (see `Group`). A cell the rule took away is not drawn and takes nothing
   /// with it; a cell the record never had is absent for the reason `statsCells` gives.
   const left: ReactNode[] = [];
   const right: ReactNode[] = [];
   if (cells !== null) {
-    if (!gone.has("turns")) left.push(<span data-slot="stats-turns">{cells.turns}</span>);
+    if (turns !== null && !gone.has("turns")) {
+      left.push(<span data-slot="stats-turns">{turns}</span>);
+    }
     if (cells.steps !== null) left.push(<span data-slot="stats-steps">{cells.steps}</span>);
     if (cells.rate !== null && !gone.has("rate")) {
       left.push(<span data-slot="stats-rate">{cells.rate}</span>);
@@ -202,9 +209,10 @@ export const ComposerStats: FC = () => {
     >
       {left.length > 0 && (
         <span className="flex items-center gap-1.5">
-          {/* The stopwatch introduces the turn count, so it goes when that count does:
-              a clock in front of a count of model calls says the wrong thing. */}
-          {!gone.has("turns") && <TimerIcon className="size-3.5 shrink-0" />}
+          {/* The stopwatch introduces the turn count, so it goes when that count does --
+              whether the count was given up for width or was never in the payload: a clock in
+              front of a count of model calls says the wrong thing. */}
+          {turns !== null && !gone.has("turns") && <TimerIcon className="size-3.5 shrink-0" />}
           <Group parts={left} />
         </span>
       )}

@@ -35,12 +35,21 @@ export async function statsFor(threadId: string): Promise<StatsPayload | null> {
 /// They are the same folds -- the server folded them once and answered both -- so the
 /// push is not a second truth, it is the SAME answer arriving sooner.
 ///
-/// WHICH KEYS THE PUSH OWNS, AND WHY NOT ALL OF THEM. `numbers` carries the four cells
-/// and the context ring (`steps` / `usage` / `cacheHitPercent` /
-/// `outputTokensPerSecond` / `context`), and REPLACES them. `turns` is not on it: a turn
-/// is counted where a run is opened, and the push is about a model call.
+/// WHICH KEYS THE PUSH OWNS, AND WHY NOT ALL OF THEM. `numbers` carries the session's
+/// numbers as its folds had them at that moment (`turns` / `steps` / `usage` /
+/// `cacheHitPercent` / `outputTokensPerSecond` / `context`), and REPLACES them.
 /// `incomplete` and `record` are facts about the LOG as the reader found it, not numbers
 /// a fold can update. Everything else stays the snapshot's.
+///
+/// `turns` IS ON THE PUSH NOW, and it arrived because of a bug rather than a plan: the first
+/// fact of a just-started conversation can land BEFORE the page's first ask answers, so the
+/// strip drew a payload with no turn count -- and the cell for it came out as the raw key
+/// `stats.turns` (see `StatsPayload.turns`). The count is the same fold's answer as the
+/// snapshot's, so carrying it is one answer arriving sooner, not a second clock.
+///
+/// AND A PAYLOAD THAT HAS ONLY EVER BEEN PUSHED IS STILL TREATED AS WHAT IT IS -- A PAYLOAD:
+/// the cells it carries are drawn, and a cell it does not carry is left out. The strip never
+/// fills one in (`statsCells`).
 ///
 /// A KEY THE PUSH DOES NOT CARRY IS NOT DELETED: 'not reported' is not zero, and the
 /// strip draws absences by leaving them out (`lib/format.ts`'s `nCells`).

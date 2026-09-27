@@ -461,7 +461,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// is still true is a run in flight, not a stale snapshot. One case replaced them
 /// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
 /// candidates), which is why the count lands one lower rather than two.
-const EXPECTED_CASES = 159;
+/// 164 -> 165 at the merge; 165 -> 166 here... and the one this file's history actually cares
+/// about: the `stats` suite gained a case for a BUG (`.scratch/session-numbers-in-the-store`,
+/// 2026-09-27) -- a payload that had only ever been pushed drew the RAW KEY `stats.turns`,
+/// because the push carried an empty slice and no turn count. The case pins the rule that
+/// replaced it: a cell the payload does not carry is left out, and the catalog is never asked
+/// for a plural with no count.
+const EXPECTED_CASES = 160;
 
 let total = 0;
 for (const suite of SUITES) {
