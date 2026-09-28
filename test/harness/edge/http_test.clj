@@ -982,6 +982,18 @@
            (let [rows (replay/read-records log)]
              (is (= 1 (count (filter replay/header? rows))))
              (is (replay/header? (first rows)) "and it is still the file's first row")))
+         (testing "and a RESTART does not write a second one"
+           ;; owner, 2026-09-28: `headers-written` is PROCESS MEMORY, so a session continued
+           ;; after a restart looked headerless to the new process and got another
+           ;; `record/header` appended in the middle of its own record (measured on a forked
+           ;; session: four of them, one per restart). The file decides now.
+           (http/reset-headers!)
+           (post-run "with-header")
+           (wait-for-recorded log
+                              (fn [ls] (>= (count (filter #(= "RUN_FINISHED" (:type (replay/payload %))) ls)) 3))
+                              5000)
+           (is (= 1 (count (filter replay/header? (replay/read-records log))))
+               "still one header, however many processes have written to this file"))
          (testing "and the fold never saw it"
            (is (= "with-header"
                   (:threadId (:payload (first (filter #(= "event" (replay/kind %))

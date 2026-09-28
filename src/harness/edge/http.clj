@@ -514,16 +514,22 @@
 
 (defn- header-line!
   "THE FIRST LINE OF F, if one is owed: the adapter's payload under the same envelope every row
-  has. The check and the mark are ONE ATOM OPERATION (`swap-vals!`) so two threads of one
-  conversation cannot both conclude the file has no header and write two. Answers the line or
-  nil -- and NOTHING THROWS: a missing header is not a fact a reader stumbles over (it reads the
-  row as the conversation's own first line, as it always has), so the worst case is the old
-  world, not a broken one."
+  has. Answers the line or nil -- and NOTHING THROWS: a missing header is not a fact a reader
+  stumbles over (it reads the row as the conversation's own first line, as it always has), so
+  the worst case is the old world, not a broken one.
+
+  THE FILE IS THE AUTHORITY AND THE ATOM IS ONLY THE LOCK (owner, 2026-09-28).
+  `headers-written` is PROCESS MEMORY, so a session continued after a RESTART looked
+  headerless to the new process and got a SECOND `record/header` appended in the middle of its
+  own record (measured on a forked session: four of them, one per restart). A file that
+  already has bytes is named, whoever wrote them; the atom still makes the check and the
+  write ONE operation, so two threads of one conversation cannot both write one."
   [^java.io.File f]
   (try
-    (let [p   (.getAbsolutePath f)
+    (let [p        (.getAbsolutePath f)
+          on-disk? (and (.exists f) (pos? (.length f)))
           [before _] (swap-vals! headers-written #(if (contains? % p) % (conj % p)))]
-      (when-not (contains? before p)
+      (when (and (not on-disk?) (not (contains? before p)))
         (when-some [payload (@header-fn (str/replace (.getName f) #"\.jsonl$" ""))]
           (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil}
                                       (row-of "record/header" payload)))
