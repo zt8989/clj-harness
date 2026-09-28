@@ -240,6 +240,14 @@
     (update s :frames conj {:type "RUN_STARTED"
                             :threadId (:thread-id s) :runId (:run-id s)})
 
+    :message/added
+    ;; NO FRAME, AND THAT IS THE WHOLE OF IT. A message the run put in its array is on its way to
+    ;; the RECORD (`harness.edge.http` writes each one the moment it arrives), and the frames for
+    ;; it went out when the model produced it (`TEXT_MESSAGE_*`, `TOOL_CALL_*`). A frame here would
+    ;; be the second copy of the same words -- and the upper-case vocabulary this case is written
+    ;; in is AG-UI's, which has no name for 'the record learned something'.
+    s
+
     :reasoning/delta
     ;; The id must be read AFTER opening: inside a -> the map literal still sees the
     ;; outer binding, so (-> s open-reasoning (update .. conj {.. (:reasoning s)})) would
@@ -347,13 +355,35 @@
                               :content (:content ev) :role "tool"}))
 
     :model/end
-    ;; THE THINKING ENDS WITH THE CALL THAT DID THE THINKING, and this is now the only
-    ;; place a reasoning message is closed while a turn is still running (see
-    ;; `:text/delta`). The frames it emits are the reasoning's own END pair; the event
-    ;; itself still carries nothing of its own (audit only), exactly like the rest of
-    ;; the model-call telemetry below -- and `close-reasoning` also opens the assistant
-    ;; message a reasoning-with-no-answer turn needs, which is the rule it always had.
-    (close-reasoning s)
+    ;; THE CALL'S OWN TWO THINGS END WITH IT: its thinking and its answer.
+    ;;
+    ;; THE THINKING half is the older rule (2026-09-22): it is closed by the end of the MODEL
+    ;; CALL and not by the answer's first token, because closing it early was this edge deciding
+    ;; that the thinking was over -- a vendor that thought again after answering got a SECOND
+    ;; reasoning message, drawn as a stray 思考 row under the answer. `close-reasoning` also opens
+    ;; the assistant message a reasoning-with-no-answer turn needs, which is the rule it always
+    ;; had.
+    ;;
+    ;; THE TEXT half is `.scratch/record-envelopes`: the answer belongs to the call that produced
+    ;; it, so the call's end is where its `TEXT_MESSAGE_*` pair closes. That is what lets the
+    ;; RECORD write the answer's row inside the call -- `replay/fold-frames` folds a run's frames
+    ;; as ONE GROUP, so a `message` row may only land once the frames that describe it are closed,
+    ;; and a text left open until the run's terminal frame kept the answer's row waiting for the
+    ;; end of the run. ONE MODEL CALL IS ONE ASSISTANT MESSAGE: `:model/start` already resets the
+    ;; parent per call, and this is the matching close.
+    ;; AND ONLY A CALL THAT ACTUALLY ANSWERED IN TEXT CLOSES ONE HERE. A call that answered with
+    ;; tool calls only has no text to close, and the empty assistant message a
+    ;; reasoning-with-no-answer turn needs is still opened -- and closed -- by the RUN's terminal,
+    ;; exactly where it always was: opening it per call would add a pair per call and shift every
+    ;; frame id after it, which `harness.kernel.frames` reads the reasoning ids off.
+    ;; AND ONLY A CALL THAT ACTUALLY ANSWERED IN TEXT CLOSES ONE HERE, AND IT CLOSES AFTER THE
+    ;; THINKING. A call that answered with tool calls only has no text to close, and the empty
+    ;; assistant message a reasoning-with-no-answer turn needs is still opened -- and closed -- by
+    ;; the RUN's terminal, exactly where it always was: opening it per call would add a pair per call
+    ;; and shift every frame id after it, which `harness.kernel.frames` reads the reasoning ids off.
+    (let [answered? (some? (:text s))]
+      (cond-> (close-reasoning s)
+        answered? close-text))
 
     ;; A STEP'S TWO ENDS ARE FACTS ABOUT THE RUN, NOT FRAMES THE CONVERSATION IS MADE OF
     ;; (`.scratch/step-events`, ADR 0011). Nothing here opens, closes or annotates a message:

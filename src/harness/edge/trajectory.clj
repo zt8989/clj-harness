@@ -118,6 +118,12 @@
     (update state :open
             (fn [current]
               (when current
+                ;; WHICH SIDE A MESSAGE ROW IS ON IS STILL ITS POSITION: a run's request is written
+                ;; before the frames that answer it. THE ONE CASE THAT COMES OUT BACKWARDS is a run
+                ;; that ANSWERS BEFORE IT SUBMITS -- a resume, whose replayed tool answer is the first
+                ;; message row it writes -- and that is a KNOWN OPEN ITEM (the record is written AS
+                ;; THE RUN HAPPENS now, so this positional guess has to become a question about the
+                ;; row itself: `.scratch/record-envelopes`).
                 (if (:streaming current)
                   (update current :returned conj (row-message record))
                   (-> current

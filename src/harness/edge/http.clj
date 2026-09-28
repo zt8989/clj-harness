@@ -833,15 +833,25 @@
         (str/starts-with? content "<skills")        "opening"
         :else                                       "injection"))))
 
+(defn- log-message!
+  "ONE \"message\" line, for one message a RUN put in the array -- the row's payload is the
+  message itself and its envelope carries the `:source` that says who put it there
+  (`returned-source`).
+
+  ONE AT A TIME IS THE POINT (`.scratch/record-envelopes`): the kernel says which message it just
+  added (`:message/added`) and the edge writes it THERE -- so the record grows with the run the way
+  the wire does, and a reader watching a run sees each tool's ANSWER and each answer's row as it
+  happens instead of in one lump after the run's terminal frame."
+  [thread-id run-id message]
+  (log! thread-id run-id "message" message nil {:source (returned-source message)}))
+
 (defn- log-messages!
-  "One \"message\" line per provider-shaped message, VERBATIM -- the row's payload is the
-  message itself and its envelope carries the `:source` that says who put it in the array
-  (`entry-source` / `returned-source`). The submitted side of a run (what the pre-LLM step
-  derived for it) and the returned side of a run (what the kernel added) both come through
-  here."
+  "The same rows in a batch -- what the run's own ACCOUNT (`:added`) is reconciled against at
+  `:run/done`, and what a subagent's returned side is written from. See `log-message!` for why the
+  ordinary path is one at a time."
   [thread-id run-id msgs]
   (doseq [m msgs]
-    (log! thread-id run-id "message" m nil {:source (returned-source m)})))
+    (log-message! thread-id run-id m)))
 
 ;; ------------------------------------------------------------------- the edge
 
@@ -1315,7 +1325,18 @@
         request-messages! (fn [& args] (hold! (fn [] (apply log-messages! args))))
         flush-request! (fn []
                          (let [writes (first (reset-vals! queued []))]
-                           (doseq [write writes] (write))))]
+                           (doseq [write writes] (write))))
+        ;; AND THE OPEN TEXT GOES DOWN BEFORE A ROW THAT WOULD SPLIT ITS GROUP: `replay/fold-frames`
+        ;; folds a run's frames as ONE GROUP, so a `message` row written while the answer's
+        ;; `TEXT_MESSAGE_*` pair is still open would cut that group in half and the text would come
+        ;; back wrong. The row that triggers this is the kernel's `:message/added` for the ANSWER --
+        ;; by then the call is over, so the snapshot is written a beat earlier than the converter's
+        ;; own `TEXT_MESSAGE_END` (at `:model/end`) would have written it.
+        flush-open-text! (fn []
+                          (doseq [[mid _] (:text @state)
+                                  row (text-lines state {:type "TEXT_MESSAGE_END" :messageId mid})
+                                  :when (not= "TEXT_MESSAGE_END" (:type row))]
+                            (log! thread-id run-id "event" row nil)))]
     ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
     ;; writing their rows and naming the session -- HAPPENS INSIDE THE GO BLOCK
     ;; BELOW, on purpose. Reading the instruction files can fail (an unreadable
@@ -1873,7 +1894,20 @@
                       ;; is still held (a no-op when `:model/start` already wrote it) -- the person's
                       ;; question has to be on the record the moment the run is over, call or no call.
                       (flush-request!)
-                      (log-messages! thread-id run-id (:added ev))
+                      ;; THE RUN'S OWN ACCOUNT, CHECKED RATHER THAN COPIED: every message it added was
+                      ;; written as it arrived (`:message/added`), so this writes only what did NOT
+                      ;; come through -- a code path that forgot to say so. It is written late AND
+                      ;; NAMED: the record keeps the message (a missing one is a lie a rebuild would
+                      ;; repeat) and the log says which.
+                      (let [account (vec (:added ev))
+                            written (get @state :reported 0)
+                            missing (subvec account (min written (count account)))]
+                        (when (seq missing)
+                          (log/warn! :run/messages-unreported
+                                     {:thread-id thread-id :run-id run-id
+                                      :reported written :added (count account)
+                                      :missing (count missing)})
+                          (log-messages! thread-id run-id missing)))
                       ;; A TURN CLOSES HERE, AND ONLY WHEN ITS RUN LEFT NOTHING OWED (ADR 0006
                       ;; decision 3): AFTER THE RETURNED TAIL HAS LANDED, because the counts it
                       ;; carries (`harness.edge.turn/answer`) include the assistant messages this
@@ -1914,6 +1948,18 @@
                                     :tool-call-ids (:unplaced ev)})))
                       (do ;; Tool-lifecycle events are audit lines, not wire frames:
                           ;; each lands as its own jsonl line, keyed by toolCallId.
+                          ;; THE RETURNED SIDE, ONE MESSAGE AT A TIME, WRITTEN WHERE IT HAPPENED: the
+                          ;; kernel says what it just added (`:message/added`) and the edge writes that
+                          ;; row NOW -- so the record is as current as the frames the same run is putting
+                          ;; on the wire, and the trajectory can show a tool's RESULT while the run is
+                          ;; still going.
+                          ;; THE ANSWER'S ROW COMES SECOND, THOUGH: a run's frames are folded as ONE
+                          ;; GROUP (`replay/fold-frames`), so the open `TEXT_MESSAGE_*` is closed onto
+                          ;; the record first, and only then does the row that belongs to it land.
+                          (when (= :message/added (:type ev))
+                            (when (= "assistant" (:role (:message ev))) (flush-open-text!))
+                            (log-message! thread-id run-id (:message ev))
+                            (swap! state update :reported (fnil inc 0)))
                           (when-let [[kind payload] (lifecycle-record ev)]
                             ;; THE MODEL FAMILY GOES OUT HERE (ADR 0006 decision 4), stamped with the
                             ;; line's own number -- which `log!` now ANSWERS, because the write is
@@ -2307,7 +2353,7 @@
   THE SSE RESPONSE IS GONE (ticket 05): a run has ONE carrier now, the downlink, so this is
   the only door. The record, the state and `settle!` are the emitter's, unchanged."
   [input run-id]
-  (let [state (atom {:terminal nil :last nil :frames []})]
+  (let [state (atom {:terminal nil :last nil :frames [] :reported 0})]
     (run-agent! state input run-id)
     (api-response 200 {:threadId (str (:threadId input)) :runId (str run-id)})))
 

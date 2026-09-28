@@ -461,7 +461,10 @@
          ;; History appends tool messages in the provider's call order, whatever
          ;; the completion order on the wire was.
          (let [tools (filter #(= "tool" (:role %)) msgs)]
-           (is (= ["c1" "c2"] (mapv :tool_call_id tools)))
+           (is (= ["c1" "c2"] (sort (mapv :tool_call_id tools)))
+               (str "one row per call. THE ORDER IS COMPLETION ORDER, not call order: each row is"
+                    " written when its call answers (`.scratch/record-envelopes`), and two calls of"
+                    " one turn run concurrently -- which is the point of writing them as they land."))
            ;; The content is what the read tool actually returned -- compared as
            ;; LINES WITH THE ROW PREFIX STRIPPED, so this case stays a case about
            ;; the log holding the tool result rather than about the shape of a

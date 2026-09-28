@@ -1,10 +1,11 @@
 (ns harness.kernel.event
-  "The kernel's whole vocabulary: nineteen event kinds. Everything AG-UI-shaped
-  is derived from these by harness.edge.ag-ui, never produced here; seven kinds
+  "The kernel's whole vocabulary: twenty event kinds. Everything AG-UI-shaped
+  is derived from these by harness.edge.ag-ui, never produced here; eight kinds
   carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
   :tool/execute, :tool/post-execute), the two model-call boundaries
-  (:model/start, :model/end) and the two step boundaries (:step/start, :step/end)
-  -- and the http edge turns those into jsonl audit lines, never into AG-UI frames.
+  (:model/start, :model/end), the two step boundaries (:step/start, :step/end) and
+  the message a run just added (:message/added) -- and the http edge turns those into
+  jsonl audit lines, never into AG-UI frames.
   THE TWO STEP BOUNDARIES ARE ALSO FACTS ON THE SESSION'S DOWNLINK, beside `turn/*` and
   `model/*` (`.scratch/step-events`, ADR 0011): written to the record AND pushed.
 
@@ -33,6 +34,20 @@
   "ARGS is the fully accumulated argument text, not a fragment."
   [id name args] {:type :tool/call :id id :name name :args args})
 
+(defn message-added
+  "A message went into the array THIS RUN is building, AT THE MOMENT IT WENT IN.
+
+  THE MESSAGES ARE THE KERNEL'S -- they come out of the LLM (or out of this run's own pre-LLM
+  step), and the kernel is the one that has them first. So the kernel is also the one that SAYS
+  so: the edge writes the row the moment it hears this, which is what makes the record read in
+  the order the run happened in -- `model/start`, the request, the answer, `model/end` -- instead
+  of in one lump after the run's terminal frame.
+
+  THE ONE CHANNEL THAT IS NOT IN THE FRAMES: the assistant's message carries the REASONING, and
+  the reasoning frames are the family `harness.kernel.frames` leaves out of the record on
+  purpose (ADR 0009 drops them; the run's own row is where they come back from). A writer that
+  tried to rebuild that message from the wire would lose exactly the half that rule protects."
+  [message] {:type :message/added :message message})
 (defn tool-result [id content error?]
   {:type :tool/result :id id :content content :error error?})
 

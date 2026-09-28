@@ -17,6 +17,16 @@
   (swap! history conj message)
   (swap! added conj message))
 
+(defn- announced!
+  "Put MESSAGE at the end of HISTORY, note it among the messages this run ADDED -- AND TELL THE
+  EDGE, which writes that row the moment it arrives instead of waiting for `:run/done`.
+  THE MESSAGES ARE THE KERNEL'S -- they come out of the LLM, or out of this run's own pre-LLM
+  step, and the kernel is the one that has them first. So the kernel is also the one that SAYS
+  when one exists, and the edge only writes what it is told."
+  [emit history added message]
+  (added! history added message)
+  (emit (ev/message-added message)))
+
 (defn- call-position
   "The index in HISTORY of the assistant message that NAMED CALL-ID, or nil when no
   message in it does.
@@ -95,7 +105,7 @@
   answer had no call to sit behind>}. A verdict is spent once, so a replay of a decided
   interrupt parks afresh and the run must stop on that interrupt rather than carry on to
   the provider with an unanswered call."
-  [decisions thread-id emit history added]
+  [decisions thread-id emit history added on-result]
   (let [outcomes (mapv (fn [{:keys [interrupt-id verdict payload]}]
                          (let [rec (tools/parked interrupt-id)]
                            (when-not rec
@@ -149,7 +159,7 @@
   attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
   prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
   nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
-  [provider history emit thread-id {:keys [on-overflow recoveries halted? tool-signature
+  [provider history added emit thread-id {:keys [on-overflow recoveries halted? tool-signature
                                           idle-timeout-ms]
                                     :or {recoveries 1}
                                     :as _opts}]
@@ -173,6 +183,11 @@
                           (llm/stream! (assoc provider :tools specs
                                                     :idle-timeout-ms idle-timeout-ms)
                                        @history emit thread-id)]
+                      ;; THE ANSWER IS THE KERNEL'S, AND IT SAYS SO HERE -- inside the call's own
+                      ;; pair (`:model/start` .. `:model/end`): the edge writes that row before the
+                      ;; `model/end` line lands, so a reader meets the request, the answer and the
+                      ;; call's end IN THE ORDER THE RUN HAPPENED IN.
+                      (announced! emit history added message)
                       (emit (ev/model-end telemetry))
                       {:message message})
                     (catch Throwable t
@@ -419,7 +434,7 @@
   and a run handed neither is not guarded at all. `:halted?` is supplied HERE from the run's
   own stop switch, so a run a person stopped is not prolonged by a retry that arrives after
   the press, and `:on-pressure` rides the same way (see `drive!`)."
-  [provider history emit thread-id cancel opts]
+  [provider history added emit thread-id cancel opts]
   (let [idle-ms (:idle-timeout-ms opts)
         limit   (long (or (:idle-timeout-retries opts) 0))]
     (loop [attempt 1]
@@ -446,7 +461,7 @@
                           (when (= :model/end (:type e)) (reset! end-seen? true))
                           (emit e)))
             _         (async/thread
-                        (async/>!! ch (try (model-call! provider history call-emit thread-id
+                        (async/>!! ch (try (model-call! provider history added call-emit thread-id
                                                         (assoc opts :halted? #(stop/rung? cancel)))
                                            (catch Throwable t t))))
             answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
@@ -641,16 +656,30 @@
         ;; draw. That is the whole of "the model was handed this and did not ask for
         ;; it": the step itself stays as silent as it was, and this is where the run
         ;; says what happened.
+        ;; WHAT THE WIRE AND THE RECORD LEARN ABOUT A TOOL'S ANSWER, IN ONE PLACE: the seam calls
+        ;; this the moment it HAS the answer (`tools/run!`), so the result frame and the tool
+        ;; message's row land between `tools/execute` and `tools/post-execute` -- inside the span
+        ;; this call's own lines describe. THE SPILL IS APPLIED HERE, ONCE, and the same bytes ride
+        ;; both the frame and the row; what it ANSWERS is the content the history gets.
+        on-result (fn [{:keys [id name content error]}]
+                    (let [final (if error content
+                                    ((or on-tool-result (fn [_ c] c)) name content))]
+                      (emit (ev/tool-result id final error))
+                      (emit (ev/message-added {:role "tool" :tool_call_id id :content final}))
+                      final))
         with-skills (fn []
                       (let [[before after] (swap-vals! history prepare thread-id)
                             fresh         (subvec after (count before))]
                         (swap! added into fresh)
                         (doseq [message fresh]
-                          (emit (ev/context-injected message)))))]
+                          (emit (ev/context-injected message))
+                          ;; ...AND THE ROW TOO: a message the run derived for itself is part of the
+                          ;; returned side, and the record takes it the moment it exists.
+                          (emit (ev/message-added message)))))]
     (emit (ev/run-start))
     (try
       (let [replay   (if (seq resume)
-                       (replay! resume thread-id emit history added)
+                       (replay! resume thread-id emit history added on-result)
                        {:parked [] :unplaced []})
             replayed (:parked replay)
             _        (swap! unplaced into (:unplaced replay))
@@ -718,14 +747,16 @@
                       ;; honoured before this line, so a run somebody stopped does not open a
                       ;; step it will never close.
                       _         (do (reset! step []) (emit (ev/step-start)))
-                      assistant (model-call-watched provider history emit thread-id cancel
+                      assistant (model-call-watched provider history added emit thread-id cancel
                                                     {:on-overflow         on-overflow
                                                      :recoveries          retries
                                                      :idle-timeout-ms     idle-timeout-ms
                                                      :idle-timeout-retries idle-timeout-retries
                                                      :tool-signature      tool-signature})
                       calls     (:tool_calls assistant)]
-                  (added! history added assistant)
+                  ;; THE ANSWER IS ALREADY IN AND ALREADY SAID (`model-call!` announces it inside its
+                  ;; own pair, so the record shows it before `model/end`). What is left here is what
+                  ;; the call ASKED FOR.
                   ;; WHAT THIS STEP ASKED FOR, remembered where the closing side can see it:
                   ;; `close-step!` runs after those calls have answered, and the failure path
                   ;; reaches it with this list too (a request that threw asked for nothing).
@@ -764,6 +795,10 @@
                           ;; end of the run. The ENDING the record needs for such a call is
                           ;; written by the loop below (the cut-off result), not by it.
                           call-emit (fn [e] (when-not (stop/rung? cancel) (emit e)))
+                          ;; WHAT EACH CALL ANSWERED, as the seam tells it: bound BEFORE the calls
+                          ;; run, because that tell arrives from their own threads -- and the stop
+                          ;; below reads this map to leave a call that already has an ending alone.
+                          done (atom {})
                           chs  (mapv (fn [{:keys [id] :as call}]
                                        (let [ch (async/chan 1)
                                              slot (atom nil)]
@@ -775,23 +810,32 @@
                                            ;; the edge.
                                            (binding [tools/*stop* slot]
                                              (let [{:keys [content error parked]}
-                                                   (tools/run! call thread-id call-emit)
-                                                   ;; A JUST-PRODUCED RESULT MAY BE SPILLED BEFORE IT
-                                                   ;; ENTERS THE HISTORY (`harness.cap.spill`): the
-                                                   ;; replacement then rides BOTH the emitted frame and
-                                                   ;; the tool message, so the model view never holds the
-                                                   ;; giant text. An error or a parked call is not spilled
-                                                   ;; -- there is nothing to retrieve -- and the hook is
-                                                   ;; never handed one.
-                                                   content (if (or error parked)
-                                                             content
-                                                             ((or on-tool-result (fn [_ c] c))
-                                                              (get-in call [:function :name]) content))]
+                                                   ;; THE SEAM'S TELL IS THIS TURN'S BOOKKEEPING TOO (ticket
+                                                   ;; 03 of `.scratch/record-envelopes`): a call whose answer was
+                                                   ;; told here is ANSWERED, so the stop below must not hand it a
+                                                   ;; cut-off sentence as well -- one call, one ending.
+                                                   ;; AND A CALL THE STOP ABANDONED DOES NOT TELL ITS ANSWER: the
+                                                   ;; run has already given it the cut-off sentence (`:stopped` below),
+                                                   ;; and a call gets ONE ending. THE SAME GATE AS `call-emit`, which
+                                                   ;; is why it reads the switch instead of some flag of its own.
+                                                   (tools/run! call thread-id call-emit
+                                                              (fn [answer]
+                                                                (if (stop/rung? cancel)
+                                                                  answer
+                                                                  (let [final (on-result answer)]
+                                                                    (swap! done assoc (:id answer)
+                                                                           {:content final
+                                                                            :error (boolean (:error answer))})
+                                                                    final))))
+                                                   ;; THE SPILL ALREADY HAPPENED AT THE SEAM (`on-result`
+                                                   ;; above), ONCE, so the same bytes ride the result frame and
+                                                   ;; the tool message's row. What comes back here is what the
+                                                   ;; history gets.
+                                                   ]
                                                (async/>!! ch {:id id :content content
                                                               :error error :parked parked}))))
                                          ch))
                                      calls)
-                          done (atom {})
                           ;; DRAIN THE TURN, AND BE WILLING TO WALK AWAY FROM IT: a stop
                           ;; does not have to wait for a command that is still running --
                           ;; the call is killed below instead, and its answer is the
@@ -802,14 +846,12 @@
                                       (let [{:keys [value stopped?]} (await-call chs cancel nil)]
                                         (if stopped?
                                           :stopped
-                                          (do (when (nil? (:parked value))
-                                                ;; THE RESULT IS EMITTED PLAINLY: it
-                                                ;; really arrived before the stop, and
-                                                ;; a result the record does not carry
-                                                ;; is an open call.
-                                                (emit (ev/tool-result (:id value)
-                                                                      (:content value)
-                                                                      (:error value))))
+                                          (do
+                                            ;; NOTHING IS EMITTED HERE ANY MORE: the result frame AND the
+                                            ;; tool message's row were told WHERE THEY HAPPENED (the
+                                            ;; seam's `on-result`, above), between `tools/execute` and
+                                            ;; `tools/post-execute`. What this thread still owes is the
+                                            ;; ending of a call the stop cut off, and that is above.
                                               (swap! done assoc (:id value) value)
                                               (recur (dec left)))))))]
                       ;; ...and forgotten once every call has answered, so the plan
