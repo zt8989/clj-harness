@@ -3325,7 +3325,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "fork" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
+  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3949,42 +3949,49 @@
 ;; window section is where its argument lives and nothing here reads it before this point.
 (declare live-state)
 (defn- fork-session!
-  "Make a NEW session out of SOURCE-THREAD's record AS IT STOOD JUST BEFORE a recorded
-  compaction, and answer {:threadId .. :from .. :compactionId ..}.
+  "Make a NEW session out of SOURCE-THREAD's record AT A CUT, and answer where it landed.
 
-  THE CUT IS THE RECORD'S (`harness.edge.replay/fork-cut`), not this function's: everything
-  before the named compaction's start line is what the new file holds, byte for byte, so
-  the fork is the conversation the model was reading at that moment rather than a
-  re-rendering of it.
+  THE CUT IS THE RECORD'S (`harness.edge.replay/fork-cut`), not this function's: the lines
+  before it are what the new file holds, byte for byte, so the fork is the conversation as it
+  stood there rather than a re-rendering of it. CUT is nil (the newest successful compaction;
+  or, for a conversation that was never compacted, the last `step/end`), {:step-seq n} (a
+  `step/end` line, KEPT), or {:compaction-id id} (cut before that compaction's start).
 
-  THE NEW FILE MUST READ, WHICH IS THE ONE THING A CUT CAN BREAK. `relieve-pressure!` runs
-  BEFORE a model call, so the compaction usually sits INSIDE a run: the lines before it end
-  with a run that never reached a terminal frame. Those runs are closed here
-  (`replay/closing-frames`) exactly as a rebuild closes them, each under its own run id, so
-  the new record is a log every reader accepts.
+  THE NEW FILE MUST READ, WHICH IS THE ONE THING A CUT CAN BREAK. A cut usually sits INSIDE a
+  run (`relieve-pressure!` runs before a model call, and a step's end is not a run's end): the
+  lines before it end with a run that never reached a terminal frame. Those runs are closed
+  here (`replay/closing-frames`) exactly as a rebuild closes them, each under its own run id,
+  so the new record is a log every reader accepts.
 
-  THE COMPACTION ID IS OPTIONAL, the newest SUCCESSFUL compaction is the default, and a
-  compaction that wrote no `context/compacted` is not a fork point. A session with no
-  recorded compaction is refused by name rather than answered with a copy of the whole log."
-  [thread-id compaction-id]
+  A NAME THE RECORD DOES NOT HAVE IS A REFUSAL, not a rounding: a line that is not a
+  `step/end`, a compaction that wrote no `context/compacted`, and a record with neither are
+  each named back to the caller."
+  [thread-id cut]
   (let [source (replay/find-log (home/projects-dir) thread-id)]
     (when-not source
       (throw (ex-info (str "no record for " thread-id " in this home, so there is nothing to"
                            " fork: a fork copies a conversation's log")
                       {:reason :no-record :thread-id thread-id})))
     (let [records (vec (replay/read-records source))
-          cut     (replay/fork-cut records compaction-id)]
-      (when-not cut
-        (throw (ex-info (str "no recorded compaction "
-                             (when (some? compaction-id) (str (pr-str compaction-id) " "))
-                             "in " thread-id ", so there is no moment before a compaction"
-                             " to fork from")
-                        {:reason :no-compaction :thread-id thread-id
-                         :compactionId compaction-id})))
+          where   (replay/fork-cut records cut)]
+      (when-not where
+        (throw (ex-info (cond
+                           (some? (:step-seq cut))
+                           (str "line " (:step-seq cut) " of " thread-id " is not a `step/end`,"
+                                " so there is no step to fork after")
+
+                           (some? (:compaction-id cut))
+                           (str "no successful compaction " (pr-str (:compaction-id cut)) " in "
+                                thread-id ", so there is no moment before it to fork from")
+
+                           :else
+                           (str "no compaction and no step in " thread-id
+                                ", so there is no line to fork from"))
+                        {:reason :no-fork-point :thread-id thread-id :cut cut})))
       (let [lines  (vec (replay/read-lines source))
             keep   (subvec lines (if (some? (replay/header? (first records))) 1 0)
-                           (:cut cut))
-            folded (subvec records 0 (:cut cut))
+                           (:cut where))
+            folded (subvec records 0 (:cut where))
             new-id (str (java.util.UUID/randomUUID))
             dir    (project/binding-for thread-id)
             dest   (log-file-for new-id)]
@@ -3998,7 +4005,11 @@
         (doseq [line keep]
           (record/append! new-id dest (str line "\n")))
         (log! new-id nil "session/forked"
-             {:from thread-id :compactionId (:compaction-id cut)})
+             {:from thread-id
+              :kind (name (:kind where))
+              :seq  (:at where)
+              :compactionId (:compaction-id where)
+              :stepSeq      (:step-seq where)})
         (when-let [closures (seq (replay/closing-frames folded))]
           (doseq [{:keys [run-id last-frame frames]} closures]
             (log! new-id nil "session/closed-off"
@@ -4010,21 +4021,30 @@
         (project/set-title! new-id
                             (str/trim (str "[fork] " (or (project/title thread-id) ""))))
         (host/ring!)
-        {:threadId     new-id
-         :from         thread-id
-         :compactionId (:compaction-id cut)}))))
+        (cond-> {:threadId new-id
+                 :from     thread-id
+                 :kind     (name (:kind where))
+                 :seq      (:at where)}
+          (:compaction-id where) (assoc :compactionId (:compaction-id where))
+          (:step-seq where)      (assoc :stepSeq (:step-seq where)))))))
 
 (defn- fork-post
-  "POST /api/threads/<stem>/fork {compactionId?} -- make a new session from STEM's record as
-  it stood just before a recorded compaction (the newest one by default), and answer where
-  it landed. The parent is untouched: its file, row and run state stay exactly as they were.
+  "POST /api/threads/<stem>/fork {stepSeq?|compactionId?} -- make a new session from STEM's
+  record AT A CUT, and answer where it landed. The parent is untouched: its file, row and run
+  state stay exactly as they were.
+
+  THE CUT IS A LINE THE CALLER NAMES: `stepSeq` is a line number from
+  `GET /api/threads/<stem>/fork-points` (a `step/end`, which the fork keeps), or
+  `compactionId` (which cuts just before that compaction). With NEITHER, the newest
+  successful compaction is the cut -- and a conversation that was never compacted falls back
+  to its last `step/end`, so every session with a step behind it can be forked.
 
   A SESSION WITH A RUN IN FLIGHT IS REFUSED (409). The cut has to land on a boundary, and a
   run still writing has not reached one yet -- the same reason the message menu's Fork is
   offered only after a turn ends.
 
   A SESSION THIS HOME HAS NEVER HEARD OF is refused the way every run on it is
-  (`refuse-unknown-session!`); a session with no recorded compaction is a 400 that names it."
+  (`refuse-unknown-session!`); a line that is not a fork point is a 400 that names it."
   [req stem]
   (cond
     (not (project/session-exists? stem))
@@ -4038,17 +4058,55 @@
                        :reason   "running"})
 
     :else
-    (let [body (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
-                    (catch Throwable _ nil))
-          compaction-id (when (map? body) (:compactionId body))]
-      (try
-        (rung (api-response 200 (fork-session! stem compaction-id)))
-        (catch clojure.lang.ExceptionInfo e
-          (let [d (ex-data e)]
-            (api-response (if (= :no-record (:reason d)) 404 400)
-                          {:error    (ex-message e)
+    (let [body     (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+                         (catch Throwable _ nil))
+          step-seq (when (map? body) (:stepSeq body))
+          comp-id  (when (map? body) (:compactionId body))
+          cut      (cond
+                     (some? step-seq) (when (integer? step-seq) {:step-seq step-seq})
+                     (some? comp-id)  (when (string? comp-id) {:compaction-id comp-id})
+                     :else nil)
+          bad?     (or (and (some? step-seq) (not (integer? step-seq)))
+                       (and (some? comp-id) (not (string? comp-id))))]
+      (if bad?
+        (api-response 400 {:error (str "a fork cut is named either by stepSeq (a whole line"
+                                       " number from GET /api/threads/<stem>/fork-points) or"
+                                       " by compactionId (a string); this body's names are"
+                                       " neither")
                            :threadId stem
-                           :reason   (name (or (:reason d) :fork-refused))})))))))
+                           :reason   "bad-cut"})
+        (try
+          (rung (api-response 200 (fork-session! stem cut)))
+          (catch clojure.lang.ExceptionInfo e
+            (let [d (ex-data e)]
+              (api-response (if (= :no-record (:reason d)) 404 400)
+                            {:error    (ex-message e)
+                             :threadId stem
+                             :reason   (name (or (:reason d) :fork-refused))}))))))))
+
+(defn- fork-points-get
+  "GET /api/threads/<stem>/fork-points -- the LINES this session may be forked at, oldest
+  first: every `step/end` (a fork keeps that line) and every compaction that produced a
+  `context/compacted` (a fork cuts just before it).
+
+  IT EXISTS BECAUSE THE CUT IS A LINE (owner, 2026-09-28). The message menu's Fork takes the
+  default; a caller that wants to go back to a PARTICULAR moment has to see which moments
+  there are, and `:seq` here is exactly what `/fork` takes back as `stepSeq`.
+
+  THE TAIL IS CAPPED (200 points) so a long conversation does not answer with a novel; the
+  numbers stay absolute (`:seq` is the record line), so a truncated list is still usable."
+  [stem]
+  (try
+    (if-some [f (replay/find-log (home/projects-dir) stem)]
+      (let [points (vec (replay/fork-points (vec (replay/read-records f))))]
+        (api-response 200 {:threadId stem
+                           :total    (count points)
+                           :points   (vec (take-last 200 points))}))
+      (api-response 404 {:error (str "no record for " (pr-str stem) " in this home, so there"
+                                     " are no fork points to list")
+                         :threadId stem}))
+    (catch Throwable t
+      (api-response 400 {:error (ex-message t) :threadId stem}))))
 
 (defn- rebuild-post
   "POST /api/threads/<stem>/rebuild -- hand the client its conversation back:
@@ -5943,6 +6001,7 @@
       (case [(:request-method req) verb]
         [:post "rebuild"] (rebuild-post req stem)
         [:post "fork"]    (fork-post req stem)
+        [:get "fork-points"] (fork-points-get stem)
         [:post "compact"] (compact-post req stem)
         [:post "cancel"]  (cancel-post stem)
         [:post "archive"] (archive-post req stem)

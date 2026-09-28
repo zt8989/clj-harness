@@ -106,3 +106,27 @@ fork 的那场上，等于让人自己去侧边栏把它找出来。做法：新
 - 判据：`harness.edge.fork-test`（cut 落点、失败压缩不是 fork 点、未知 id 拒绝）与
   `harness.edge.fork-http-test`（端到端：新记录只到压缩前、读得出来、run 中途的截断被收口、
   标题 `[fork]`、父不动、无压缩点 400、未知会话 404）。
+
+## 落地（改：切点是**任意一步的结束**，不只是一次压缩，2026-09-28）
+
+**主人指出：fork 的切点不该绑在 `compactionId` 上——那是「恰好压过」的会话才有的锚，一个从没压过的会话
+就 fork 不动（咱们这一场 `39ca5480` 正是：`context/compacted` 一条都没有）。**可安全分隔的边界一直是
+`step/end`：一步 = 一次模型调用加上它调的那些工具，切在那里就不会把 `assistant(tool_calls)` 和它的回答分开
+——压缩自己的 `tail-anchor` 用的就是这条边界。
+
+- `harness.edge.replay/fork-points`：列出**可以切的每一行**——每个 `step/end`（切在那里**保留**这一行）与每一次
+  **成功**压缩的 `compaction/start`（切在它之前），各带 `:seq` / `:kind` / `:at` / `:tools`。
+- `harness.edge.replay/fork-cut` 的 CUT 改成 `{:step-seq n}` | `{:compaction-id id}` | nil：
+  - `{:step-seq n}` —— 第 n 行必须**是** `step/end`，切在它之后（`{:cut (inc n)}`）；
+  - `{:compaction-id id}` —— 必须是一次**成功**压缩的 start，切在它之前；
+  - nil —— 最近一次成功压缩；**一个都没有的会话退回它最后一个 `step/end`**（这就是「从没压过也能 fork」）；
+  - 返回多了 `:at`（被命名的**那一行**）与 `:kind`；`:cut` 仍是「新记录保留到哪一行」。
+  - **给的行不是切点就拒绝**，不四舍五入到最近的一个——调用者点了名，换个地方切就是另一件事。
+- `GET /api/threads/<stem>/fork-points`：把上面那些点列出来（尾部 200 条，`:total` 说总数），因为切点是**行号**，
+  调用者得先看得见有哪些行可选。
+- `POST /api/threads/<stem>/fork` 的 body 收 `stepSeq`（行号，整数）或 `compactionId`（字符串）；给了但类型不对 → 400
+  `bad-cut`，两个都没给 → 默认。
+- 判据：`fork-test` 的 `a-record-with-no-compaction-forks-at-its-last-step`（默认退到最后一步、任意一步可
+  指、不是 `step/end` 的行被拒、`fork-points` 与它同一批行）；`fork-http-test` 的
+  `the-cut-can-be-any-step-and-the-points-are-listable`（列表、按 step 切并**保留**那一行、无参数退到最后一步、
+  非法行 400 `no-fork-point`、类型不对 400 `bad-cut`）。
