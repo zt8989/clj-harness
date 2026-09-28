@@ -72,8 +72,10 @@
       (is (= 1 (count v)))
       (is (= "run" (:layer (first v))))
       (is (= "r" (:run-id (first v))))))
-  (testing "a closed run missing a model/end is a violation of its own"
-    (let [v (replay/envelope-violations [(message {:role "user" :content "hi"})
-                                         (assoc (fact "model/start" {}) :runId "r")
-                                         (wire "r" "RUN_FINISHED")])]
-      (is (= [{:layer "model" :run-id "r" :started 1 :ended 0}] (vec v))))))
+  (testing "a stopped run's dangling model/step pairs are NOT a violation"
+    ;; THE CORRECTION OF 2026-09-27: the file cannot tell a step that was stopped from one
+    ;; that was killed, and the repair (closing-frames) writes a terminal, not a model/end.
+    ;; Counting those pairs refused the very sessions the repair exists to save.
+    (is (nil? (replay/envelope-violations [(message {:role "user" :content "hi"})
+                                           (assoc (fact "model/start" {}) :runId "r")
+                                           (wire "r" "RUN_FINISHED")])))))

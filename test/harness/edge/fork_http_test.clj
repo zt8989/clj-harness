@@ -157,24 +157,26 @@
           (is (= 404 status)))
         (finally (stop))))))
 
-(deftest a-record-out-of-its-envelope-refuses-the-run
-  ;; ticket 02: a message that fell out of its event pair cannot be continued -- the run is
-  ;; refused by name, and the answer points at fork. TEMPORARY until the JSONL format
-  ;; settles (owner, 2026-09-27).
+(deftest a-crashed-record-is-closed-off-before-the-next-run
+  ;; ticket 02, corrected against the whole suite: a run that never reached a terminal is
+  ;; REPAIRED (close-off), not refused -- a process that died mid-flight must not cost the
+  ;; conversation its next run. What is left after the repair reads.
   (support/with-temp-env [_root _home]
     (let [stop (http/start! {:port 0})
           port (:local-port (meta stop))]
       (try
-        (project/register-session! "src-bad")
-        (spit-lines! (log-file "src-bad")
-                     [(header-line "src-bad")
+        (project/register-session! "src-crash")
+        (spit-lines! (log-file "src-crash")
+                     [(header-line "src-crash")
                       (msg "r1" "u1" "a run that never ended")
-                      (frame "r1" {:type "RUN_STARTED" :threadId "src-bad" :runId "r1"})])
+                      (frame "r1" {:type "RUN_STARTED" :threadId "src-crash" :runId "r1"})])
         (let [{:keys [status body]} (post port "/api/agent"
-                                         {:threadId "src-bad" :append [] :tools []})]
-          (is (= 409 status))
-          (is (= "torn-record" (:reason body)))
-          (is (pos? (count (:violations body)))))
+                                         {:threadId "src-crash" :append [] :tools []})]
+          (is (not= 409 status) "the record was closed off, not refused")
+          (is (not= "torn-record" (:reason body))))
+        (testing "and the record now says so"
+          (let [kinds (map replay/kind (replay/read-records (log-file "src-crash")))]
+            (is (some #{"session/closed-off"} kinds))))
         (finally (stop))))))
 
 (deftest a-closed-record-is-not-refused-by-the-gate

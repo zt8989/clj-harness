@@ -540,51 +540,26 @@
          (open-runs records))))
 
 (defn envelope-violations
-  "RECORDS -> where a record fell out of its ENVELOPE, or nil when it did not.
+  "RECORDS -> the runs that fell out of their ENVELOPE, or nil when none did.
 
   AN ENVELOPE IS A PAIR OF EVENTS (owner, 2026-09-27): a run opens with its first `message`
-  row and closes with its terminal frame; `model/start` with `model/end`; `step/start` with
-  `step/end`; a `TOOL_CALL_START` with its `TOOL_CALL_RESULT`. A message (or a call) that
-  falls OUT of one is a record no run can honestly continue, and a caller refuses the run by
-  name rather than folding half a conversation.
+  row and closes with its terminal frame. A run that never closed is a record no reader can
+  fold into a whole conversation; `harness.edge.http` repairs the one it can (a close-off)
+  or refuses the run by name.
 
-  ONLY A CLOSED RUN'S DANGLING PAIRS ARE REPORTED. A run still open is reported ONCE, as
-  itself (`:layer \"run\"`, with the calls it never answered) -- its model and step pairs are
-  still open because it is, and calling them violations too would double the news. That also
-  keeps this from crying wolf forever: a run a process died in the middle of is closed by
-  `closing-frames` (which writes a terminal, not a `model/end`), and a rule that counted
-  open pairs globally would then refuse that session for the rest of its life."
+  IT ASKS ABOUT RUNS AND NOTHING FINER, which is a correction measured against the whole
+  suite (2026-09-27). A `model/start` with no `model/end` and a `step/start` with no
+  `step/end` are exactly what a run that was STOPPED or CUT OFF looks like -- and the
+  repair that writes the missing terminal (`closing-frames`) does not write those, so a
+  rule that counted them refused the very sessions the repair exists to save (the bug this
+  comment replaces: a stopped run's own continuation got a 409). THE FILE CANNOT TELL A
+  STEP THAT WAS STOPPED FROM ONE THAT WAS KILLED; THE RUN CAN, and that is the question
+  worth asking."
   [records]
-  (let [rows     (vec records)
-        open     (open-runs rows)
-        open-ids (into #{} (map :run-id) open)
-        paired   (reduce (fn [acc row]
-                           (let [rid (:runId row)
-                                 k   (kind row)]
-                             (cond-> acc
-                               (and (some? rid) (= "model/start" k))
-                               (update-in [rid :model-start] (fnil inc 0))
-                               (and (some? rid) (= "model/end" k))
-                               (update-in [rid :model-end] (fnil inc 0))
-                               (and (some? rid) (= "step/start" k))
-                               (update-in [rid :step-start] (fnil inc 0))
-                               (and (some? rid) (= "step/end" k))
-                               (update-in [rid :step-end] (fnil inc 0)))))
-                         {}
-                         rows)
-        dangling (for [[rid c] paired
-                       :when    (not (contains? open-ids rid))
-                       [layer sk ek] [["model" :model-start :model-end]
-                                      ["step" :step-start :step-end]]
-                       :let [s (get c sk 0) e (get c ek 0)]
-                       :when (not= s e)]
-                   {:layer layer :run-id rid :started s :ended e})]
-    (seq (concat
-          (map (fn [{:keys [run-id last-frame unanswered]}]
-                 {:layer "run" :run-id run-id :last-frame last-frame
-                  :unanswered unanswered})
-               open)
-          dangling))))
+  (seq (map (fn [{:keys [run-id last-frame unanswered]}]
+              {:layer "run" :run-id run-id :last-frame last-frame
+               :unanswered unanswered})
+            (open-runs records))))
 
 (defn- append-new
   "BASE with ENTRIES the conversation does not already hold, in order.

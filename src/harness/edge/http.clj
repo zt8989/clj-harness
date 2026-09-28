@@ -2127,10 +2127,11 @@
   (api-response
    409
    {:error    (str "session " (pr-str thread-id) " has " (count torn)
-                   " message(s) outside their envelope, so a run cannot continue it:"
-                   " a record is folded from its event pairs, and one missing half a pair"
-                   " would hand the model half a conversation. Fork it"
-                   " (POST /api/threads/<stem>/fork) and continue the fork.")
+                   " run(s) that never reached a terminal frame, so a run cannot continue"
+                   " it: a record is folded from its event pairs, and one missing half a"
+                   " pair would hand the model half a conversation. Rebuild it"
+                   " (POST /api/threads/<stem>/rebuild) to close those runs off, or fork it"
+                   " from before a compaction (POST /api/threads/<stem>/fork).")
     :threadId   thread-id
     :reason     "torn-record"
     :violations (vec torn)}))
@@ -2515,6 +2516,9 @@
           ;; same answer the record would give.
           (sessions/settle! thread-id run-id @frames))))))
 
+;; The door repairs a run that never closed before it reads the record (see the 4b decision
+;; below); the repair is defined with the read side further down, so it is named here.
+(declare close-off-open-run!)
 (defn- handle-run
   "The door to the run edge: read the request, decide whether this is a run this home
   answers, and hand the rest over.
@@ -2582,9 +2586,15 @@
       ;; answer points at fork. TEMPORARY (owner, 2026-09-27): it keeps OLD JSONL records
       ;; honest until the format settles, and it is meant to be deleted then.
       :else
-      (if-some [torn (torn-record thread-id)]
-        (refuse-torn-record! thread-id torn)
-        (start-run input run-id)))))
+      ;; A RUN THAT NEVER CLOSED IS REPAIRED FIRST, NOT REFUSED: closing it off is what
+      ;; `rebuild` has always done, and doing it here means a process that died mid-flight
+      ;; does not cost the conversation its next run. Only a record that is STILL torn
+      ;; after that (a corrupt one) is refused by name.
+      (let [_    (close-off-open-run! thread-id (log-file-for thread-id))
+            torn (torn-record thread-id)]
+        (if torn
+          (refuse-torn-record! thread-id torn)
+          (start-run input run-id))))))
 
 ;; ----------------------------------------------------- the management edge
 ;;

@@ -65,10 +65,10 @@
 
 **加载闸门：message 脱出信封就拒绝继续提问，只允许 fork。**
 
-- `harness.edge.replay/envelope-violations`：按信封报出脱出的地方——run 层（有头无终局，连同它没答的调用）、`model/start` 无 `model/end`、`step/start` 无 `step/end`。**只在已经收口的 run 里报**——否则一个进程中途死掉的 run 会让这个会话从此再也开不了口。
-- `harness.edge.http/torn-record` + `refuse-torn-record!` + `handle-run` 里的一道路（第四道门之后）：不过关就以 409 拒，点名只能 fork。**先问进程注册表**（`running?`）——一个正在跑的 run 不是坏的，文件分不出它和死掉的 run，注册表能。
+- `harness.edge.replay/envelope-violations`：按信封报出脱出的地方——**只问 run 这一层**（有头无终局，连同它没答的调用）。**不数 `model/start` / `step/start` 的配对**：那是被停或被杀的一步的样子，而收口（`closing-frames`）写的是终局帧、不写 `model/end`，数它就会把闸门本来要救的会话永久拒掉（2026-09-27，全量 16 红全是这一条）。文件分不出「被停的一步」与「被杀的一步」，run 能。
+- `harness.edge.http/torn-record` + `refuse-torn-record!` + `handle-run` 里的一道路（第四道门之后）：**先修再拒**——先 `close-off-open-run!`（进程没在跑时），再读一遍记录；补完仍然脱出（坏记录）才以 409 拒，并点名 `rebuild` 与 `fork` 两条出路。一个正在跑的 run 不是坏的（先问 `running?`）。
 - 这是**临时闸门**：只为兼容旧的 JSONL 记录；格式稳定、旧记录退役后整段拆掉（代码里写明退场条件，收在一处）。
-- 判据：`harness.edge.fork-test` 的 `the-envelope-gate-sees-only-what-fell-out`；`harness.edge.fork-http-test` 的 `a-record-out-of-its-envelope-refuses-the-run` 与 `a-closed-record-is-not-refused-by-the-gate`。
+- 判据：`harness.edge.fork-test` 的 `the-envelope-gate-sees-only-what-fell-out`（含「被停的那一步不算坏」）；`harness.edge.fork-http-test` 的 `a-crashed-record-is-closed-off-before-the-next-run`（崩过的记录被收口后能继续）与 `a-closed-record-is-not-refused-by-the-gate`。
 
 ## 落地（票 03，2026-09-27）
 
