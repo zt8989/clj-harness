@@ -33,3 +33,24 @@
 2. **改完立刻跑 `harness.edge.trajectory-test` 全量**，不要只看那三条目标断言。
 
 **另外那处红**（pressure 的活表 vs 折法，差 9 token）与这一处**不是同一处代码**，各修各的。
+
+## 第二次尝试（2026-09-28 稍后，同样**未落地**）——线索更具体了
+
+「只改条件、括号不动」那一版**又**只红了 `a-later-turn-is-pushed-on-the-open-stream`（其余 27 条全绿）：
+`pushed=……/timeout`，并且「视图里就只有一个 turn」（`(= 2 (count (:turns …)))` 实测 1）。
+**所以不是括号问题**（这次结构是对的），是这条规则与**分段机器**真有耦合。
+
+已经排掉的猜想（省得下一位重走）：
+
+- **不是** `opens-segment?` 的问题：它只看 `(= "message" (replay/kind record))` 与 run-id / 条目 / 系统提示，
+  与 `:submitted` / `:returned` 无关；第二个 run 的条目行**按三条里的两条**都该开新段；
+- **不是**「客户端那条消息被标成了 kernel-message」：agent 路由的客户条目走
+  `request-log!`（`harness.edge.http:1748`），出的是 `:request`；
+  `log-messages!` 那条默认 `:kernel-message` 的路只服务「run 自己产出的」（子代理的第一条任务、
+  `:run/done` 的补齐）。
+
+**下一步该探的**（一条就能定性）：在那个用例里让 `segments-answer` / `trajectory-answer` 把
+「第二个 run 的行到底有没有进分段机」打出来——在 `segments-step` 上包一层计数，
+看第二段是**没开**还是**开了但被 answer 丢掉**（后者更可能：一个 `:submitted` 为空的段
+很可能被读数侧略过，而那条规则恰好把某一行从 `:submitted` 挪进了 `:returned`）。
+定性之后再决定：是修读数侧的「空段」判定，还是给那一行换一个 `:producer`（若它本就属于「交给调用的」）。
