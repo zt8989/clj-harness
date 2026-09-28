@@ -77,3 +77,31 @@
 
 **结论**：05 剩下的不是「规则对不对」，是「什么时候被看见」。规则本身在两次尝试里都把三条目标断言
 改绿了；代价那条红的机制指向活视图的时序，值得单独一票来处理，不要和规则混在一起改。
+
+## 第四次：探针找到真根因（2026-09-28，代码**未落地**，回退到 HEAD）
+
+**A 路线（真记录）结论**：`~/.clj-harness/logs/` 下的记录都是**旧格式**（`kind`、无 `source`），但在
+`~/.clj-harness/projects/<project>/<uuid>.jsonl` 找到一条**新格式、带开篇块**的真记录，它出生的行序是：
+
+```
+5: "type":"message" "source":"system-prompt"  role=system
+6: "type":"message" "source":"client"         role=user     ← 客户那条
+7: "type":"message" "source":"opening"        role=user     ← 开篇块
+8: "type":"message" "source":"opening"        role=user
+```
+
+**客户那条在开篇块之前**（`run-agent!` 的注释也这么说：the client's own messages **plus** what the birth
+wrote）。所以 `trajectory_test` 里把开篇块写在客户之前的那几处夹具**与真记录不符**——这是要改的。
+
+**探针找到我那一版判据的真 bug**：`source "opening"` 但**没有 id** 的行（一轮**重新派生**的块）
+落进了 `(= "user" role) → entry-row?` 那一支，返回 `false` = 「这一轮产出的」✗；它其实是**这次调用
+真读到的**，应当返回 `nil`（落回位置）。改成 `(and (= "user" role) (entry-row? row)) true` 之后：
+
+- 轨迹用例的红 **5 → 1**；
+- **1 条是 HEAD 上绿的**（`a-resume-continues-the-parked-turn`）：`["…" "context" "tool" "assistant"]`
+  变成了 `[… "context" "assistant" "tool" "assistant"]`——`role "assistant"` 的行与 tool 行**对调**；
+- `http_test:1397-1399` 三条**依然红**（`returned` 仍是 `["assistant"]`，期望 `["tool" "assistant"]`）
+  → 说明那条被 resume 重放的答复，**在记录里的形状不是我以为的 `role "tool"`**。
+
+**净账是 4 红 > HEAD 的 3 红**，所以**没有落地**。下一步（很短，一次探针就够）：把这两条场景的行
+原样打出来（`[type source id role producer]` + 段落归属），照**真实行形状**定判据，而不是照我猜的 role 名。
