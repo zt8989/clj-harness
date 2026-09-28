@@ -818,6 +818,46 @@
         (is (= ["system" "user"] (kinds (first (:turns answer))))))
       (finally (.delete f)))))
 
+(deftest an-enveloped-request-folds-to-the-same-conversation-as-a-plain-one
+  ;; TICKET 04 of `.scratch/record-envelopes`: the rows a run writes FOR its first call -- the
+  ;; prompt and the person's own words -- moved INSIDE `[model/start, model/end]` (the edge holds
+  ;; them until that envelope opens). A reader has to fold BOTH shapes to the same conversation:
+  ;; a log written before the change is still a first-class record (the same rule ADR 0006's own
+  ;; records get).
+  (let [call      [(record 30 "model/start" {:provider "fake"})
+                   (frame 31 "TEXT_MESSAGE_START" {:messageId "m1" :role "assistant"})
+                   (frame 32 "TEXT_MESSAGE_CONTENT" {:messageId "m1" :delta "读完了。"})
+                   (frame 33 "TEXT_MESSAGE_END" {:messageId "m1"})
+                   (record 34 "model/end" {:usage {}})
+                   (record 35 "step/end" {:tools []})
+                   (frame 36 "RUN_FINISHED" {:threadId "t" :runId "r1"})
+                   (message 40 (assistant "读完了。"))]
+        request   [(system-prompt 10 "You are a coding agent.")
+                   (client 11 (user "u1" "读一下 README"))]
+        ;; WHAT EVERY RECORD WRITTEN BEFORE THIS TICKET LOOKS LIKE: the request stands in front of
+        ;; the run's own rows.
+        plain     (trajectory/records->trajectory
+                    (rows (concat request
+                                  [(frame 5 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                                   (record 6 "step/start" {})]
+                                  call)))
+        ;; AND WHAT THIS RUN WRITES NOW: the run's rows come first and the request lands inside the
+        ;; call's own pair -- which is where the record keeps it from now on.
+        enveloped (trajectory/records->trajectory
+                    (rows (concat [(frame 5 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                                   (record 6 "step/start" {})]
+                                  request
+                                  (rest call))))
+        ;; THE TIMESTAMPS ARE THE ONE THING THAT DIFFERS -- the rows land at the call's own moment
+        ;; now -- so the comparison is over everything else an item says.
+        strip     (fn [answer]
+                    (mapv (fn [turn] (mapv #(dissoc % :arrivedAt :at) (:items turn)))
+                          (:turns answer)))]
+    (is (= (strip plain) (strip enveloped))
+        "the same conversation, whether the request stands outside the call or inside it")
+    (is (= [["system" "user" "assistant"]] (mapv kinds (:turns plain)))
+        "and that conversation is the prompt, the question and the answer")))
+
 ;; ---------------------------------------------------------------- the endpoint
 
 (defn- with-server

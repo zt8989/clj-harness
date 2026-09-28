@@ -429,10 +429,12 @@
                                  (str/trimr (slurp "prompt.md" :encoding "UTF-8"))))
            (is (str/includes? (:content sys) "<env>")
                "and the kernel's own text is behind it")
-           (is (every? (fn [f] (< (.indexOf lines row) (.indexOf lines f)))
-                       (filter replay/frame? lines))
-               "the prompt is written before the run's first frame: the array's first element --
-                and the action's own row (the client's message) sits in front of the whole run")
+           (is (< (.indexOf lines (first (filter #(= "model/start" (replay/kind %)) lines)))
+                  (.indexOf lines row))
+               (str "THE PROMPT IS INSIDE THE CALL THAT WAS MADE WITH IT (ticket 04 of",
+               " `.scratch/record-envelopes`): the request side of a run's first call waits for the",
+               " envelope to open -- the array's first element is still a `message` row, and the",
+               " action's own row still stands in front of the answer"))
            (is (some #(= "system" (:role %)) msgs)
                "and it reaches the reader as the message it is -- the CLIENT filter is elsewhere (see
                 the-assembled-system-message-reaches-the-model-and-never-the-client)")))
@@ -5962,8 +5964,10 @@
      (testing "the refused run wrote nothing at all -- not even its input line"
        ;; ON THE FILE, not on the response: a run that is refused but logs an input is
        ;; refused in the answer and started anyway, which is the bug this pins.
-       (is (= 1 (count (client-rows (log-lines-for "gate-a"))))
-           "the refused run left no row of its own in gate-a's record"))
+       (is (until #(= 1 (count (client-rows (log-lines-for "gate-a")))) 5000)
+           (str "the refused run left no row of its own in gate-a's record -- exactly one client"
+                " row, the one the run that WAS let through wrote (it lands when its call opens:"
+                " ticket 04 of `.scratch/record-envelopes`)")))
      (testing "both runs that were let through reach their own terminal"
        (is (until #(and (not (http/running? "gate-a")) (not (http/running? "gate-b"))) 5000))
        (is (= 1 (count (terminals "gate-a"))) "gate-a has one run's ending")
@@ -6698,10 +6702,15 @@
            (is (= 64 (count (:hash prompt))) "named by its SHA-256, on the envelope")
            (let [first-wire (first (filter #(= "RUN_STARTED" (get-in % [:payload :type])) rows))]
              (is (some? first-wire) "the run's own first frame is on the record")
-             (is (< (.indexOf rows prompt) (.indexOf rows first-wire))
-                 "the run wrote it before its first wire frame; what sits IN FRONT of the
-                  prompt is the action's own rows -- the client's message, which arrived
-                  first (票 02) -- and the hook facts that fire while the run is set up"))))
+             (is (some #(= "model/start" (replay/kind %)) rows)
+                 "the call's opening is on the record too")
+             (is (< (.indexOf rows (first (filter #(= "model/start" (replay/kind %)) rows)))
+                    (.indexOf rows prompt))
+                 (str "THE PROMPT IS INSIDE THE CALL THAT WAS MADE WITH IT (ticket 04 of",
+                 " `.scratch/record-envelopes`): the request side of a run's first call is held and",
+                 " written the moment `model/start` opens the envelope. What still holds is that the",
+                 " prompt is the array's FIRST `message` row, and that the action's own rows stand in",
+                 " front of the answer")))))
        (testing "a wire frame is an event whose payload IS the frame"
          (let [terminal (first (filter #(= "RUN_FINISHED" (get-in % [:payload :type])) rows))]
            (is (some? terminal) "a run's terminal frame is on the record")
