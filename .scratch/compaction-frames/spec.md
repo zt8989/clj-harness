@@ -158,3 +158,25 @@
   `harness.edge.http-test` 没在 300s 内跑完，整轮**退出 2**（限额），先前完成的是 60 个命名空间、
   **1132 tests / 12207 assertions**，红的那一条还是上面同一个计时用例。
 - 这两条都不是本分支动的（本分支动的五个后端命名空间在全量里都过了），如实报在这里，不放白。
+
+## 落地（追加，2026-09-28）：**卡不是一步**，折着也要看得见
+
+**现象（主人报的）**：一张压缩卡在短对话里看得见，在真会话里「不显示了」——那一轮的折线写着
+`N 步`，卡没了。
+
+**根因**：卡是一个 assistant 消息（重建那一侧）或 run 头那条 assistant 消息里的一个 `data` part
+（实时那一侧），而 **turn 折叠默认把这一轮的所有步都收起来**（`components/turn-steps.tsx`）：
+`fold === "head"` 的那条消息整个内容 `hidden`，`fold === "step"` 的根本不挂载。短对话里一轮只有一条
+assistant 消息、`isFoldableOf` 为假（没有可折的东西），所以卡露着；一旦这一轮有工具步，它就被折进去了。
+
+**决策**：**卡不是一步**。折叠只收起「这一轮做了哪些工作」；卡说的是模型视图变成了什么
+（`compacted-context`）与它被喂了什么（`injected-context`），两条都不是工作，所以折着也画。
+规则落在 `thread.aui.tsx`：`hasCard` / `putAway` —— 折着的头/步只画卡 part，卡之外的一律不画；
+头没有卡时照旧整个 `hidden`（布局不动），没有卡的步照旧不挂载（挂载数不涨）。
+`useStepFold` 那三个答案不变（"step" 还是一步），变的只是「一步里还有什么要画」——它读的是 part，
+不是位置，所以它在 `turn-steps.tsx` 的注释里明说了。
+
+**判据**：真浏览器（同一套三句话 + 每轮一个工具调用，`.scratch/compaction-frames` 那份走查）：
+折着时 `[data-slot="compaction-trigger"]` 有高、读得出 `压缩的上下文 · 摘要…61 tok`，那条头的消息高 86px
+（无卡的同形折头 58px）；展开后卡与步行同现。`npm run typecheck` / `npm run build` 过；`npm test`
+与既有那两条无关的红（`approval` / `context`，本机既有）之外无新增。

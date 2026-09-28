@@ -45,7 +45,7 @@ import { WindowTop, type WindowTopProps } from "@/components/window-top";
 // from something a person typed -- and, since `.scratch/compaction-frames`, that the same is true of
 // EVERY card the server sends: the rule is over the names, not over one of them (`lib/card-parts`).
 import { InjectionCard } from "@/components/context-card";
-import { isCardOnly } from "@/lib/card-parts";
+import { isCardOnly, isCardPart } from "@/lib/card-parts";
 import { isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
@@ -658,6 +658,15 @@ const AssistantMessage: FC = () => {
   const folded = useTurnFolded();
   const foldedAnswer = useFoldedAnswer();
 
+  // LOCAL: A CARD IS NOT A STEP (`lib/card-parts`, `.scratch/compaction-frames`). The
+  // compaction card says the MODEL's view moved and the injected-context card says what it was
+  // handed -- neither is work this turn did -- so a folded turn draws them and puts away only
+  // the steps around them. `hasCard` is what lets the head's own content survive the fold, and
+  // `putAway` is the whole of the rule further down: while the turn is folded, a card and -- for
+  // the conclusion -- its own words are all that is left.
+  const hasCard = useAuiState((s) => s.message.parts.some(isCardPart));
+  const putAway = folded && !foldedAnswer;
+
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
@@ -670,11 +679,15 @@ const AssistantMessage: FC = () => {
   // conversation the steps are most of the messages (measured on one real session: 99 assistant
   // messages over 17 turns -- five steps for every answer).
   //
+  // A STEP THAT HOLDS A CARD IS THE EXCEPTION (`hasCard`): a card is not a step, so such a
+  // message IS mounted -- and then draws its card and nothing else (`putAway` above). Those
+  // are as many as the turn had compactions and injections, and no more.
+  //
   // NO `folded` CHECK IS NEEDED HERE, and that is not an omission: `useStepFold` answers
   // `"step"` only on the far side of `if (!folded) return "none"`, so a `"step"` message is
   // one whose turn IS folded. (An earlier cut of this asked for `&& !folded` as well, which
   // made it dead code -- the first attempt at this change did nothing at all.)
-  if (fold === "step") return null;
+  if (fold === "step" && !hasCard) return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
@@ -683,8 +696,9 @@ const AssistantMessage: FC = () => {
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
         continues && STEP_SPACING,
-        // (the `hidden` class a step used to get is gone with the early return above: a step
-        // is not drawn at all, so there is nothing left to hide)
+        // (the `hidden` class a step used to get is gone with the early return above: a cardless
+        // step is not drawn at all, so there is nothing left to hide -- and a step that HAS a card
+        // is drawn, because a card is not a step)
       )}
     >
       {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
@@ -695,7 +709,7 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-content"
         className={cn(
           "text-foreground px-2 leading-relaxed wrap-break-word",
-          fold === "head" && folded && !foldedAnswer && "hidden",
+          putAway && !hasCard && "hidden",
         )}
       >
         <MessagePrimitive.GroupedParts
@@ -720,6 +734,11 @@ const AssistantMessage: FC = () => {
             // the steps that produced the answer, and a folded turn puts the steps away
             // -- the answer message's own included. `foldedAnswer` is true for exactly
             // that message while the turn is folded, and for nothing else.
+            // A FOLDED TURN DRAWS ITS CARDS AND NOTHING ELSE (`putAway` above): the head's
+            // own prose and every step row go, and a card -- wherever it sits in the
+            // message -- stays. The conclusion is the one message whose own words also
+            // survive, and that is the `foldedAnswer` branch right below.
+            if (putAway && !isCardPart(part)) return null;
             if (
               foldedAnswer &&
               (part.type === "group-chainOfThought" ||

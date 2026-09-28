@@ -111,8 +111,9 @@ const cardsNow = async () =>
     })),
   );
 
-/// A TURN'S STEPS START FOLDED (`components/turn-steps.tsx`), and a card is one of the steps --
-/// so a person reads a card by unfolding the turn, and so does this.
+/// A TURN'S STEPS START FOLDED (`components/turn-steps.tsx`) -- but A CARD IS NOT A STEP, so the
+/// card is on screen while the turn is folded too (the 2026-09-28 note in `../spec.md`). This
+/// opens the turns anyway, because the steps around the card are worth a picture.
 const unfoldTurns = async () => {
   for (const trigger of await page.$$('[data-slot="turn-steps-trigger"][aria-expanded="false"]')) {
     await trigger.click();

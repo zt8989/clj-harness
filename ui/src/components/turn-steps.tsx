@@ -155,6 +155,12 @@ const useTurnSteps = (): number => {
 /// running turn never reaches here at all -- `isFoldableOf` is false for it -- which
 /// is what keeps its steps in front of the reader while they are happening.
 ///
+/// A CARD IS NOT A STEP, and this is the one thing the answer above does not decide
+/// (`.scratch/compaction-frames`, `lib/card-parts`). The three answers here are about a
+/// MESSAGE's place in the turn; whether a message that is put away still shows something
+/// depends on its PARTS, so `thread.aui.tsx` draws a card part even in a folded step or
+/// head. This function's answer is unchanged by that -- a "step" is still a step.
+///
 /// Every selector above returns a primitive, because `useAuiState` compares with
 /// `Object.is`: a fresh object would re-render this message on every store update,
 /// which during a run is every token.
