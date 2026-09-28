@@ -105,3 +105,43 @@ wrote）。所以 `trajectory_test` 里把开篇块写在客户之前的那几�
 
 **净账是 4 红 > HEAD 的 3 红**，所以**没有落地**。下一步（很短，一次探针就够）：把这两条场景的行
 原样打出来（`[type source id role producer]` + 段落归属），照**真实行形状**定判据，而不是照我猜的 role 名。
+
+## 第五次：以真 JSONL 为准（2026-09-28，代码**未落地**）
+
+**真数据的行形状普查**（12 条真记录、约 1.4 万行，`~/.clj-harness/projects/<project>/<uuid>.jsonl`）：
+
+```
+2648 tool / tool     2109 assistant / model     432 reasoning / -
+4464 tool / -        3901 assistant / -         111 user / -
+  49 user / client     24 user / opening   15 user / job   1 user / skill
+  65 system / system-prompt
+```
+
+**结论**：真正产出答复的行是 `role` = `tool` / `assistant` / `reasoning`（新格式还带 `source` = `tool` / `model`）。
+按这条定的判据是：
+
+```clojure
+(defn- run-produced?            ; 这一轮自己产出的 → 返回侧，无论它坐在哪
+  [row]
+  (let [m (get-in row [:payload]) r (:role m)]
+    (or (contains? #{"tool" "reasoning"} r)
+        (and (= "assistant" r)
+             (or (seq (:tool_calls m)) (not= "" (str (:content m))))))))  ; 空 assistant（resume 给停住的调用
+                                                                          ; 重写的占位）**不算**产出
+```
+
+**两处要一起改**（这是这一轮的新发现）：
+
+1. 分类器那一支：返回侧 = `(or (:streaming current) (run-produced? record))`；
+2. **开段那一行**（`segments-step` 建新段时 `:submitted [(row-message record)]`）：resume 重放的那条答复
+   就是**开段的第一行**，它也走 `run-produced?`（产出的 → `:returned`，否则 → `:submitted`）。
+
+**效果**：`harness.edge.trajectory-test` **29/125/0 全绿**（含那条 live 推送用例——它之前红是我更早那版判据
+造成的）；但 `http_test:1397-1399` **仍红**（`(:returned (last runs))` 仍是 `["assistant"]`）——
+说明那条被重放的答复**既不在开段那一支、也不在 message 分类那一支**里被我判到（另有写它的路径）。
+**净账与 HEAD 相同（3 红），所以没落地。**
+
+**下一次探针（就一步）**：在那条 http 用例里把 `records` 逐行的
+`[type payload.role source payload.tool_call_id]` 打出来——**以那条用例自己的真行为准**，
+而不是再去猜 record 的形状。另外：主人提醒「所有消息都该被 start/end 信封包裹，否则要先 fork 重整化」，
+**我看的那条出生序可能来自未重整化的记录**，所以「夹具写反了」这个结论**先不执行**，等重整化后的记录再确认。
