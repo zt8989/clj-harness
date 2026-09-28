@@ -138,7 +138,9 @@ run / resume / compact **都拒**；只读的门不受影响；被拒的 run **�
 **判据数字**：`ui` = **173 / 173 / 0**（新 suite `normalization` 两条：两种语言下提示与按钮都渲染、
 理由原样；没有理由时不画空列表）；`tsc` 与 `vite build` 干净。后端那一轮 **292 / 2031 / 1**，那一条是
 **既有的** pressure 红（`the-live-band-and-the-record-fold-answer-the-same-thing`，差 9 token——
-stash 掉本票的改动后在 HEAD 上同样红，所以不是这一票的账）。
+stash 掉本票的改动后在 HEAD 上同样红，所以不是这一票的账）。**那条后来收了**：根因是锚点取晚了
+（`band-step` 在 `model/end` 取会话快照，那时调用自己的答复已经折进来），修法与现场抄在
+`.scratch/record-stream/issues/05-two-reds-read-the-field.md` 文末。
 
 **浏览器走查**（`node scripts/dev.mjs --scripted`，2026-09-28）：
 

@@ -177,3 +177,28 @@ wrote）。所以 `trajectory_test` 里把开篇块写在客户之前的那几�
    含**开段那一行**）——第 1 条落地后它的效果才可验；
 3. **夹具的开篇块位置**：本条用例的真记录证实是 `system-prompt → client → opening`，
    与出生记录一致（主人提醒的「未重整化」在此不适用：这是当前代码真跑写出来的）。夹具按此改。
+
+## 压力那一处红（2026-09-28 收，`记录重整化` 那一程顺手做的）
+
+`pressure_test/the-live-band-and-the-record-fold-answer-the-same-thing`：活表与记录折法差 **9 token**
+（`49072` vs `49081`）。**根因不是折法，是锚点取早了/取晚了**。
+
+**现场**（在用例里打点，把两边的 band 摊开）：
+
+```
+活表   :anchor-n 1      ← 这次调用赖以发送的会话
+记录   :anchor-n 2      ← 多了调用自己那条答复
+```
+
+**为什么**：`band-step` 原来在 `model/end` 那一行取「会话快照」，而到那一行为止，这次调用自己的答复**已经
+进了会话**——它的帧被折成一条 assistant 消息（组是内核那条 `message` 行冲开的，真记录的次序是
+`TEXT_MESSAGE_START → … → message(model) → model/end → TEXT_MESSAGE_END`）。于是锚点被**多算了那次答复**，
+`anchor-est` 偏高，`total = prompt + current - anchor-est` 就偏低 9 token。活表没这个问题：它读的是会话
+里**已经结算**的条目（run 的帧要到 settle 才进去）。
+
+**修法**：锚点的会话 = **调用那一刻**的会话。`band-step` 在 `model/start` **和**边为这次调用写下的每一行
+（`:producer "request"`：prompt、这次动作的条目、注入、压力读数）上刷新 `:start-messages`，`model/end` 取它。
+两边的 ctx 于是都在「请求写完、答复还没到」那一刻取值 ⇒ 活表与折法逐字段相等。
+
+**判据**：`pressure` + `relieve-pressure` + `compaction` + `compaction-run` + `stats` + `context` +
+`sessions` + `replay` + `trajectory` + `loop` + `http` 见提交信息（那一轮全绿）。

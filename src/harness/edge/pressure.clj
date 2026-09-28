@@ -287,8 +287,8 @@
 ;; -------------------------------------------------------------------- the answer
 
 (defn- empty-band []
-  {:latest-start nil :latest-sig nil :latest-mode nil :system nil :run nil :injections []
-   :anchor nil :timeline-window nil})
+  {:latest-start nil :start-messages nil :latest-sig nil :latest-mode nil :system nil :run nil
+   :injections [] :anchor nil :timeline-window nil})
 
 (defn- band-step
   "ONE ROW of a session's walk -> the meter's band, advanced. CTX is `{:messages (fn [] ..)}`:
@@ -299,14 +299,21 @@
   write stream) and by `meter-of-records` offline, so the live band and the record cannot
   disagree. Kinds it cares about, and nothing else:
 
-    `model/start` with a run id -> `:latest-start` (the newest TRUE run call). A compaction's
-        own start carries NO run id and is left alone.
-    `model/end` with a run id and a `prompt_tokens` -> the ANCHOR, with the conversation, the
-        system message and this run's injections snapshotted as they stood at that call.
+    `model/start` with a run id -> `:latest-start` (the newest TRUE run call), and the CONVERSATION
+        AS OF THE CALL (`:start-messages`) -- refreshed at the `model/start` itself AND on every row
+        the edge wrote for that call (`:producer \"request\"`: the prompt, the action's entries, the
+        injections, the pressure line). A compaction's own start carries NO run id and is left alone.
+    `model/end` with a run id and a `prompt_tokens` -> the ANCHOR: the vendor's number for THAT
+        request, priced against `:start-messages` and NOT against the conversation as it stands at
+        the END. Measured, that is a real difference: by the time `model/end` lands, the call's own
+        answer has been folded into the conversation (its frames open a group that the kernel's own
+        row flushes), so pricing the anchor there charged the request for text the vendor never
+        priced -- the live band and the record fold sat 9 tokens apart (`49081` vs `49072`,
+        `pressure_test/the-live-band-and-the-record-fold-answer-the-same-thing`).
     `message` whose source is `system-prompt` -> `:system`, `:latest-sig` and
         `:latest-mode` (the delivery mode that run was served with).
-    a run's own injection (`skill` / `job` / `injection` / `instruction-update`,
-    a run's own injection (`skill` / `job` / `injection`, no id) -> `:injections`.
+    a run's own injection (`skill` / `job` / `injection` / `instruction-update`, no id)
+        -> `:injections`.
     `provider/init` / `provider/changed` -> the window in force."
   [band ctx [i row]]
   (let [run-id  (:runId row)
@@ -317,13 +324,20 @@
         band    (if (and own? (not= (str run-id) (:run band)))
                   (assoc band :run (str run-id) :injections [])
                   band)]
-    (case k
-      "model/start" (if own? (assoc band :latest-start payload) band)
+    ;; THE CONVERSATION AS OF THE CALL (see the docstring): refreshed at the `model/start` row AND
+    ;; on every row the edge wrote for that call (`:producer "request"`), because those are the rows
+    ;; the request was assembled from and they all land BEFORE the call's own answer. Taking the
+    ;; snapshot any later charged the anchor for text the vendor never priced (measured: 9 tokens).
+    (let [asked? (or (= "request" (:producer row)) (= "model/start" k))
+          next   (case k
+      "model/start" (if own?
+                      (assoc band :latest-start payload)
+                      band)
       "model/end"   (if (and own? (number? (get-in payload [:usage :prompt_tokens])))
                       (assoc band :anchor
                              {:start      (:latest-start band)
                               :prompt     (get-in payload [:usage :prompt_tokens])
-                              :messages   ((:messages ctx))
+                              :messages   (:start-messages band)
                               :system     (:system band)
                               :sig        (:latest-sig band)
                               :mode       (:latest-mode band)
@@ -344,7 +358,12 @@
                         band))
       ("provider/init" "provider/changed")
       (assoc band :timeline-window (context/timeline-window [row] row))
-      band)))
+      band)]
+      ;; THE SNAPSHOT IS TAKEN AFTER THE ROW IS FOLDED, so a request row is in the conversation it
+      ;; prices (the action's own entries are exactly that: rows the edge wrote for this call).
+      (if asked?
+        (assoc next :start-messages ((:messages ctx)))
+        next))))
 
 (defn meter-of-records
   "RECORDS -> the METER BAND `state->pressure` eats, folded with `band-step` -- THE SAME STEP

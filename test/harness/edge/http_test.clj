@@ -27,6 +27,7 @@
             [harness.edge.replay :as replay]
             [harness.infra.stream :as stream]
             [harness.edge.sessions :as sessions]
+            [harness.edge.normalized :as normalized]
             [harness.edge.trajectory :as trajectory]
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
@@ -7177,3 +7178,36 @@
                         (json/write-str {:threadId tid
                                          :append [{:id "u2" :role "user" :content "go on"}]})))
             (is (= before (slurp f :encoding "UTF-8")))))))))
+
+(deftest the-sessions-own-fold-carries-the-records-verdict
+  ;; TICKET 04 of `.scratch/record-normalization`, and the reason `sofar`'s live branch can answer
+  ;; at all: the criterion is registered on BOTH of a session's seams (`harness.edge.http/start!`),
+  ;; so a session born from a record starts with THAT record's verdict and advances with every row
+  ;; this process writes. Without it the live branch had no reading of its own and answered `true`
+  ;; unconditionally -- a claim about bytes nothing had judged, which the browser walkthrough found
+  ;; (opening a 未重整化 session in the running process showed no notice at all).
+  (let [tid (str "normalized-fold-" (java.util.UUID/randomUUID))
+        f   (log-file tid)]
+    (with-server
+      tid
+      (fn []
+        ;; THE RECORD IS WRITTEN *AFTER* THE SESSION EXISTS, and that is not tidiness: starting a
+        ;; session is what drops whatever was left in the unbound workspace under its id (the same
+        ;; lesson the ticket-04 case above learned), so a file written before it is gone by now.
+        (.mkdirs (.getParentFile f))
+        (spit f (str (str/join "\n" (unnormalized-record-lines)) "\n") :encoding "UTF-8")
+        (testing "a session born from these bytes carries THEIR verdict, not a claim"
+          ;; THE BIRTH WALK is what builds it (`sessions/messages` is the read that folds the
+          ;; record and seeds every registered fold from it).
+          (sessions/messages tid)
+          (let [verdict (normalized/finish (sessions/fold-value tid :normalized))]
+            (is (false? (:normalized? verdict)))
+            (is (= ["1 次工具调用没有 message 行答复"] (:reasons verdict)))))
+        (testing "and every row this process writes advances it -- the row the call was missing"
+          (sessions/row-written!
+           tid
+           [nil {:runId "r1" :type "message" :source "tool"
+                 :payload {:role "tool" :tool_call_id "c1" :content ":paths [\"src\"]"}}])
+          (let [verdict (normalized/finish (sessions/fold-value tid :normalized))]
+            (is (true? (:normalized? verdict)) "the call has its row now")
+            (is (= [] (:reasons verdict)))))))))

@@ -5,18 +5,18 @@
 ## 0. 你现在该做什么
 
 `.scratch/record-normalization/` 的四张票**全部落地**（`73c2170` 起，最后一笔见 git log）。
-**没有下一张票了**；下面是这一程留下的**三件没做完的事**，都不是票里的：
+**没有下一张票了**。原来留的三件事，两件已经做完（下面留着结论），一件仍要主人拍：
 
-1. **旧格式记录要不要真的迁移**（票 03 留的取舍）：今天顶层 `kind` 的行被读侧按名字拒绝
+1. **（还没定）旧格式记录要不要真的迁移**（票 03 留的取舍）：今天顶层 `kind` 的行被读侧按名字拒绝
    （`:old-contract`），fork 照直答 400。要动就**单开一票**，先问主人。
-2. **`pressure` 那一条既有的红**：`the-live-band-and-the-record-fold-answer-the-same-thing`，
-   实测差 9 token（`49072` vs `49081`），**与本 tracker 无关**——stash 掉 `src/harness/edge/http.clj`
-   后在 HEAD 上同样红。它是 `.scratch/record-stream` 票 05 那笔账的另一半（`pressure` 的活表与折法），
-   记在这里免得下一位当成新红。
-3. **`sofar` 的 live 分支现在是会话自己的 fold**（票 04 的走查逼出来的修正）：判据挂在 `start!` 的
-   `register-fold!` / `register-step!` 上。**这一处没有单测**（`sessions` 的 fold 表由 `sessions-test`
-   覆盖形状，但没有一条断言 `:normalized` 在会话里长起来）；要钉就往 `sessions_test` 或 `http_test`
-   加一条「一场会话出生后 `(sessions/fold-value tid :normalized)` 与记录折出来的一样」。
+2. **（已修）`pressure` 那条既有的红**：差 9 token 的根因是**锚点取晚了**——`band-step` 原来在
+   `model/end` 取会话快照，而那一刻这次调用自己的答复已经折进会话（帧成组、内核那行冲开），于是锚点
+   多算了答复。修法：在 `model/start` **和**边为这次调用写下的每一行（`:producer "request"`）上刷新
+   `:start-messages`，`model/end` 取它 ⇒ 两边的 ctx 都在「请求写完、答复还没到」那一刻取值。
+   现场与算式抄在 `.scratch/record-stream/issues/05-two-reds-read-the-field.md` 文末。
+3. **（已补）`sofar` 的 live 分支读会话自己的 fold**：判据挂在 `start!` 的 `register-fold!` /
+   `register-step!` 上；判例 `http_test/the-sessions-own-fold-carries-the-records-verdict` 钉住
+   「出生时取记录那份判定」与「此后每写一行往前走一步」两半。
 
 ## 1. 位置与状态（写这份文档时）
 
