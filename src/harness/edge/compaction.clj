@@ -27,7 +27,8 @@
             [harness.edge.replay :as replay]
             [clojure.data.json :as json]
             [clojure.string :as str]
-            [harness.infra.shell :as shell]))
+            [harness.infra.shell :as shell]
+            [harness.kernel.llm :as llm]))
 
 (def summary-instruction
   "What the summarizer is told. It asks for the facts a continuing model needs and for
@@ -168,6 +169,26 @@ not invent anything. Be concise.")
          (str "\n\nWhere this work is happening (read from git just now):\n" environment))
        (when (seq blocks)
          (str "\n\n" (str/join "\n\n" blocks)))))
+
+(defn summary-messages
+  "MESSAGES (the plan's model view) + INSTRUCTION -> the array the summarizer is handed: the
+  provider's own shape -- the SAME fold the run path uses (`ag/provider-messages`) -- with every
+  RECORDED tool answer moved directly behind the call that named it, and the instruction as the
+  last user message.
+
+  `llm/adjacent-answers` IS THE HALF THAT WAS MISSING (owner, 2026-09-28), and it is why
+  compaction kept failing on a real session. A run cut off mid-call is repaired by
+  `harness.edge.replay/closing-frames`, whose TOOL_CALL_RESULT is APPENDED to the log -- so in
+  the record the answer sits behind LATER messages, where it answers nothing. The vendor
+  refuses that outright (measured: 23 compactions of one session, 23 refusals, every one
+  `tool calls and tool results do not match`), while the run path had been moving them back all
+  along (`harness.kernel.loop`).
+
+  IT LIVES HERE so that 'what the summarizer is handed' is ONE expression, beside the
+  instruction that rides on it."
+  [messages instruction]
+  (conj (vec (llm/adjacent-answers (ag/provider-messages messages)))
+        {:role "user" :content instruction}))
 
 (defn check-ratios!
   "Validate a merged compaction pair, or throw naming what is wrong. Split out so the

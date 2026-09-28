@@ -347,3 +347,20 @@
     (is (str/includes? full "read AGENTS.md first"))
     (is (< (.indexOf full "Already produced") (.indexOf full "Where this work"))
         "facts, then the environment, then the hook's words -- one order")))
+
+(deftest the-summary-request-puts-a-late-answer-behind-its-call
+  ;; THE BUG OF 2026-09-28, measured on a live session: 23 compactions, 23 refusals, every
+  ;; one `tool calls and tool results do not match`. A run cut off mid-call is repaired by
+  ;; `closing-frames`, whose TOOL_CALL_RESULT is APPENDED -- so in the record the answer sits
+  ;; behind LATER messages. The run path moves it back (`llm/adjacent-answers`); the summary
+  ;; path did not, and could never compact.
+  (let [msgs [{:role "assistant" :content ""
+               :tool_calls [{:id "c1" :type "function"
+                             :function {:name "read" :arguments "{}"}}]}
+              {:role "user" :content "meanwhile, something else"}
+              {:role "tool" :tool_call_id "c1" :content "the answer, late"}
+              {:role "user" :content "and later still"}]
+        out  (compaction/summary-messages msgs "PROMPT")]
+    (is (= "PROMPT" (:content (last out))) "the instruction rides last")
+    (is (= ["assistant" "tool" "user" "user"] (mapv :role (butlast out)))
+        "the late answer now sits directly behind the call that named it")))

@@ -5604,25 +5604,12 @@
                               ;; Folding carries the thought across as the `reasoning_content` the
                               ;; vendor bills instead of dropping it.
                               (llm/stream! p
-                                           (conj (vec (ag/provider-messages messages))
-                                                 {:role "user"
-                                                  ;; AND THE ARTIFACTS THE RANGE ALREADY
-                                                  ;; PRODUCED ride with the instruction, read
-                                                  ;; off the tool calls (ticket 01: a model
-                                                  ;; that cannot see what it already made
-                                                  ;; mistakes its own work for somebody
-                                                  ;; else's).
-                                                  ;; THE REQUEST'S OWN SHAPE IS THE COMPACTION
-                                                  ;; NAMESPACE'S (`summary-content`): the artifacts
-                                                  ;; read off the tool calls, where the work is
-                                                  ;; happening (git, now), and what a
-                                                  ;; `:pre-compact` hook printed.
-                                                  ;; THE PROMPT ITSELF IS THE COMPACTION
-                                                  ;; NAMESPACE'S (`summary-content`), built once and
-                                                  ;; recorded on `compaction/start` -- so what is
-                                                  ;; handed to the vendor here and what a reader
-                                                  ;; finds in the record are the same string.
-                                                  :content instruction})
+                                           ;; WHAT THE SUMMARIZER IS HANDED IS ONE EXPRESSION
+                                           ;; (`compaction/summary-messages`): the provider's
+                                           ;; shape, every recorded tool answer moved behind its
+                                           ;; call, and the instruction last -- the same fold and
+                                           ;; the same repair the run path uses.
+                                           (compaction/summary-messages messages instruction)
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)
                           (let [content (:content message)]
