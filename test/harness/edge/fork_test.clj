@@ -28,27 +28,47 @@
                              [(message {:role "user" :content "more"})]
                              (successful "c2")))]
     (testing "default is the most recent one that produced a context/compacted"
-      (is (= {:cut 5 :compaction-id "c2"} (replay/fork-cut records))))
+      (is (= {:cut 5 :kind :compaction :compaction-id "c2" :at 5} (replay/fork-cut records))))
     (testing "a named compaction cuts before its own start row"
-      (is (= {:cut 1 :compaction-id "c1"} (replay/fork-cut records "c1"))))
+      (is (= {:cut 1 :kind :compaction :compaction-id "c1" :at 1}
+             (replay/fork-cut records {:compaction-id "c1"}))))
     (testing "everything before the cut is the record as it stood then"
-      (is (= 1 (:cut (replay/fork-cut records "c1")))))))
+      (is (= 1 (:cut (replay/fork-cut records {:compaction-id "c1"})))))))
 
 (deftest a-failed-compaction-is-not-a-fork-point
   (let [records [(message {:role "user" :content "hi"})
                  (fact "compaction/start" {:compactionId "bad"})
                  (fact "compaction/end" {:compactionId "bad" :error "boom"})]]
     (is (nil? (replay/fork-cut records)))
-    (is (nil? (replay/fork-cut records "bad")))))
+    (is (nil? (replay/fork-cut records {:compaction-id "bad"})))))
 
 (deftest an-unknown-compaction-id-is-refused-not-guessed
   (let [records (vec (concat [(message {:role "user" :content "hi"})]
                              (successful "c1")))]
-    (is (nil? (replay/fork-cut records "nope")))))
+    (is (nil? (replay/fork-cut records {:compaction-id "nope"})))))
 
 (deftest a-record-with-no-compaction-has-no-fork-point
   (is (nil? (replay/fork-cut [(message {:role "user" :content "hi"})])))
   (is (nil? (replay/fork-cut []))))
+
+(deftest a-record-with-no-compaction-forks-at-its-last-step
+  ;; owner, 2026-09-28: tying the cut to a compaction made every never-compacted session
+  ;; unforkable -- and a `step/end` is the boundary the compaction plan itself uses.
+  (let [records [(message {:role "user" :content "hi"})
+                 (fact "step/end" {})
+                 (message {:role "user" :content "more"})
+                 (fact "step/end" {})]]
+    (is (= {:cut 4 :kind :step :step-seq 3 :at 3} (replay/fork-cut records))
+        "the last step's end, and that line is KEPT")
+    (is (= {:cut 2 :kind :step :step-seq 1 :at 1} (replay/fork-cut records {:step-seq 1}))
+        "any step's end may be named")
+    (is (nil? (replay/fork-cut records {:step-seq 0}))
+        "a line that is not a step's end is refused, not rounded")
+    (is (nil? (replay/fork-cut records {:step-seq 2})))
+    (testing "and the points a person picks from are the same lines"
+      (is (= [{:seq 1 :kind :step :at 1 :tools []}
+              {:seq 3 :kind :step :at 1 :tools []}]
+             (replay/fork-points records))))))
 
 ;; ------------------------------------------------ the envelope gate (ticket 02)
 

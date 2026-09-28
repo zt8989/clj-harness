@@ -1065,37 +1065,88 @@
                     (assoc (payload row) :seq i)))
                 records))
 
+(defn fork-points
+  "RECORDS -> every line a fork MAY cut at, in record order, each as
+  {:seq n :kind :step|:compaction :at <epoch ms> :tools [name ..]}.
+
+  A CUT AT A STEP KEEPS THAT LINE: a `step/end` closes the step it names (one model call
+  plus the tools it asked for), so a fork cut there ends with a whole step. A CUT AT A
+  COMPACTION KEEPS EVERYTHING BEFORE IT: the compaction's own model call and the summary it
+  writes belong to the half that is cut away. Only a compaction that actually produced a
+  `context/compacted` is a point -- a `compaction/start` closed with an error is a failed
+  attempt, and nobody forks from one.
+
+  IT IS THE READER A PERSON PICKS FROM (`GET /api/threads/<stem>/fork-points`): the cut is a
+  LINE, so a caller has to be able to see which lines are legal before it names one."
+  [records]
+  (let [done (into #{} (keep (fn [row]
+                               (when (= "context/compacted" (kind row))
+                                 (:compactionId (payload row))))
+                             records))]
+    (vec (keep-indexed (fn [i row]
+                         (cond
+                           (= "step/end" (kind row))
+                           {:seq i :kind :step :at (:ts row)
+                            :tools (vec (keep :name (:tools (payload row))))}
+
+                           (and (= "compaction/start" (kind row))
+                                (contains? done (:compactionId (payload row))))
+                           {:seq i :kind :compaction :at (:ts row)
+                            :compactionId (:compactionId (payload row))}))
+                       records))))
+
 (defn fork-cut
-  "RECORDS + optional COMPACTION-ID -> where a fork from 'just before a compaction' cuts,
-  as {:cut N :compaction-id id}: N is the line INDEX of that compaction's `compaction/start`
-  row, and everything BEFORE it is the conversation as it stood when the compaction began.
+  "RECORDS + optional CUT -> where a fork cuts, as
+  {:cut N :kind :step|:compaction :step-seq n|<:compaction-id id>}, or nil.
 
-  THE START ROW IS THE CUT, not the `context/compacted` fact: the summary fact sits INSIDE
-  the compaction (start, summarize, fact, end), so cutting at the fact would keep the
-  compaction's own model call and drop the summary -- neither the before nor the after.
+  CUT is nil, {:step-seq n} or {:compaction-id id}:
 
-  DEFAULT IS THE MOST RECENT COMPACTION THAT ACTUALLY PRODUCED A `context/compacted`. A
-  `compaction/start` with no fact of its own is a FAILED attempt (the writer closes it with
-  an error and writes no fact), and a failed attempt is not a point anybody forks from.
-  nil when there is no such compaction: 'no compaction' is an honest refusal, not an
-  invitation to copy the whole record."
+    nil                 the newest SUCCESSFUL compaction; and when the record has none -- a
+                        conversation that was never compacted -- the LAST `step/end`, so it
+                        can still be forked (owner, 2026-09-28: a cut tied to a compaction
+                        made every never-compacted session unforkable)
+    {:step-seq n}       cut AFTER the `step/end` at line n (that line is kept)
+    {:compaction-id id} cut BEFORE that compaction's `compaction/start`
+
+  BOTH KINDS ARE THE SAME DISCIPLINE the compaction plan itself uses (`tail-anchor`): a
+  cut lands where a whole step -- one model call and the tools it asked for -- is behind
+  it, so no `assistant(tool_calls)` is ever separated from its answers. A STEP THAT IS NOT
+  A `step/end`, and a compaction that wrote no fact, are both REFUSED rather than rounded
+  to the nearest one: the caller named a line, and answering a different line would be a
+  fork from somewhere the caller did not ask for."
   ([records] (fork-cut records nil))
-  ([records compaction-id]
-   (let [starts (keep-indexed
-                 (fn [i row]
-                   (when (= "compaction/start" (kind row))
-                     {:id (:compactionId (payload row)) :idx i}))
-                 records)
-         done   (into #{} (keep (fn [row]
+  ([records cut]
+   (let [starts  (keep-indexed (fn [i row]
+                                 (when (= "compaction/start" (kind row))
+                                   {:id (:compactionId (payload row)) :idx i}))
+                               records)
+         done    (into #{} (keep (fn [row]
                                   (when (= "context/compacted" (kind row))
                                     (:compactionId (payload row))))
                                 records))
-         pick   (if (some? compaction-id)
-                  (first (filter #(and (= compaction-id (:id %))
-                                          (contains? done (:id %)))
-                                    starts))
-                  (last (filter #(contains? done (:id %)) starts)))]
-     (when pick {:cut (:idx pick) :compaction-id (:id pick)}))))
+         steps   (keep-indexed (fn [i row] (when (= "step/end" (kind row)) i)) records)
+         settled (filter #(contains? done (:id %)) starts)]
+     (cond
+       (some? (:step-seq cut))
+       (when (some #(= (:step-seq cut) %) steps)
+         {:cut (inc (:step-seq cut)) :kind :step :step-seq (:step-seq cut)
+          :at (:step-seq cut)})
+
+       (some? (:compaction-id cut))
+       (when-some [p (first (filter #(and (= (:compaction-id cut) (:id %))
+                                         (contains? done (:id %)))
+                                   starts))]
+         {:cut (:idx p) :kind :compaction :compaction-id (:id p) :at (:idx p)})
+
+       (seq settled)
+       (let [p (last settled)]
+         {:cut (:idx p) :kind :compaction :compaction-id (:id p) :at (:idx p)})
+
+       (seq steps)
+       (let [i (last steps)]
+         {:cut (inc i) :kind :step :step-seq i :at i})
+
+       :else nil))))
 
 (defn- compaction-summary
   "The message the model reads in a compacted range: one ordinary user message wrapping the

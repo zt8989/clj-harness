@@ -145,7 +145,7 @@
                       (msg "r1" "u1" "no compaction here")])
         (let [{:keys [status body]} (post port "/api/threads/src-3/fork" {})]
           (is (= 400 status))
-          (is (= "no-compaction" (:reason body))))
+          (is (= "no-fork-point" (:reason body))))
         (finally (stop))))))
 
 (deftest an-unknown-session-is-refused-by-name
@@ -155,6 +155,69 @@
       (try
         (let [{:keys [status]} (post port "/api/threads/nobody/fork" {})]
           (is (= 404 status)))
+        (finally (stop))))))
+
+(defn- fetch
+  "A GET through the same client the POSTs use (`get` is taken)."
+  [port path]
+  (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                 (.GET)
+                 (.build))
+        resp (.send client req (HttpResponse$BodyHandlers/ofString))]
+    {:status (.statusCode resp)
+     :body   (try (json/read-str (.body resp) :key-fn keyword)
+                  (catch Throwable _ (.body resp)))}))
+
+(deftest the-cut-can-be-any-step-and-the-points-are-listable
+  ;; owner, 2026-09-28: the cut is a LINE, and a `step/end` is one -- so a conversation that
+  ;; was never compacted can still be forked, and a caller can pick WHICH moment to go back to.
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-steps")
+        (spit-lines! (log-file "src-steps")
+                     [(header-line "src-steps")
+                      (msg "r1" "u1" "first")
+                      (frame "r1" {:type "RUN_STARTED" :threadId "src-steps" :runId "r1"})
+                      (fact "step/end" {})
+                      (msg "r2" "u2" "second")
+                      (frame "r2" {:type "RUN_STARTED" :threadId "src-steps" :runId "r2"})
+                      (fact "step/end" {})])
+
+        (testing "the points a caller picks from are the record's step ends"
+          (let [{:keys [status body]} (fetch port "/api/threads/src-steps/fork-points")]
+            (is (= 200 status))
+            (is (= [3 6] (mapv :seq (:points body))))
+            (is (= ["step" "step"] (mapv :kind (:points body))))))
+
+        (testing "a fork may be cut at a named step, and keeps that line"
+          (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {:stepSeq 3})
+                new-id (:threadId body)
+                kinds  (mapv replay/kind (replay/read-records (log-file new-id)))]
+            (is (= 200 status))
+            (is (= "step" (:kind body)))
+            (is (= 3 (:seq body)))
+            (is (= 1 (count (filter #{"step/end"} kinds))))
+            (is (not (str/includes? (slurp (log-file new-id) :encoding "UTF-8") "second")))
+            (is (= "[fork]" (project/title new-id)) "the name rides along")))
+
+        (testing "with no name at all it falls back to the LAST step, not to a refusal"
+          (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {})]
+            (is (= 200 status))
+            (is (= "step" (:kind body)))
+            (is (= 6 (:seq body)))))
+
+        (testing "a line that is not a step's end is refused, and says so"
+          (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {:stepSeq 0})]
+            (is (= 400 status))
+            (is (= "no-fork-point" (:reason body)))))
+
+        (testing "a name of the wrong kind is refused before anything is copied"
+          (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {:stepSeq "three"})]
+            (is (= 400 status))
+            (is (= "bad-cut" (:reason body)))))
+
         (finally (stop))))))
 
 (deftest a-crashed-record-is-closed-off-before-the-next-run
