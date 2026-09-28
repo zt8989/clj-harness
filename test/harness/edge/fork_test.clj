@@ -1,7 +1,7 @@
 (ns harness.edge.fork-test
   "The record-level half of 'fork a session from just before a compaction': where the cut
   lands, and which compactions are fork points at all. The HTTP half lives in
-  `harness.edge.http-test`."
+  `harness.edge.fork-http-test`."
   (:require [clojure.test :refer [deftest is testing]]
             [harness.edge.replay :as replay]))
 
