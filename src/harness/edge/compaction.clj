@@ -412,14 +412,32 @@ not invent anything. Be concise.")
   A PLAN CAN BE HANDED IN (`:plan-fn`), and the aggressive one is: when the vendor has
   already refused the request for its length, `overflow-plan` bypasses the budget and keeps
   only the newest indivisible unit. Everything else -- the lock, the row order, the no-op
+  WHAT IT WRITES, ONE FACT ONE PLACE (owner, 2026-09-28): `compaction/start` carries the PROMPT
+  -- the one user message the summarizer is handed -- `context/compacted` carries what was
+  folded (`:shadowed` / `:range` / `:tokens`) and what came back (`:summary`), and
+  `compaction/end` closes. Nothing is written twice, so a reader reconstructs the request
+  from the prompt on the first row plus the records the shadowed seqs name.
+
   rule -- is the same, so the two paths cannot drift."
-  [records {:keys [window retain-ratio append summarize plan-fn]}]
+  [records {:keys [window retain-ratio append summarize plan-fn environment blocks]}]
   (when-not (lock-active? records)
     (when-let [head ((or plan-fn plan) records window retain-ratio)]
-      (let [id (str (java.util.UUID/randomUUID))]
-        (append "compaction/start" {:compactionId id})
+      (let [id          (str (java.util.UUID/randomUUID))
+            ;; THE PROMPT IS BUILT HERE, AND IT IS THE ONE THE SUMMARIZER GETS: the string
+            ;; on `compaction/start` and the string in the request are the same value, so a
+            ;; reader can reconstruct what was asked without guessing at the pieces.
+            ;;
+            ;; AND THIS ROW IS THE ONLY PLACE IT IS WRITTEN (owner, 2026-09-28: nothing is
+            ;; recorded twice). The folded seqs, the range and the token count are NOT repeated
+            ;; here -- they are what `context/compacted` says about the work; this row says what
+            ;; the work was TOLD. It goes here rather than on the fact because it is written
+            ;; BEFORE any work: a compaction that fails still says what it tried.
+            instruction (summary-content {:facts       (product-facts (:messages head))
+                                          :environment environment
+                                          :blocks      blocks})]
+        (append "compaction/start" {:compactionId id :instruction instruction})
         (try
-          (let [summary (summarize (:messages head))]
+          (let [summary (summarize (:messages head) instruction)]
             (append "context/compacted"
                     {:compactionId id
                      :summary      summary

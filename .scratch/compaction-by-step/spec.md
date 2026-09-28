@@ -96,3 +96,23 @@
   `a-directory-that-is-not-a-repository-answers-nothing`、
   `the-summary-request-carries-every-part-and-only-the-ones-that-exist`；`http-test` 整轮
   （115 用例 / 1240 断言）全绿 —— 压缩这条路上多了三个 git 子进程，它不能把压缩弄坏。
+
+## 落地（追加：提示词落盘，且一个事实一个地方，2026-09-28）
+
+**主人的原则：不能重复记录；jsonl 里放了的东西，各归各位。**
+
+- **`compaction/start` 带上 `:instruction`** —— 发给 summarizer 的那**一条 user 消息的全文**。
+  它是**事后算不回来**的东西（`environment` 是当时的 git，`:blocks` 是当时的 `:pre-compact` 输出），
+  所以必须落盘；落在**任何工作之前**写的那一行，压缩失败也留证。
+- **拼装只有一处**：`perform!` 用 `summary-content` 拼出那个字符串，**记下的和交给厂商的是同一个值**
+  （`summarize` 的回调因此收 `(messages instruction)` 两参，不再自己拼）。`environment` / `blocks` 由边传入
+  ——只有它知道会话绑在哪个目录、`:pre-compact` 钩子刚打印了什么。
+- **不搬 `:shadowed` / `:range` / `:tokens`**：它们已经在 `context/compacted` 上，说的是「折掉了什么」，
+  读它们的是投影（`apply-compaction`），而且既有记录里就在那儿。搬到 `start` 既是**重复记录**，
+  又会让所有老记录读不出折叠范围——收益只是命名好看，不做。
+- **两个前缀是两族，不是不统一**：`compaction/*` 是**动作**（谁在什么时候动过手，`start` 先写、
+  `end` 后写，失败也留证——它是锁），`context/*` 是**上下文事实**（`context/compacted` / `context/pruned` /
+  `context/pressure`：模型能看到的东西变成什么样）。这与 `session/*`、`provider/*`、`hook/*` 是同一套分法。
+- 判据：`compaction-run-test` 的 `a-compaction-writes-three-rows-and-shortens-the-model-view` 断言 `:instruction`
+  就是 `summary-instruction`（六条无工具消息 ⇒ 没有 facts / environment / blocks 可加）；`compaction-*` 33/109、
+  `http-test` 115/1242 全绿。

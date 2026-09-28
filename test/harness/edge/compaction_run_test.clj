@@ -60,7 +60,7 @@
         written (atom [])
         result  (compaction/perform! records {:window 1000 :retain-ratio 0.16
                                               :append    (fn [k p] (swap! written conj [k p]))
-                                              :summarize (fn [msgs] (str "SUMMARY of " (count msgs)))})
+                                              :summarize (fn [msgs _] (str "SUMMARY of " (count msgs)))})
         all     (into records (write-rows @written))
         view    (replay/compacted-messages (replay/entries all) (replay/compaction-facts all))]
     (is (= [0 1 2 3] (:shadowed result)))
@@ -72,6 +72,10 @@
              " under (`harness.edge.ag-ui/compacted-frame`)"))
     (is (= ["compaction/start" "context/compacted" "compaction/end"] (mapv first @written))
         "start first, end LAST -- that order is the lock")
+    (is (= compaction/summary-instruction
+           (:instruction (second (first @written))))
+        (str "the PROMPT the summarizer was handed is on the start row -- the whole thing, not a"
+             " hash of it, so a reader can reconstruct what was asked (owner, 2026-09-28)"))
     (is (= "<compacted-summary>SUMMARY of 4</compacted-summary>" (:content (first view)))
         "the projection stands one summary where the four compacted nodes stood")
     (is (= 3 (count view)) "one summary + the two retained")
@@ -82,7 +86,7 @@
     (is (nil? (compaction/perform! [(entry 0 "u1" "hi")]
                                    {:window 1000 :retain-ratio 0.16
                                     :append    (fn [k p] (swap! written conj [k p]))
-                                    :summarize (fn [_] "S")})))
+                                    :summarize (fn [_ _] "S")})))
     (is (= [] @written) "no range, no rows -- not an empty pair")))
 
 (deftest a-held-lock-refuses-a-second-compaction
@@ -91,15 +95,18 @@
     (is (= "open" (compaction/lock-active? records)))
     (is (nil? (compaction/perform! records {:window 1000 :retain-ratio 0.16
                                             :append    (fn [k p] (swap! written conj [k p]))
-                                            :summarize (fn [_] "S")})))
+                                            :summarize (fn [_ _] "S")})))
     (is (= [] @written) "a held lock writes nothing")))
 
 (deftest a-failed-summary-still-closes-its-end-with-the-error
   (let [written (atom [])
+        ;; THE EFFECTS ARE NAMED RATHER THAN INLINED where the shape gets deep: a `summarize`
+        ;; written inline inside a `try` inside a `let` is where a stray paren hides.
+        boom    (fn [_ _] (throw (ex-info "no model" {})))
         thrown  (try
                   (compaction/perform! (six) {:window 1000 :retain-ratio 0.16
                                               :append    (fn [k p] (swap! written conj [k p]))
-                                              :summarize (fn [_] (throw (ex-info "no model" {})))})
+                                              :summarize boom})
                   nil
                   (catch Throwable t t))]
     (is (instance? Throwable thrown) "the failure is rethrown untouched")
@@ -112,7 +119,7 @@
         written   (atom [])
         append    (fn [k p] (swap! written conj [k p]))]
     (compaction/perform! records {:window 1000 :retain-ratio 0.16
-                                  :append append :summarize (fn [_] "S1")})
+                                  :append append :summarize (fn [_ _] "S1")})
     (let [all   (into records (write-rows @written))
           plan2 (compaction/plan all 1000 0.16)]
       (is (= [7] (:shadowed plan2))
@@ -176,7 +183,7 @@
         written  (atom [])
         result   (compaction/perform! records {:window 128000 :retain-ratio 0.16
                                                :append    (fn [k p] (swap! written conj [k p]))
-                                               :summarize (fn [_] "S")})
+                                               :summarize (fn [_ _] "S")})
         all      (into records (write-rows @written))
         view     (replay/compacted-messages (replay/entries all) (replay/compaction-facts all))
         opening-content (apply str (repeat 400 "o"))]

@@ -227,7 +227,7 @@
         written (atom [])
         result  (compaction/perform! records {:window 1000 :retain-ratio 0.16
                                               :append    (fn [k p] (swap! written conj [k p]))
-                                              :summarize (fn [msgs] (str "SUMMARY of " (count msgs)))})
+                                              :summarize (fn [msgs _] (str "SUMMARY of " (count msgs)))})
         fact    (second (second @written))
         frame   (ag/compacted-frame result)]
     (is (= (:compactionId fact) (:messageId frame))

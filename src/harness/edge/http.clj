@@ -5582,7 +5582,7 @@
         ;; ride on it (`.scratch`: the place a project says which worktree this is). The
         ;; post one below is still just an observer.
         pre       (hook/emit :pre-compact {:thread-id stem})
-        summarize (fn [messages]
+        summarize (fn [messages instruction]
                     (let [specs []
                           ;; AND THIS SUMMARY IS A MODEL CALL TOO, so it carries the same
                           ;; idle guard the run path carries -- read off the session whose
@@ -5617,12 +5617,12 @@
                                                   ;; read off the tool calls, where the work is
                                                   ;; happening (git, now), and what a
                                                   ;; `:pre-compact` hook printed.
-                                                  :content (compaction/summary-content
-                                                            {:facts (compaction/product-facts messages)
-                                                             :environment (compaction/environment-block
-                                                                           (compaction/environment
-                                                                            (project/binding-for stem)))
-                                                             :blocks (:blocks pre)})})
+                                                  ;; THE PROMPT ITSELF IS THE COMPACTION
+                                                  ;; NAMESPACE'S (`summary-content`), built once and
+                                                  ;; recorded on `compaction/start` -- so what is
+                                                  ;; handed to the vendor here and what a reader
+                                                  ;; finds in the record are the same string.
+                                                  :content instruction})
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)
                           (let [content (:content message)]
@@ -5640,7 +5640,15 @@
                                        :retain-ratio (:retain-ratio ratios)
                                        :append       put
                                        :plan-fn      (when (:aggressive? opts) compaction/overflow-plan)
-                                       :summarize    summarize})]
+                                       :summarize    summarize
+                                       ;; THE TWO PIECES OF THE PROMPT THE EDGE OWNS: where the
+                                       ;; work is happening (git, read on the session's own
+                                       ;; directory) and what a `:pre-compact` hook printed.
+                                       ;; `compaction/start` records the assembled prompt.
+                                       :environment  (compaction/environment-block
+                                                      (compaction/environment
+                                                       (project/binding-for stem)))
+                                       :blocks       (:blocks pre)})]
       (when (seq @written)
         (sessions/set-compactions!
          stem
