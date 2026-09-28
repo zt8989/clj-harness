@@ -1291,7 +1291,31 @@
         ;; AND ONE WRITER THAT DOES NOT SEND: the frames of a stop's cut-off answers are the
         ;; record's and the session's, never the client's (see `recorder`).
         record! (recorder thread-id run-id state)
-        convert (ag/outbound thread-id run-id)]
+        convert (ag/outbound thread-id run-id)
+        ;; THE REQUEST SIDE OF A RUN'S FIRST CALL, HELD UNTIL ITS ENVELOPE IS OPEN (ticket 04 of
+        ;; `.scratch/record-envelopes`): the rows this run wrote FOR the call it is about to make --
+        ;; the system prompt, the array's own entries, the messages the pre-LLM step derived and the
+        ;; pressure reading -- belong INSIDE `[model/start, model/end]`, so that a reader who meets a
+        ;; call's pair knows what that call had in hand without assembling it from the rows above.
+        ;;
+        ;; THEY ARE QUEUED, NOT WRITTEN, and `flush-request!` writes them the moment the kernel
+        ;; says the call is starting (`:model/start` IS that moment: the envelope opens on it).
+        ;; A THUNK RATHER THAN A ROW because the number a line gets IS the write's own -- `log!`
+        ;; answers it and `land-at!` takes it -- so holding the rows means holding the writes, and
+        ;; the numbering stays honest about where the lines really are.
+        ;;
+        ;; NOTHING IS LOST WHEN NO CALL HAPPENS: the queue is flushed when this run ends too, so a
+        ;; person's question is on the record even when the run it was sent for never started.
+        ;;
+        ;; THE COST, SAID ONCE: the request is no longer on disk the instant it is assembled -- it
+        ;; lands when the call it was assembled for begins.
+        queued (atom [])
+        hold!  (fn [thunk] (swap! queued conj thunk) nil)
+        request-log! (fn [& args] (hold! (fn [] (apply log! args))))
+        request-messages! (fn [& args] (hold! (fn [] (apply log-messages! args))))
+        flush-request! (fn []
+                         (let [writes (first (reset-vals! queued []))]
+                           (doseq [write writes] (write))))]
     ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
     ;; writing their rows and naming the session -- HAPPENS INSIDE THE GO BLOCK
     ;; BELOW, on purpose. Reading the instruction files can fail (an unreadable
@@ -1594,7 +1618,7 @@
             ;; assembly. The row says what was SENT, so a reader comparing signatures
             ;; sees the prefix the model is actually still reading.
             (when (some? sys)
-              (log! thread-id run-id "message"
+              (request-log! thread-id run-id "message"
                     {:role "system" :content (:content sys)} nil
                     {:source "system-prompt" :hash (:hash sys)
                      :hooks-names-hash (:hooks-names-hash sys)
@@ -1636,7 +1660,7 @@
                   updates-at (when (and (seq updates) (seq added)) (dec (count added)))]
               (when (and (seq updates) (empty? added))
                 (doseq [u updates]
-                  (log! thread-id run-id "message" {:role "developer" :content u} nil
+                  (request-log! thread-id run-id "message" {:role "developer" :content u} nil
                         {:source "instruction-update"})))
               ;; A TURN OPENS WITH A PERSON'S OWN WORDS, AND ONLY WITH THEM (ADR 0006 decision 3):
               ;; a resume brings none and opens none, and the conversation's birth rides as user
@@ -1655,10 +1679,10 @@
                       :let [shown (first (ag/provider-messages (sessions/model-view [m])))]]
                 (when (= i updates-at)
                   (doseq [u updates]
-                    (log! thread-id run-id "message" {:role "developer" :content u} nil
+                    (request-log! thread-id run-id "message" {:role "developer" :content u} nil
                           {:source "instruction-update"})))
                 (when (some? shown)
-                  (log! thread-id run-id "message" shown
+                  (request-log! thread-id run-id "message" shown
                         (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
                         (cond-> {:source (entry-source m)}
                           (:id m) (assoc :id (:id m)))))))
@@ -1737,14 +1761,14 @@
               ;; back through `sessions/model-view` rather than deriving them again). The rest of the submitted array was
               ;; written by the runs that produced it -- which is the whole saving of this
               ;; ticket: a run logs what IT put in, never the conversation again.
-              (log-messages! thread-id run-id injected)
+              (request-messages! thread-id run-id injected)
               ;; HOW FULL THE REQUEST THAT IS ABOUT TO GO OUT IS, ON THE RECORD, BEFORE
               ;; it goes -- the reading a compaction trigger (harness.edge.pressure) starts
               ;; from. MESSAGES is handed in rather than read back because this run's own
               ;; lines are still with the writer; the anchor comes from the session's band,
               ;; which the writer kept current row by row and which the build folded from
               ;; the record -- so this reading opens no file.
-              (log! thread-id run-id "context/pressure"
+              (request-log! thread-id run-id "context/pressure"
                     (pressure/log-pressure thread-id messages
                                           (:context-window provider)))
               ;; Drain run-chan and convert each kernel event to AG-UI frames. The
@@ -1845,6 +1869,10 @@
                       ;; full returned side on disk -- but it lands one beat AFTER the
                       ;; terminal frame, so a reader racing the consumer may not see it
                       ;; yet.
+                      ;; AND A RUN WHOSE CALL NEVER OPENED AN ENVELOPE STILL LEFT A REQUEST: flush what
+                      ;; is still held (a no-op when `:model/start` already wrote it) -- the person's
+                      ;; question has to be on the record the moment the run is over, call or no call.
+                      (flush-request!)
                       (log-messages! thread-id run-id (:added ev))
                       ;; A TURN CLOSES HERE, AND ONLY WHEN ITS RUN LEFT NOTHING OWED (ADR 0006
                       ;; decision 3): AFTER THE RETURNED TAIL HAS LANDED, because the counts it
@@ -1895,6 +1923,12 @@
                               ;; family's own (`harness.edge.mux/fact-types`), not a second spelling: a
                               ;; name added to the writer and not to the ring (or the reverse) is a fact
                               ;; nobody can ask for again (see that Var).
+                              ;; AND THE REQUEST THIS CALL IS ABOUT TO SEND LANDS HERE, right behind
+                              ;; `model/start`'s own row (ticket 04 of `.scratch/record-envelopes`):
+                              ;; the envelope is open from this line on, so the rows this run wrote for
+                              ;; the call are read INSIDE it. Only a run's FIRST call has such a
+                              ;; batch, and the queue empties itself -- a later call writes nothing.
+                              (when (= "model/start" kind) (flush-request!))
                               (when (contains? mux/fact-types kind)
                                 (family-send!
                                  thread-id
@@ -2031,6 +2065,11 @@
                   (log/warn! :run/events-closed-without-terminal
                              {:thread-id thread-id :run-id run-id
                               :last      (:last @state)})))))))
+      ;; WHATEVER IS STILL HELD GOES DOWN NOW (ticket 04 of `.scratch/record-envelopes`): a run
+      ;; that never reached a model call -- no provider, a refusal on the way in -- still leaves
+      ;; the request it was assembled for on the record. A no-op when the envelope already
+      ;; opened and wrote it.
+      (flush-request!)
       (catch Throwable t
         ;; A CRASHED RUN IS NOT A RUNNING ONE, and this catch is the only place that
         ;; knows a run died outside the emitter: without this the thread would claim to

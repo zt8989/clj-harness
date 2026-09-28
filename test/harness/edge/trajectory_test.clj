@@ -467,6 +467,73 @@
     (is (not (contains? (item-of turn "tool") :startedAt))
         "no timing on the tool item at all -- durations are the model call's business (ticket 05)")))
 
+(deftest a-call-the-run-is-still-making-is-drawn-while-it-makes-it
+  ;; THE OWNER'S REPORT (2026-09-27): a trajectory watched DURING a run showed the question and
+  ;; the injected blocks and NOT the calls the run was making. The reason was structural -- the
+  ;; returned `message` rows land at `:run/done`, one beat after the terminal frame, so a fold of
+  ;; `message` rows alone has nothing to draw for work still in flight. WHAT A RUN IN FLIGHT DOES
+  ;; LEAVE BEHIND is the audit line, and this is where the trajectory reads it.
+  (let [records [(client 0 (user "u1" "读一下 README"))
+                 (system-prompt 10 "You are a coding agent.")
+                 (frame 12 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                 (pre-execute 20 "c1" "read")]
+        answer  (trajectory/records->trajectory (rows records))
+        [turn]  (:turns answer)]
+    (is (true? (:incomplete answer)) "the run has not ended, and the answer says so")
+    (is (= ["system" "user" "tool"] (kinds turn))
+        "the call is drawn the moment it reaches the seam -- no assistant row, no result row")
+    (is (= {:kind "tool" :toolCallId "c1" :name "read" :executed false
+            :outcome "pass" :arrivedAt 20}
+           (item-of turn "tool"))
+        "the name comes off the audit line, which is the only place a call in flight has one")
+    (is (not (contains? (item-of turn "tool") :result))
+        "the ANSWER is absent, never an empty string: nobody has given one yet")
+    (is (not (contains? (item-of turn "tool") :argsText))
+        "and so are the arguments -- those live on the assistant message, not written yet")))
+
+(deftest the-answer-replaces-the-call-in-flight-rather-than-joining-it
+  ;; ONE CALL, ONE ROW. The item built from the returned messages is the fuller account -- name,
+  ;; arguments and result together -- and the in-flight one must give way to it. Two rows for one
+  ;; call would make this view the one thing it may not be: a trajectory that says a run did
+  ;; something twice.
+  (let [[turn] (turns-of
+                [(client 0 (user "u1" "读一下 README"))
+                 (system-prompt 10 "S")
+                 (pre-execute 20 "c1" "read")
+                 (executed 21 "c1" "read")
+                 (post-execute 25 "c1" "read")
+                 finished
+                 (message 30 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "c1" "read" "{}")]})
+                 (message 31 (tool-msg "c1" "# clj-harness"))])]
+    (is (= ["system" "user" "assistant" "tool"] (kinds turn)))
+    (is (= 1 (count (filter #(= "tool" (:kind %)) (:items turn)))) "one call, one row")
+    (is (= "# clj-harness" (:result (item-of turn "tool"))))))
+
+(deftest a-closed-segment-does-not-draw-its-unanswered-call
+  ;; THE RULE THAT KEEPS ONE CALL ONE CALL, and the reason the in-flight reading is asked of the
+  ;; OPEN segment alone. A park and its resume write TWO segments and ONE tool message: the
+  ;; parked half has the arrival line and no answer. Drawing that as a call in flight as well
+  ;; would draw one call twice in one turn -- and, worse, read the RESUME's verdict ('vetoed')
+  ;; off the merged life map, which is the future inside a past the reader asked about.
+  (let [[turn] (turns-of
+                [(system-prompt 10 "S")
+                 (client 0 (user "u1" "读 /etc/hosts"))
+                 (pre-execute 20 "c1" "read" "needs-approval")
+                 (frame 30 "RUN_FINISHED" {:threadId "t" :runId "r1"})
+                 (message 40 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "c1" "read" "{}")]})
+                 ;; the human decided, so the run goes out again over the same conversation
+                 (system-prompt 110 "S")
+                 (pre-execute 120 "c1" "read" "vetoed")
+                 (post-execute 121 "c1" "read")
+                 finished
+                 (message 130 (tool-msg "c1" "vetoed by human: the call was not executed."))])]
+    (is (= 1 (count (filter #(= "tool" (:kind %)) (:items turn)))) "one call, one row")
+    (is (= "vetoed" (:outcome (item-of turn "tool")))
+        "the verdict that stuck, not the park's")
+    (is (= "vetoed by human: the call was not executed." (:result (item-of turn "tool"))))))
+
 (deftest the-system-message-appears-again-only-when-it-changes
   (let [turns (turns-of
                [(system-prompt 10 "S1")
@@ -751,6 +818,46 @@
         (is (= ["system" "user"] (kinds (first (:turns answer))))))
       (finally (.delete f)))))
 
+(deftest an-enveloped-request-folds-to-the-same-conversation-as-a-plain-one
+  ;; TICKET 04 of `.scratch/record-envelopes`: the rows a run writes FOR its first call -- the
+  ;; prompt and the person's own words -- moved INSIDE `[model/start, model/end]` (the edge holds
+  ;; them until that envelope opens). A reader has to fold BOTH shapes to the same conversation:
+  ;; a log written before the change is still a first-class record (the same rule ADR 0006's own
+  ;; records get).
+  (let [call      [(record 30 "model/start" {:provider "fake"})
+                   (frame 31 "TEXT_MESSAGE_START" {:messageId "m1" :role "assistant"})
+                   (frame 32 "TEXT_MESSAGE_CONTENT" {:messageId "m1" :delta "读完了。"})
+                   (frame 33 "TEXT_MESSAGE_END" {:messageId "m1"})
+                   (record 34 "model/end" {:usage {}})
+                   (record 35 "step/end" {:tools []})
+                   (frame 36 "RUN_FINISHED" {:threadId "t" :runId "r1"})
+                   (message 40 (assistant "读完了。"))]
+        request   [(system-prompt 10 "You are a coding agent.")
+                   (client 11 (user "u1" "读一下 README"))]
+        ;; WHAT EVERY RECORD WRITTEN BEFORE THIS TICKET LOOKS LIKE: the request stands in front of
+        ;; the run's own rows.
+        plain     (trajectory/records->trajectory
+                    (rows (concat request
+                                  [(frame 5 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                                   (record 6 "step/start" {})]
+                                  call)))
+        ;; AND WHAT THIS RUN WRITES NOW: the run's rows come first and the request lands inside the
+        ;; call's own pair -- which is where the record keeps it from now on.
+        enveloped (trajectory/records->trajectory
+                    (rows (concat [(frame 5 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                                   (record 6 "step/start" {})]
+                                  request
+                                  (rest call))))
+        ;; THE TIMESTAMPS ARE THE ONE THING THAT DIFFERS -- the rows land at the call's own moment
+        ;; now -- so the comparison is over everything else an item says.
+        strip     (fn [answer]
+                    (mapv (fn [turn] (mapv #(dissoc % :arrivedAt :at) (:items turn)))
+                          (:turns answer)))]
+    (is (= (strip plain) (strip enveloped))
+        "the same conversation, whether the request stands outside the call or inside it")
+    (is (= [["system" "user" "assistant"]] (mapv kinds (:turns plain)))
+        "and that conversation is the prompt, the question and the answer")))
+
 ;; ---------------------------------------------------------------- the endpoint
 
 (defn- with-server
@@ -855,6 +962,7 @@
         (if (or (ended? records) (> (System/currentTimeMillis) finish))
           records
           (do (Thread/sleep 25) (recur)))))))
+
 
 (deftest the-endpoint-folds-what-the-run-wrote
   ;; The whole path, once, over real HTTP: a real run writes the log, and the route

@@ -29,7 +29,11 @@ export type TrajectoryItem =
       toolCallId: string;
       name?: string;
       argsText?: string;
-      result: string;
+      /// ABSENT WHILE A RUN IN FLIGHT HAS NOT ANSWERED THE CALL YET: the result is a tool
+      /// message, and the kernel writes those at `:run/done`, one beat after the terminal
+      /// frame (see `harness.edge.trajectory/pending-tool-items`). Absent -- never an empty
+      /// string -- so a reader can say 'not yet' rather than draw an answer nobody gave.
+      result?: string;
       executed: boolean;
       call?: number;
       outcome?: string;

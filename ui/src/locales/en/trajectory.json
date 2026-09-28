@@ -51,6 +51,7 @@
     "changed": "changed since the last turn",
     "yes": "yes",
     "no": "no",
+    "pending": "not yet",
     "injected": "injected"
   },
   "blocks": {

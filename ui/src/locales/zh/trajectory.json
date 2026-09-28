@@ -49,6 +49,7 @@
     "changed": "自上一轮起有变化",
     "yes": "是",
     "no": "否",
+    "pending": "尚未",
     "injected": "已注入"
   },
   "blocks": {
