@@ -130,6 +130,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |
 | `/api/threads` | GET | 日志树的原始清单（诊断用） | 无 |
 | `/api/threads/<stem>/rebuild` | POST | 重建对话交还客户端；日志若停在半途，先合上**每一条**没终结的 run（按 run id 认；各补 `TOOL_CALL_RESULT` + `RUN_ERROR`）再重建。服务端持有这场会话时**从内存答**，而且**不修不合**——合上是对**死掉的**会话的收尾 | `session/rebuilt`，合上过则每一轮先有一行 `session/closed-off` |
+| `/api/threads/<stem>/fork` | POST | **从某次压缩之前另开一场会话**：新 thread-id、新记录文件，内容是原记录里该次 `context/compacted` **之前**的所有行（逐字复制），再给被截断的 run 补上终局；继承原会话的项目绑定，标题写成 `[fork] 原标题`，原会话**一个字节不动**。body 可选 `compactionId`（默认最近一次**成功**的压缩；失败的尝试不是切点）。有 run 在跑 → 409；未知会话 → 404；没有压缩点 → 400 | `session/forked`（新会话），截断过则先有 `session/closed-off` |
 | `/api/threads/<stem>/sofar` | GET | **记录到哪了**：已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。服务端持有这场会话时读**内存**，但**有 run 正在跑时仍读记录**——那一刻「到哪里了」的答案在文件里。它**不是客户端的轮询**：有窗口的页面由下行（`events.mux`）报，只有**没有窗口**的那几扇门在自己驱动的一轮结束后读它一次。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
 | `/api/events.mux` | GET | **下行那条流**（WebSocket，ADR 0004）：一页一条，按 `?subscriber=<token>&sessions=<json>` 声明持有哪几场、各自从哪个游标开始；此后**每场被订阅的会话每落盘一批推一帧**（帧带 `threadId`），窗口结束一帧 `end`。**只推这条连接订阅的会话**——没订阅的会话一条都不推；token 随连接生、随连接死，服务端不记连接之外的订阅。run 的帧与子 agent 的帧也从这里下行 | 无（只读） |
 | `/api/threads/<stem>/frames` | GET | **子 agent 重放的半边**（JSON）：这场会话的帧按运行时要读的顺序（`RUN_STARTED` 起头、`MESSAGES_SNAPSHOT` 随后、记录的帧按序）加一个 `:running`。面板读它、再从 `events.mux` 取实时尾巴，两边靠帧自己的 `:seq` 对齐（ticket 04） | 无（只读） |
@@ -414,6 +415,8 @@ URL 编码过的 `%2e%2e`、以及指向树外的符号链接都在**这里**被
 | `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |
 | `project/bound` | 绑定变更，before → after（可读成目录时间线） |
 | `session/rebuilt` | 重建动作，落**被重建的那份日志**上 |
+| `session/closed-off` | 一次 mid-run 收尾：`:run-id` / `:last-frame` / `:frames`（补了哪几帧）。rebuild 与 fork 截断都用它；fork 时多一个 `:via "fork"` |
+| `session/forked` | 一次 fork 动作，落在**新会话**的日志上：`:from`（原会话）、`:compactionId`（切在哪一次压缩**之前**） |
 | `hook/<Point>` | 一次 hook 触发（`hook/PostToolUse`、`hook/InstructionsLoaded`…） |
 | `provider/session-changed` | 会话档位随会话绑定变化（`:resolved` 落新的一档） |
 | `git/branch` | 一次 git 分支探测的结果 |
