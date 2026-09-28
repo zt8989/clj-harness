@@ -8,8 +8,8 @@
 (defn- message [m id] (assoc (row "message" m) :id id))
 
 (defn- a-normal-record
-  "一份**已重整化**的记录：消息都有人宣告，工具调用有答复——按真记录的形状写
-  （真记录：`{:type \"event\" :payload {:type \"TEXT_MESSAGE_START\" ..}}`）。"
+  "一份**已重整化**的记录：每条消息都夹在它自己的 START/END 之间，每次调用都有答复。
+  行形状照真记录（`{:type \"event\" :payload {:type \"TEXT_MESSAGE_START\" ..}}`）。"
   []
   [(frame "RUN_STARTED" {})
    (frame "TEXT_MESSAGE_START" {:messageId "m1"})
@@ -17,6 +17,7 @@
    (frame "TEXT_MESSAGE_END" {:messageId "m1"})
    (frame "TOOL_CALL_START" {:toolCallId "c1"})
    (message {:role "tool" :tool_call_id "c1" :content "done"} "c1")
+   (frame "TOOL_CALL_END" {:toolCallId "c1"})
    (frame "RUN_FINISHED" {})])
 
 (deftest a-normalized-record-is-normalized
@@ -31,11 +32,26 @@
     (testing "而且一条没有信封的行就够判它不可续"
       (is (false? (:normalized? (normalized/normalized? (conj (a-normal-record) (first old)))))))))
 
-(deftest a-message-nobody-announced-is-not-normalized
-  ;; 一条裸露的消息（没有 START 帧宣告它的 id）——线上读者永远没见过它。
-  (let [records (conj (a-normal-record) (row "message" {:role "user" :content "naked"}))]
-    (is (false? (:normalized? (normalized/normalized? records))))
-    (is (re-find #"没有 START 帧宣告" (first (:reasons (normalized/normalized? records)))))))
+(deftest a-message-outside-its-envelope-is-not-normalized
+  (testing "有身份、但没有 START 宣告它"
+    (let [records (conj (a-normal-record) (row "message" {:role "user" :content "naked"}))]
+      (is (false? (:normalized? (normalized/normalized? records))))
+      (is (re-find #"不在它的 START/END 之间" (first (:reasons (normalized/normalized? records)))))))
+  (testing "有 START 却没收尾（END 缺）"
+    (let [records (vec (remove #(= "TEXT_MESSAGE_END" (get-in % [:payload :type]))
+                               (a-normal-record)))]
+      (is (false? (:normalized? (normalized/normalized? records))))))
+  (testing "START/END 都在，消息却落在信封之外（END 之后）"
+    (let [records (:rows (reduce (fn [{:keys [rows] :as acc} row]
+                                   (if (= "message" (:type row))
+                                     (update acc :rows conj row)   ; 先把消息攒着
+                                     (update acc :rows conj row)))
+                                 {:rows []}
+                                 (let [r (a-normal-record)
+                                       msg (nth r 2)
+                                       rest (vec (concat (subvec r 0 2) (subvec r 3)))]
+                                   (conj rest msg))))]                  ; 消息挪到最后
+      (is (false? (:normalized? (normalized/normalized? records)))))))
 
 (deftest a-tool-call-with-no-answer-row-is-not-normalized
   ;; 票 05 在 resume 之后找到的形状：答复只剩一行帧（TOOL_CALL_RESULT），没有 message 行。
