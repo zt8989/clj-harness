@@ -228,7 +228,7 @@
   ;; TICKET 04's SECOND MOMENT, seen from the table's side. A session leaving this process is the
   ;; moment nobody here can flush the tail of its record any more, so the kernel TELLS whoever owns
   ;; those bytes -- both doors, once, with the id. `harness.edge.sessions` wires the seam to
-  ;; `record/fsync!`; what the writer then does with the ask is `record-test`'s case, and this is the
+  ;; `stream/fsync!`; what the writer then does with the ask is `record-test`'s case, and this is the
   ;; joint between them (the same shape as the `:stop-jobs!` case just above).
   (let [asked (atom [])]
     (session/install! {:put-away! (fn [tid] (swap! asked conj tid))})

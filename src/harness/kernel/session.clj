@@ -218,7 +218,7 @@
 (defonce ^:private unflushed?
   ;; A session whose bytes are not all on disk may not be put away, because putting it
   ;; away would mean rebuilding from a record that is behind it -- and the difference
-  ;; would be silent. TICKET 02 OWNS THE ANSWER (`harness.edge.record/pending?`), and
+  ;; would be silent. TICKET 02 OWNS THE ANSWER (`harness.infra.stream/pending?`), and
   ;; this is the seam it reaches the table through.
   (atom (constantly false)))
 
@@ -227,7 +227,7 @@
   thread-id; `sweep!` will not put away a session it answers true for.
 
   A seam rather than a field because the answer belongs to the writer
-  (`harness.edge.record`), and this namespace must not grow a second opinion about
+  (`harness.infra.stream`), and this namespace must not grow a second opinion about
   what has been written."
   [f]
   (reset! unflushed? f))

@@ -96,7 +96,7 @@
             [harness.cap.preamble :as preamble]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
-            [harness.edge.record :as record]
+            [harness.infra.stream :as stream]
             [harness.edge.sessions :as sessions]
             [harness.edge.mux :as mux]
             [harness.edge.host :as host]
@@ -231,7 +231,7 @@
   ;; IT DOES NOT SERIALIZE APPENDS ANY MORE. One line is one JSON object and a reader
   ;; parses the file line by line, so a half-written line is not a smaller record, it
   ;; is a broken file -- but that is the record writer's job now: one consumer thread
-  ;; appends every line (`harness.edge.record`, ticket 02), so there is exactly one
+  ;; appends every line (`harness.infra.stream`, ticket 02), so there is exactly one
   ;; writer by construction and nothing to serialize.
   ;;
   ;; WHAT IT STILL GUARDS IS WHERE A LINE GOES. The writer serializes the bytes, not
@@ -400,9 +400,9 @@
   IT ANSWERS WHETHER IT CHANGED F, because the writer measures a thread's record
   offset in that file: a carried segment (or an audit line about a refused one)
   moves every offset after it, so the writer re-bases when this answers true
-  (`harness.edge.record/prepare-with!`). Nothing to do answers nil.
+  (`harness.infra.stream/prepare-with!`). Nothing to do answers nil.
 
-  CALLED BY THE RECORD WRITER'S CONSUMER BEFORE EVERY LINE (`harness.edge.record`),
+  CALLED BY THE RECORD WRITER'S CONSUMER BEFORE EVERY LINE (`harness.infra.stream`),
   which is this process's only writer -- that single writer is why this needs no lock
   of its own. (The one thing it does not serialize is where a line is ADDRESSED, and
   that is decided before the queue, in `log!`; see `log-lock`.) THE CALL IS PER LINE,
@@ -531,7 +531,7 @@
     (catch Throwable _ nil)))
 (defn- log!
   "The line goes to the record writer, which appends it off this thread's own
-  path (`harness.edge.record`). NOTHING HERE TOUCHES THE FILE: the File is
+  path (`harness.infra.stream`). NOTHING HERE TOUCHES THE FILE: the File is
   resolved here -- where a session's record belongs is a fact about its project,
   and this is the namespace that joins the two -- and the bytes are the writer's.
 
@@ -555,7 +555,7 @@
   was handed, and the envelope is where the record says whose element it was).
 
   LANDS, WHEN GIVEN, IS CALLED WITH THE RECORD OFFSET THE LINE GOT once it is on disk
-  (`harness.edge.record/append!`), which is how a conversation's entries are numbered:
+  (`harness.infra.stream/push!`), which is how a conversation's entries are numbered:
   the edge attaches it to the lines that CARRY entries -- each of an action's own
   `message` rows, and the terminal frame of its run -- and hands the number to
   `harness.edge.sessions/land!`."
@@ -580,13 +580,13 @@
          offset (let [f (locking log-lock
                           (let [f (log-file-for thread-id)]
                             (when-some [h (header-line! f)]
-                              (record/append! thread-id f h))
+                              (stream/push! thread-id f h))
                               f))]
-                  (record/append! thread-id f line lands))]
+                  (stream/push! thread-id f line lands))]
      ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
      ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
      ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,
-     ;; INSIDE `record/append!` (ADR 0007). The split matters for one concrete reason: `lands`
+     ;; INSIDE `stream/push!` (ADR 0007). The split matters for one concrete reason: `lands`
      ;; takes the SESSION's lock, and a `lands` called while holding this one is a lock-order
      ;; inversion (`.scratch/event-persistence/spec.md`, '锁要往下搬一层').
      ;; THE OFFSET COMES BACK FROM THE WRITE ITSELF (ADR 0007), and this is the caller that
@@ -661,7 +661,7 @@
         ;; LET GO OF EVERY HANDLE FIRST: the next thing this does is RENAME the file, and Windows
         ;; refuses to rename one that is open (ADR 0007 decision 3's price, paid on the one
         ;; occasion it costs anything -- a person re-binding a project).
-        (record/release-handles!)
+        (stream/release-handles!)
         (when-not (.renameTo from to)
           ;; A rename between two directories under one home does not fail for
           ;; want of a filesystem, so this is a real refusal and not a warning:
@@ -1692,7 +1692,7 @@
               ;; number rather than a prediction about a queue. The counts start from zero here
               ;; and the write stream takes them from there.
               (when-some [from (when (some speaks-for-a-person? added)
-                                 (record/flushed-seq thread-id))]
+                                 (stream/flushed-seq thread-id))]
                 (sessions/set-fold-value! thread-id :turn (turn/state-init))
                 (swap! state assoc :turn/from from)
                 (family-send! thread-id {:type "turn/start" :seq from}))
@@ -1857,14 +1857,14 @@
                     ;; WHETHER THIS RUN'S END LEAVES THE TURN OWING ANYTHING, AND WHERE ITS RANGE
                     ;; ENDS (ADR 0006 decision 3). The terminal EVENT arrives before the frame it
                     ;; becomes, so the next line written for this thread IS that frame's line --
-                    ;; `record/flushed-seq` counts what is written, and the write is synchronous
+                    ;; `stream/flushed-seq` counts what is written, and the write is synchronous
                     ;; (ADR 0007), so this asks the record rather than guessing.
                     ;;
                     ;; `:run/interrupt` IS NOT AN ENDING: the calls are a human's to decide, and the
                     ;; run that carries the answer closes the SAME turn.
                     (when (contains? #{:run/end :run/error :run/stopped} (:type ev))
                       (swap! state assoc :turn/closes? true)
-                      (swap! state assoc :turn/to (record/flushed-seq thread-id)))
+                      (swap! state assoc :turn/to (stream/flushed-seq thread-id)))
                     (if (= :run/done (:type ev))
                       (do
                         ;; What happened to this run's MCP servers, drained from the
@@ -3025,7 +3025,7 @@
                                   ;; DEGRADED thread -- a full disk -- must not hang a bind
                                   ;; forever: the wait times out and the move proceeds with
                                   ;; the residual risk the lock cannot close.
-                                  _     (when (not= from-dir to-dir) (record/flush! 5000))
+                                  _     (when (not= from-dir to-dir) (stream/flush! 5000))
                                   moved (try {:ok (move-log! thread-id from-dir to-dir)}
                                              (catch Throwable t {:error (ex-message t)}))]
                               (if-some [move-error (:error moved)]
@@ -3612,8 +3612,8 @@
   ;; walk, no torn tail.
   (if-some [live (live-numbers stem)]
     (api-response 200 (cond-> (assoc live :threadId stem)
-                        (pos? (record/pending-count stem))
-                        (assoc :behind (record/pending-count stem))))
+                        (pos? (stream/pending-count stem))
+                        (assoc :behind (stream/pending-count stem))))
     ;; ...THEN THE STORE (`sessions-remember-their-numbers`), which is what makes the FIRST
     ;; read of a session nobody here holds ONE SELECT instead of a walk of the whole record.
     ;; The stored value is a LAST KNOWN snapshot and says when it was taken (`:numbersAt`), so
@@ -3639,7 +3639,7 @@
                          (catch Throwable t {:error (ex-message t)}))]
         (if (some? (:error folded))
           (api-response 400 {:error (:error folded) :threadId stem})
-          (let [behind (record/pending-count stem)]
+          (let [behind (stream/pending-count stem)]
             (api-response 200 (cond-> (assoc (:ok folded) :threadId stem)
                                 (pos? behind) (assoc :behind behind)))))))))))
 (defn- live-numbers
@@ -3709,7 +3709,7 @@
       :else
       (let [initial (if (some? held) (trajectory/trajectory-answer held)
                                   (trajectory/trajectory-answer (:ok folded)))
-            behind  (record/pending-count stem)
+            behind  (stream/pending-count stem)
             header  (cond-> {:threadId stem :incomplete (:incomplete initial)}
                       (pos? behind) (assoc :behind behind))
             headers (merge {"Content-Type" "application/x-ndjson; charset=utf-8"}
@@ -3995,10 +3995,10 @@
 
   IT IS READ FROM MEMORY, not from the file. The whole point of the fact is that
   the file is BEHIND (or, here, unwritable), so a reader that asked the file could
-  learn nothing; `harness.edge.record` is where the failure lives."
+  learn nothing; `harness.infra.stream` is where the failure lives."
   [thread-id]
-  (let [h (record/health thread-id)
-        d (record/degraded thread-id)]
+  (let [h (stream/health thread-id)
+        d (stream/degraded thread-id)]
     ;; ABSENCE IS THE CLIENT'S 'fine', so a healthy record carries no field at all -- and the WORD
     ;; stays the one the page already draws ("degraded") because a finer fact is not a new
     ;; contract: `:level` and `:says` are what ticket 04 added (L1 behind / L2 stuck / L3 lost), and
@@ -4086,9 +4086,9 @@
         ;; THE HEADER IS THE FILE'S: `header-line!` writes it for THIS path and remembers
         ;; that it did, so the new conversation opens with its own first line while every
         ;; line after it is the parent's.
-        (when-some [h (header-line! dest)] (record/append! new-id dest h))
+        (when-some [h (header-line! dest)] (stream/push! new-id dest h))
         (doseq [line keep]
-          (record/append! new-id dest (str line "\n")))
+          (stream/push! new-id dest (str line "\n")))
         (log! new-id nil "session/forked"
              {:from thread-id
               :kind (name (:kind where))
@@ -4247,7 +4247,7 @@
                   ;; through the queue they would not be there yet, and this route
                   ;; would refuse a log it had just repaired. Draining is what
                   ;; makes the repair and the read one act (ticket 02).
-                  (record/flush! 5000))
+                  (stream/flush! 5000))
         result  (when (nil? (:error located))
                   (try {:ok (replay/rebuild (:ok located))}
                        (catch Throwable t {:error (ex-message t)})))]
@@ -6254,20 +6254,20 @@
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
-                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `record/append!` must not wait for
+                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `stream/push!` must not wait for
                    ;; a database write, and a pass that misses a tick is a NUMBER
                    ;; (`harness.edge.projection/lag`) rather than a lost line. It HAS a teardown,
                    ;; unlike the writer: a process that stops serving stops copying, and the next one
                    ;; resumes at the offset it left.
                    (projection/start!)]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
-    ;; line this process produces goes through it (`harness.edge.record`), and the
+    ;; line this process produces goes through it (`harness.infra.stream`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the
     ;; edge hands its own carry-back over here, where a capability is told which
     ;; implementation it runs with. It has no teardown: one writer serves every
     ;; server this process starts, and a suite that starts a hundred must not
     ;; leave a hundred writer threads behind (or stop the one it has).
-    (record/prepare-with! carry-back!)
+    (stream/prepare-with! carry-back!)
     ;; AND THE RECORD'S FIRST LINE (ticket 06): what a file's header says is the EDGE's to say --
     ;; the row vocabulary is this namespace's (`row-of`) and the conversation's identity is the
     ;; HOME's. The writer only knows WHEN one is due.
@@ -6276,13 +6276,13 @@
        {:format  record-format
         :thread  (str thread-id)
         :created (System/currentTimeMillis)}))
-    (record/start!)
+    (stream/start!)
     ;; THE SESSION TABLE IS LIVE FROM HERE, and it needs both of its outside facts.
     ;; THE PIN FIRST: a session whose bytes are not all on disk may not be put away, or
     ;; 'put away' would mean rebuilding from a record that is behind it -- silently,
     ;; which is the failure ADR 0002 decision 5 exists to refuse. The answer belongs to
-    ;; the writer, so it is handed over rather than guessed (`record/pending?`).
-    (sessions/watch-unflushed! record/pending?)
+    ;; the writer, so it is handed over rather than guessed (`stream/pending?`).
+    (sessions/watch-unflushed! stream/pending?)
     ;; AND THE SWEEPER, because the table holds conversations now: without it, every
     ;; session this process has ever been asked about would be held until it exits.
     ;; AND THE SWEEPER, because the table holds conversations now: without it, every

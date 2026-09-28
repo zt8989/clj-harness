@@ -4,7 +4,7 @@
   ADR 0008 (`docs/adr/0008-the-log-is-the-truth-and-sqlite-projects-it.md`) is the decision, and its
   two halves are what this namespace is shaped by:
 
-    IT IS NOT ON THE WRITE PATH. Nothing here is called by `harness.edge.record` or by `log!`: the
+    IT IS NOT ON THE WRITE PATH. Nothing here is called by `harness.infra.stream` or by `log!`: the
     reader walks each session's NEW BYTES, projects the complete lines it finds, and advances a byte
     offset. A run that is mid-flight is fine -- the projection is simply behind it -- and a process
     that dies mid-pass loses nothing but the pass (the offset is written with the rows it accounts
@@ -336,7 +336,7 @@
   a second start answers the first one's stop fn.
 
   A BACKGROUND THREAD RATHER THAN A STEP ON THE WRITER, which is ADR 0008 decision 2 spelled as a
-  mechanism: `record/append!` must not wait for a database write, and a projection that misses a tick
+  mechanism: `stream/push!` must not wait for a database write, and a projection that misses a tick
   is simply a little further behind -- the number `lag` answers."
   []
   (if-some [s @clock]

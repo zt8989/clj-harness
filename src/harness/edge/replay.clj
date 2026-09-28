@@ -306,7 +306,7 @@
   "A log FILE's records, as a VECTOR, DROPPING a half-written LAST line -- the one shape a
   file being appended to legitimately has.
  
-  The writer hands whole lines to one consumer (`harness.edge.record/append!`), but a reader
+  The writer hands whole lines to one consumer (`harness.infra.stream/push!`), but a reader
   can still catch the newest line mid-flush: that is a fact about reading a live log, not a
   corrupt one, and dropping it is the honest answer -- the rest is what has happened so far.
   EVERY OTHER LINE IS READ STRICTLY: a torn line in the middle is corruption, and a reader
