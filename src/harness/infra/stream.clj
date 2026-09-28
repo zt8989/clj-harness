@@ -340,6 +340,13 @@
   ;; the FILE (`harness.edge.replay`), which is what the file is for.
   (atom {}))
 
+(defonce ^:private everyone
+  ;; The listeners that want EVERY conversation's lines, not one's -- what a reader that belongs to
+  ;; the process rather than to a session attaches (`listen-every!`). They are NOT cleared by
+  ;; `reset-readers!`: they are installed at namespace load, so clearing them would silently
+  ;; unplug a doorbell for the rest of the process (`harness.kernel.session`'s is one).
+  (atom #{}))
+
 (def ^:private kept-per-thread 1024)
 
 (defn- kept!
@@ -354,6 +361,8 @@
   (let [item {:thread-id tid :seq seq :line line :row row :producer producer}]
     (swap! kept update tid (fn [k] (vec (take-last kept-per-thread (conj (or k []) item)))))
     (doseq [f (get @listeners tid)]
+      (try (f item) (catch Throwable _ nil)))
+    (doseq [f @everyone]
       (try (f item) (catch Throwable _ nil)))))
 
 (defn listen!
@@ -366,6 +375,18 @@
   (let [tid (str thread-id)]
     (swap! listeners update tid (fnil conj #{}) f)
     (fn [] (swap! listeners update tid disj f))))
+
+(defn listen-every!
+  "PUSH, for a reader that belongs to the PROCESS rather than to one conversation: hand F every item
+  that lands for ANY thread, in order, on the thread that pushed it. Answers the way to stop.
+
+  IT IS WHAT MAKES THE DOORBELL RACE-FREE (ticket 04 of `.scratch/record-stream`): a listener hears
+  only what lands after it is attached, so a per-session one has a window -- attach it late and the
+  session looks like one whose record never grew. A process-wide reader attaches AT NAMESPACE LOAD,
+  which is before any run has written anything."
+  [f]
+  (swap! everyone conj f)
+  (fn [] (swap! everyone disj f)))
 
 (defn after
   "The items this namespace still keeps for THREAD-ID whose `:seq` is greater than SINCE, oldest

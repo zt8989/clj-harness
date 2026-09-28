@@ -622,19 +622,11 @@
      ;; hands it out: the fact families of ADR 0006 are stamped with it, and `lands` -- when it
      ;; was given -- has already been called with it from inside `append!` (after THAT
      ;; namespace's lock, never inside this one).
-     ;; THE SESSION IS TOLD, NOT A CONSUMER (ticket 04): this is the one write path, and
-     ;; every registered live step advances from the row here. Adding a consumer is
-     ;; registering a step (`harness.edge.sessions/register-step!`), never editing this
-     ;; function -- it no longer knows the meter, or any other consumer, by name.
-     (sessions/row-written! thread-id [nil row])
-     ;; AND A WINDOW IS TOLD, which is a different thing from the line above: a live step
-     ;; advances what the meter and the trajectory know, while a WINDOW reads the RECORD
-     ;; while a run is in flight -- the run's frames are folded into memory only when the
-     ;; run ENDS -- so 'a line was written' is exactly 'what a window would answer may have
-     ;; changed'. It is a MARK here and a ring on the session's own clock, because what a
-     ;; ring costs is a reader re-reading the whole conversation and this call sits on the
-     ;; frame loop (see `harness.kernel.session/growth-interval-ms`).
-     (sessions/record-grew! thread-id)
+     ;; THE READERS ARE NOT TOLD HERE ANY MORE (ticket 04 of `.scratch/record-stream`): they are
+     ;; attached to the STREAM itself, in two shapes -- a live step's doorbell is the process-wide
+     ;; listener `harness.kernel.session` installs at load, and a window's mark rides the same one
+     ;; -- so the one write path WRITES and knows nobody. Adding a consumer is attaching a reader
+     ;; (`harness.infra.stream/listen!` / `listen-every!`), never editing this function.
      offset)))
 
 (defn- move-log!
