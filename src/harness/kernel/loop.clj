@@ -17,15 +17,43 @@
   (swap! history conj message)
   (swap! added conj message))
 
+(defn- drained!
+  "Block until the CONSUMER has drained every event this run emitted before this call: one round
+  trip through the same channel, so the answer comes back IN ORDER (a consumer deals with events
+  in the order they were put).
+
+  IT IS WHAT LETS THE KERNEL WRITE A ROW OF ITS OWN. `replay/fold-frames` folds a run's frames as
+  ONE GROUP, so a row that jumped ahead of the frames this run already emitted would land in the
+  middle of them and a rebuild would read the answer wrong (`.scratch/record-stream` ticket 02).
+
+  A CONSUMER THAT NEVER ANSWERS COSTS ONE DEADLINE and then the write goes ahead: a run stuck on
+  a record is worse than a row in the wrong place, and the record is a copy -- the session is
+  the truth."
+  [emit]
+  (let [done (promise)]
+    (emit (ev/drained done))
+    (deref done 5000 nil)))
+
 (defn- announced!
-  "Put MESSAGE at the end of HISTORY, note it among the messages this run ADDED -- AND TELL THE
-  EDGE, which writes that row the moment it arrives instead of waiting for `:run/done`.
-  THE MESSAGES ARE THE KERNEL'S -- they come out of the LLM, or out of this run's own pre-LLM
-  step, and the kernel is the one that has them first. So the kernel is also the one that SAYS
-  when one exists, and the edge only writes what it is told."
-  [emit history added message]
+  "Put MESSAGE at the end of HISTORY, note it among the messages this run ADDED -- AND WRITE ITS
+  ROW, HERE, through the caller's WRITER (`.scratch/record-stream` ticket 02). THE MESSAGES ARE
+  THE KERNEL'S -- they come out of the LLM, or out of this run's own pre-LLM step, and the kernel
+  is the one that has them first -- so the kernel is the one that writes them, and the edge's
+  writer is only the door (it resolves the file and shapes the row's envelope).
+
+  IT WAITS FOR THE DRAIN FIRST (`drained!`), because the row belongs AFTER the frames of the thing
+  it describes."
+  [barrier write! history added message]
   (added! history added message)
-  (emit (ev/message-added message)))
+  ;; THE BARRIER IS THE RUN'S OWN CHANNEL, NOT THIS CALL'S GATED EMIT: the gate above stops
+  ;; forwarding a call's FRAMES once its attempt is over, and a control event that asked the
+  ;; consumer a question would be dropped there -- the kernel would wait out its whole deadline for
+  ;; an answer nobody was ever asked for.
+  ;;
+  ;; It IS reached through the CALL'S OWN gate when it can be (a live attempt), and the run's
+  ;; channel is what makes the answer ordered.
+  (barrier)
+  (write! message))
 
 (defn- call-position
   "The index in HISTORY of the assistant message that NAMED CALL-ID, or nil when no
@@ -159,7 +187,7 @@
   attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
   prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
   nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
-  [provider history added emit thread-id {:keys [on-overflow recoveries halted? tool-signature
+  [provider history added emit write! barrier thread-id {:keys [on-overflow recoveries halted? tool-signature
                                           idle-timeout-ms]
                                     :or {recoveries 1}
                                     :as _opts}]
@@ -187,7 +215,7 @@
                       ;; pair (`:model/start` .. `:model/end`): the edge writes that row before the
                       ;; `model/end` line lands, so a reader meets the request, the answer and the
                       ;; call's end IN THE ORDER THE RUN HAPPENED IN.
-                      (announced! emit history added message)
+                      (announced! barrier write! history added message)
                       (emit (ev/model-end telemetry))
                       {:message message})
                     (catch Throwable t
@@ -434,7 +462,7 @@
   and a run handed neither is not guarded at all. `:halted?` is supplied HERE from the run's
   own stop switch, so a run a person stopped is not prolonged by a retry that arrives after
   the press, and `:on-pressure` rides the same way (see `drive!`)."
-  [provider history added emit thread-id cancel opts]
+  [provider history added emit write! barrier thread-id cancel opts]
   (let [idle-ms (:idle-timeout-ms opts)
         limit   (long (or (:idle-timeout-retries opts) 0))]
     (loop [attempt 1]
@@ -461,7 +489,7 @@
                           (when (= :model/end (:type e)) (reset! end-seen? true))
                           (emit e)))
             _         (async/thread
-                        (async/>!! ch (try (model-call! provider history added call-emit thread-id
+                        (async/>!! ch (try (model-call! provider history added call-emit write! barrier thread-id
                                                         (assoc opts :halted? #(stop/rung? cancel)))
                                            (catch Throwable t t))))
             answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
@@ -599,6 +627,7 @@
   history> :added <the messages it added, in the order it added them> :unplaced <the
   replayed calls whose answer had to go to the end>}."
   [provider messages emit {:keys [thread-id resume before-llm cancel on-overflow
+                                  write!
                                   overflow-retries on-tool-result tool-signature
                                   on-pressure
                                   ;; THE IDLE GUARD'S TWO KNOBS, resolved by the EDGE from
@@ -608,7 +637,15 @@
                                   ;; not guarded at all.
                                   idle-timeout-ms idle-timeout-retries]
                             :as _opts}]
-  (let [;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
+  (let [;; A RUN WITH NO WRITER WRITES NOTHING, AND THAT IS THE OFFLINE CASE: the loop's own tests
+        ;; drive a run to see what it says, with no edge and no record behind it. The default is a
+        ;; no-op rather than an error, exactly like the other seams above.
+        write! (or write! (fn [_message] nil))
+        ;; THE BARRIER, ONCE PER RUN: "has the consumer drained everything this run has emitted so
+        ;; far?" -- asked on the run's OWN channel (`drained!`), which is the one path the kernel and
+        ;; its consumer share and the only one whose order means anything.
+        barrier (fn [] (drained! emit))
+        ;; THE HISTORY IS MADE VENDOR-LEGAL BEFORE ANYTHING READS IT. A record can deliver an
         ;; answer to a call LATE -- the closing repair a cut-off run's log gets is APPENDED,
         ;; after whatever the client recorded meanwhile -- and folded in file order that
         ;; answer sits behind later messages, where it answers nothing and a vendor refuses
@@ -665,7 +702,10 @@
                     (let [final (if error content
                                     ((or on-tool-result (fn [_ c] c)) name content))]
                       (emit (ev/tool-result id final error))
-                      (emit (ev/message-added {:role "tool" :tool_call_id id :content final}))
+                      ;; AND THE ROW IS WRITTEN BY THE KERNEL ITSELF, once the drain has dealt with
+                      ;; the frames of this call (`drained!`).
+                      (drained! emit)
+                      (write! {:role "tool" :tool_call_id id :content final})
                       final))
         with-skills (fn []
                       (let [[before after] (swap-vals! history prepare thread-id)
@@ -675,7 +715,8 @@
                           (emit (ev/context-injected message))
                           ;; ...AND THE ROW TOO: a message the run derived for itself is part of the
                           ;; returned side, and the record takes it the moment it exists.
-                          (emit (ev/message-added message)))))]
+                          (drained! emit)
+                          (write! message))))]
     (emit (ev/run-start))
     (try
       (let [replay   (if (seq resume)
@@ -747,7 +788,7 @@
                       ;; honoured before this line, so a run somebody stopped does not open a
                       ;; step it will never close.
                       _         (do (reset! step []) (emit (ev/step-start)))
-                      assistant (model-call-watched provider history added emit thread-id cancel
+                      assistant (model-call-watched provider history added emit write! barrier thread-id cancel
                                                     {:on-overflow         on-overflow
                                                      :recoveries          retries
                                                      :idle-timeout-ms     idle-timeout-ms

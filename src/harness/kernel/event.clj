@@ -4,8 +4,8 @@
   carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
   :tool/execute, :tool/post-execute), the two model-call boundaries
   (:model/start, :model/end), the two step boundaries (:step/start, :step/end) and
-  the message a run just added (:message/added) -- and the http edge turns those into
-  jsonl audit lines, never into AG-UI frames.
+  the drain barrier (:drained, which waits for the consumer before the kernel writes a row of its
+  own) -- and the http edge turns those into jsonl audit lines, never into AG-UI frames.
   THE TWO STEP BOUNDARIES ARE ALSO FACTS ON THE SESSION'S DOWNLINK, beside `turn/*` and
   `model/*` (`.scratch/step-events`, ADR 0011): written to the record AND pushed.
 
@@ -34,20 +34,21 @@
   "ARGS is the fully accumulated argument text, not a fragment."
   [id name args] {:type :tool/call :id id :name name :args args})
 
-(defn message-added
-  "A message went into the array THIS RUN is building, AT THE MOMENT IT WENT IN.
+(defn drained
+  "EVERY EVENT BEFORE THIS ONE HAS BEEN DRAINED BY THE CONSUMER, and DONE is delivered once
+  that is true of this one too.
 
-  THE MESSAGES ARE THE KERNEL'S -- they come out of the LLM (or out of this run's own pre-LLM
-  step), and the kernel is the one that has them first. So the kernel is also the one that SAYS
-  so: the edge writes the row the moment it hears this, which is what makes the record read in
-  the order the run happened in -- `model/start`, the request, the answer, `model/end` -- instead
-  of in one lump after the run's terminal frame.
+  THE KERNEL WRITES ITS OWN ROWS NOW (ticket 02 of `.scratch/record-stream`), and a row that
+  jumped ahead of the frames this run already emitted would land IN THE MIDDLE of them --
+  `replay/fold-frames` folds a run's frames as ONE GROUP, so a record split that way is one a
+  rebuild reads wrong.
 
-  THE ONE CHANNEL THAT IS NOT IN THE FRAMES: the assistant's message carries the REASONING, and
-  the reasoning frames are the family `harness.kernel.frames` leaves out of the record on
-  purpose (ADR 0009 drops them; the run's own row is where they come back from). A writer that
-  tried to rebuild that message from the wire would lose exactly the half that rule protects."
-  [message] {:type :message/added :message message})
+  THE ONLY THING THAT KNOWS THE DRAIN IS THE CONSUMER, so the kernel asks it and waits: this event
+  is a round trip through the same channel, and the answer comes back IN ORDER -- everything the
+  run emitted before it has been dealt with by the time it lands. It carries a promise rather than
+  a value because it is a CONTROL event, not a fact: no row is written for it and no frame is made
+  of it."
+  [done] {:type :drained :done done})
 (defn tool-result [id content error?]
   {:type :tool/result :id id :content content :error error?})
 

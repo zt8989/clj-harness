@@ -240,12 +240,10 @@
     (update s :frames conj {:type "RUN_STARTED"
                             :threadId (:thread-id s) :runId (:run-id s)})
 
-    :message/added
-    ;; NO FRAME, AND THAT IS THE WHOLE OF IT. A message the run put in its array is on its way to
-    ;; the RECORD (`harness.edge.http` writes each one the moment it arrives), and the frames for
-    ;; it went out when the model produced it (`TEXT_MESSAGE_*`, `TOOL_CALL_*`). A frame here would
-    ;; be the second copy of the same words -- and the upper-case vocabulary this case is written
-    ;; in is AG-UI's, which has no name for 'the record learned something'.
+    :drained
+    ;; NO FRAME EITHER, AND NOT ONLY BECAUSE IT IS NOT A FACT OF THE RUN: it is the kernel asking
+    ;; the CONSUMER whether it has caught up, and the answer is the promise it carries -- delivered
+    ;; by the consumer itself (`harness.edge.http`'s drain), which is the only thing that knows.
     s
 
     :reasoning/delta

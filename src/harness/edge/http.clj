@@ -1376,7 +1376,17 @@
                           (doseq [[mid _] (:text @state)
                                   row (text-lines state {:type "TEXT_MESSAGE_END" :messageId mid})
                                   :when (not= "TEXT_MESSAGE_END" (:type row))]
-                            (log! thread-id run-id "event" row nil)))]
+                            (log! thread-id run-id "event" row nil)))
+        ;; THE DOOR THE KERNEL WRITES ITS OWN MESSAGES THROUGH (ticket 02 of `.scratch/record-stream`):
+        ;; the kernel has the messages first, so it is the one that writes them -- this is where the
+        ;; file is resolved and the row's envelope is shaped, and where the two things the EDGE owes a
+        ;; row it did not write happen: the open text is closed onto the record first (a row may not
+        ;; split a run's frames), and the account is told, so `:run/done` can tell 'written' from
+        ;; 'forgotten'.
+        write! (fn [message]
+                 (when (= "assistant" (:role message)) (flush-open-text!))
+                 (log-message! thread-id run-id message)
+                 (swap! state update :reported (fnil inc 0)))]
     ;; THE BIRTH -- reading the session's opening, appending this action's own entries,
     ;; writing their rows and naming the session -- HAPPENS INSIDE THE GO BLOCK
     ;; BELOW, on purpose. Reading the instruction files can fail (an unreadable
@@ -1838,6 +1848,9 @@
               ;; :run/done history itself is never converted -- it is the returned
               ;; side of the message record instead.
               (let [events (loop/run-chan provider messages {:thread-id thread-id
+                                                             ;; THE KERNEL WRITES ITS OWN MESSAGES, so it is
+                                                             ;; handed the door (`write!`, above).
+                                                             :write!  write!
                                                              ;; THE RUN'S OWN STOP SWITCH, minted by
                                                              ;; `register-run!` above. The route that
                                                              ;; rings it (`cancel-post`) and the loop
@@ -1993,13 +2006,12 @@
                           ;; row NOW -- so the record is as current as the frames the same run is putting
                           ;; on the wire, and the trajectory can show a tool's RESULT while the run is
                           ;; still going.
-                          ;; THE ANSWER'S ROW COMES SECOND, THOUGH: a run's frames are folded as ONE
-                          ;; GROUP (`replay/fold-frames`), so the open `TEXT_MESSAGE_*` is closed onto
-                          ;; the record first, and only then does the row that belongs to it land.
-                          (when (= :message/added (:type ev))
-                            (when (= "assistant" (:role (:message ev))) (flush-open-text!))
-                            (log-message! thread-id run-id (:message ev))
-                            (swap! state update :reported (fnil inc 0)))
+                          ;; THE KERNEL ASKS WHETHER THE DRAIN HAS CAUGHT UP, and this is where the
+                          ;; answer comes from: everything put on the channel BEFORE this event has
+                          ;; been dealt with -- this loop is the one that deals with them, in order --
+                          ;; so the promise the kernel is waiting on is delivered here.
+                          (when (= :drained (:type ev))
+                            (when-some [done (:done ev)] (deliver done true)))
                           (when-let [[kind payload] (lifecycle-record ev)]
                             ;; THE MODEL FAMILY GOES OUT HERE (ADR 0006 decision 4), stamped with the
                             ;; line's own number -- which `log!` now ANSWERS, because the write is
@@ -2561,7 +2573,15 @@
                      :tools (tools/specs thread-id)}))
             (log-messages! thread-id run-id injected)
             (log! thread-id run-id "provider/init" (provider-line provider :inherited))
-            (let [events (loop/run-chan provider messages {:thread-id  thread-id
+            (let [;; THE KERNEL WRITES ITS OWN MESSAGES, on this route too (ticket 02 of
+                  ;; `.scratch/record-stream`): the door is the same shape as the agent route's, and
+                  ;; the account is what keeps `:run/done` from writing the same row twice.
+                  reported (atom 0)
+                  write!   (fn [message]
+                             (log-message! thread-id run-id message)
+                             (swap! reported inc))
+                  events (loop/run-chan provider messages {:thread-id  thread-id
+                                                         :write!     write!
                                                            :resume     []
                                                            :before-llm project/before-llm
                                                            :tool-signature context/tool-signature
@@ -2579,11 +2599,18 @@
                       ;; handed in' would file an entry of the conversation as this
                       ;; run's own. And the answer is the last thing the subagent
                       ;; actually SAID rather than the last frame on the wire.
-                      (log-messages! thread-id run-id (:added ev))
+                      ;; WHAT THE KERNEL WROTE IS ALREADY ON DISK: this writes only the tail it never
+                      ;; got to -- which is nothing, unless the write itself failed (the row is then
+                      ;; still the account's, and the account is how the reconciliation knows).
+                      (log-messages! thread-id run-id (drop @reported (:added ev)))
                       {:answer (answer-of (:history ev))})
                     (do
                       ;; Tool-lifecycle and model-call events are audit lines rather
                       ;; than wire frames, keyed by toolCallId.
+                      ;; THE KERNEL'S QUESTION IS ANSWERED ON THIS ROUTE TOO: everything put on this
+                      ;; channel before it has been dealt with, and the promise is how it learns that.
+                      (when (= :drained (:type ev))
+                        (when-some [done (:done ev)] (deliver done true)))
                       (when-let [[kind payload] (lifecycle-record ev)]
                         (log! thread-id run-id kind payload))
                       ;; AND THE WIRE FRAMES GO ON THE RECORD, in the subagent's own
