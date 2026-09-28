@@ -132,7 +132,7 @@
 
 (defn install-hook!
   "Hand R to the JVM to run at exit, behind a var so a test can count the
-  installations without exiting a JVM. The same seam `harness.edge.record` has, for
+  installations without exiting a JVM. The same seam `harness.infra.stream` has, for
   the same reason."
   [^Runnable r]
   (.addShutdownHook (Runtime/getRuntime) r))

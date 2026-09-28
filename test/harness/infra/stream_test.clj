@@ -1,8 +1,8 @@
-(ns harness.edge.record-test
+(ns harness.infra.stream-test
   "The record writer (ticket 02): the queue, the offset, the degraded state, and
   the fact that none of it loses a line.
 
-  THE LINE IS THE UNIT HERE, not the frame: a case hands `append!` a string and
+  THE LINE IS THE UNIT HERE, not the frame: a case hands `push!` a string and
   reads the file, so what is under test is the writer and nothing above it. Two
   cases go further on purpose -- `a-session-with-unwritten-lines-is-not-put-away`
   crosses into harness.edge.sessions (the pin this exists for) and
@@ -12,7 +12,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [harness.edge.record :as record]
+            [harness.infra.stream :as stream]
             [harness.edge.sessions :as sessions]
             [harness.test-support :as support])
   (:import (java.util.concurrent CountDownLatch TimeUnit)))
@@ -24,17 +24,18 @@
 ;; after itself would still be at the mercy of whatever ran before it.
 (use-fixtures :each
   (fn [f]
-    (record/reset-writer!)
-    (record/reset-sink!)
-    (record/reset-forcer!)
-    (record/reset-prepare!)
-    (record/start!)
+    (stream/reset-readers!)
+    (stream/reset-writer!)
+    (stream/reset-sink!)
+    (stream/reset-forcer!)
+    (stream/reset-prepare!)
+    (stream/start!)
     (try (f)
          (finally
-           (record/reset-writer!)
-           (record/reset-sink!)
-           (record/reset-forcer!)
-           (record/reset-prepare!)
+           (stream/reset-writer!)
+           (stream/reset-sink!)
+           (stream/reset-forcer!)
+           (stream/reset-prepare!)
            (doseq [tid (keys (sessions/live))] (sessions/drop! tid))))))
 
 ;; --------------------------------------------------------------- the furniture
@@ -66,7 +67,7 @@
   "The real write, installed explicitly. Tests that need to hold, fail, or count
   a write replace this; a test that just wants the file to appear uses it."
   []
-  (record/set-sink! (fn [^java.io.File f line]
+  (stream/set-sink! (fn [^java.io.File f line]
                       (spit f line :append true :encoding "UTF-8"))))
 
 (defn- gated-sink!
@@ -75,7 +76,7 @@
   consumer is parked inside the write, so the queue behind it is a fact."
   []
   (let [release (promise)]
-    (record/set-sink! (fn [^java.io.File f line]
+    (stream/set-sink! (fn [^java.io.File f line]
                         (deref release 10000 nil)
                         (spit f line :append true :encoding "UTF-8")))
     release))
@@ -98,14 +99,14 @@
                                (fn []
                                  (.await go)
                                  (dotimes [i per]
-                                   (record/append! "order" f (line {:writer w :i i})))
+                                   (stream/push! "order" f (line {:writer w :i i})))
                                  (.countDown done)))
                           (.setDaemon true)
                           (.start)))
                       (range writers))]
     (.countDown go)
     (is (.await done 10 TimeUnit/SECONDS) "every writer finished handing lines over")
-    (record/flush! 10000)
+    (stream/flush! 10000)
     (let [lines (written f)]
       (testing "every line that was handed over is on disk, once"
         (is (= (* writers per) (count lines))))
@@ -125,21 +126,21 @@
   ;; returns, and the offset comes back WITH it'. The gate that pinned the async behaviour
   ;; is gone with it: there is no queue to park behind any more.
   (let [f       (log-file-in "lag")
-        offsets [(record/append! "lag" f (line {:n 1}))
-                 (record/append! "lag" f (line {:n 2}))
-                 (record/append! "lag" f (line {:n 3}))]]
+        offsets [(stream/push! "lag" f (line {:n 1}))
+                 (stream/push! "lag" f (line {:n 2}))
+                 (stream/push! "lag" f (line {:n 3}))]]
     (testing "every call answered the offset its own line got"
       (is (= [0 1 2] offsets)))
     (testing "and nothing is behind the record -- nothing was queued"
-      (is (= 0 (record/pending-count "lag")))
-      (is (false? (record/pending? "lag"))))
+      (is (= 0 (stream/pending-count "lag")))
+      (is (false? (stream/pending? "lag"))))
     (testing "once the writer is let go, the backlog drains and the offset catches up"
-      (is (= {:pending 0 :degraded {}} (record/flush! 10000))))
+      (is (= {:pending 0 :degraded {}} (stream/flush! 10000))))
     (testing "THE OFFSET IS THE RECORD'S OWN OFFSET: the file holds exactly that
               many lines, so the nth entry's seq is the nth line"
-      (is (= 3 (record/flushed-seq "lag")))
+      (is (= 3 (stream/flushed-seq "lag")))
       (is (= 3 (count (written f))))
-      (is (= 0 (record/pending-count "lag"))))
+      (is (= 0 (stream/pending-count "lag"))))
     (testing "and the lines are the ones handed over, in order"
       (is (= [1 2 3] (mapv :n (written f)))))))
 
@@ -150,9 +151,9 @@
   (let [f (log-file-in "base")]
     (working-sink!)
     (spit f (str (line {:old 1}) (line {:old 2})) :encoding "UTF-8")
-    (record/append! "base" f (line {:new 3}))
-    (record/flush! 10000)
-    (is (= 3 (record/flushed-seq "base"))
+    (stream/push! "base" f (line {:new 3}))
+    (stream/flush! 10000)
+    (is (= 3 (stream/flushed-seq "base"))
         "two lines were already there; the line this process wrote is the third")
     (is (= 3 (count (written f))))))
 
@@ -164,21 +165,21 @@
   (let [f     (log-file-in "prepare")
         first? (atom true)]
     (working-sink!)
-    (record/prepare-with! (fn [_tid ^java.io.File file]
+    (stream/prepare-with! (fn [_tid ^java.io.File file]
                             ;; once: the "leftover segment" arrives
                             (when (compare-and-set! first? true false)
                               (spit file (line {:carried 1}) :append true :encoding "UTF-8")
                               true)))
-    (record/append! "prepare" f (line {:mine 2}))
-    (record/flush! 10000)
+    (stream/push! "prepare" f (line {:mine 2}))
+    (stream/flush! 10000)
     (testing "the carried line is counted, so the offset still names the last line"
-      (is (= 2 (record/flushed-seq "prepare")))
+      (is (= 2 (stream/flushed-seq "prepare")))
       (is (= 2 (count (written f))))
       (is (= [{:carried 1} {:mine 2}] (written f))))
     (testing "and a prepare that changed nothing does not re-base again"
-      (record/append! "prepare" f (line {:mine 3}))
-      (record/flush! 10000)
-      (is (= 3 (record/flushed-seq "prepare")))
+      (stream/push! "prepare" f (line {:mine 3}))
+      (stream/flush! 10000)
+      (is (= 3 (stream/flushed-seq "prepare")))
       (is (= 3 (count (written f)))))))
 
 ;; --------------------------------------------------------- 4. a write that fails
@@ -186,14 +187,14 @@
 (deftest a-write-that-fails-degrades-the-thread-and-keeps-its-lines
   (let [f (log-file-in "degraded")]
     (working-sink!)
-    (record/append! "bad" f (line {:n 1}))
-    (record/flush! 10000)
-    (record/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
-    (record/append! "bad" f (line {:n 2}))
-    (record/append! "bad" f (line {:n 3}))
-    (record/flush! 500)
+    (stream/push! "bad" f (line {:n 1}))
+    (stream/flush! 10000)
+    (stream/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
+    (stream/push! "bad" f (line {:n 2}))
+    (stream/push! "bad" f (line {:n 3}))
+    (stream/flush! 500)
     (testing "the thread is degraded, by name, with how much is waiting behind it"
-      (let [d (record/degraded "bad")]
+      (let [d (stream/degraded "bad")]
         (is (some? d))
         (is (str/includes? (str (:reason d)) "disk is full"))
         (is (= 2 (:pending d)))
@@ -201,14 +202,14 @@
     (testing "NOTHING IS SKIPPED: the failed line and everything behind it are still
               queued, so the record is an ordered prefix and not a hole"
       (is (= [1] (mapv :n (written f))))
-      (is (= 2 (record/pending-count "bad"))))
+      (is (= 2 (stream/pending-count "bad"))))
     (testing "and the session is held, because its bytes are not all on disk"
-      (is (record/pending? "bad")))
+      (is (stream/pending? "bad")))
     (testing "a healthy disk lets it resume AT the failed line"
       (working-sink!)
-      (record/retry! "bad")
-      (is (= {:pending 0 :degraded {}} (record/flush! 10000)))
-      (is (nil? (record/degraded "bad")))
+      (stream/retry! "bad")
+      (is (= {:pending 0 :degraded {}} (stream/flush! 10000)))
+      (is (nil? (stream/degraded "bad")))
       (is (= [1 2 3] (mapv :n (written f)))
           "no line lost, none duplicated, and none out of order"))))
 
@@ -219,16 +220,16 @@
   (let [bad  (log-file-in "one-bad")
         good (log-file-in "one-good")]
     (working-sink!)
-    (record/append! "good" good (line {:n 1}))
-    (record/flush! 10000)
-    (record/set-sink! (fn [^java.io.File f line]
+    (stream/push! "good" good (line {:n 1}))
+    (stream/flush! 10000)
+    (stream/set-sink! (fn [^java.io.File f line]
                         (if (= (.getParentFile f) (.getParentFile bad))
                           (throw (java.io.IOException. "unwritable"))
                           (spit f line :append true :encoding "UTF-8"))))
-    (record/append! "bad" bad (line {:n 1}))
-    (record/append! "good" good (line {:n 2}))
-    (record/flush! 10000)
-    (is (some? (record/degraded "bad")))
+    (stream/push! "bad" bad (line {:n 1}))
+    (stream/push! "good" good (line {:n 2}))
+    (stream/flush! 10000)
+    (is (some? (stream/degraded "bad")))
     (is (= 2 (count (written good))) "the healthy session was written while the other failed")))
 
 ;; ------------------------------------------------------- 5. the process exits
@@ -238,11 +239,11 @@
   ;; little slow so that the drain has something to drain -- otherwise the test
   ;; would pass on an empty queue.
   (let [f (log-file-in "shutdown")]
-    (record/set-sink! (fn [^java.io.File file l]
+    (stream/set-sink! (fn [^java.io.File file l]
                         (Thread/sleep 5)
                         (spit file l :append true :encoding "UTF-8")))
-    (dotimes [i 40] (record/append! "exit" f (line {:n i})))
-    (let [outcome (record/shutdown!)]
+    (dotimes [i 40] (stream/push! "exit" f (line {:n i})))
+    (let [outcome (stream/shutdown!)]
       (is (= 0 (:pending outcome)) "the queue was emptied before the process let go")
       (is (empty? (:degraded outcome)))
       (is (= (vec (range 40)) (mapv :n (written f)))))))
@@ -262,12 +263,12 @@
     (working-sink!)
     (dotimes [w writers]
       (doto (Thread. (fn []
-                       (dotimes [i per] (record/append! "torn" f (line {:w w :i i})))
+                       (dotimes [i per] (stream/push! "torn" f (line {:w w :i i})))
                        (.countDown done)))
         (.setDaemon true)
         (.start)))
     (is (.await done 10 TimeUnit/SECONDS) "every writer finished handing lines over")
-    (record/flush! 10000)
+    (stream/flush! 10000)
     (let [text (slurp f :encoding "UTF-8")]
       (testing "every line of the file parses on its own"
         (is (= (* writers per) (count (str/split-lines text))))
@@ -288,24 +289,24 @@
     ;; the call returns), so what holds a session away from `sweep!` is the one case that
     ;; still holds lines -- a write that FAILED. Same joint, same property: 'put away' may
     ;; not mean rebuilding from a record that is missing bytes.
-    (record/set-sink! (fn [_ _] (throw (ex-info "the disk is full" {}))))
-    (record/append! "pinned" f (line {:n 1}))
+    (stream/set-sink! (fn [_ _] (throw (ex-info "the disk is full" {}))))
+    (stream/push! "pinned" f (line {:n 1}))
     (sessions/touch! "pinned")
     ;; WHAT THIS CASE OWNS IS THE RECORD'S HALF: a line that could not be written is HELD (so
     ;; `pending?` is the pin `sweep!` asks about) and the failure is nameable. WHAT THE SWEEP
     ;; DOES WITH THE PIN IS `harness.edge.sessions-test`'s case -- it asserts the joint from
     ;; the table's side, and it stays green through this rewrite.
-    (is (record/pending? "pinned") "the line that could not be written is held")
-    (is (= 1 (record/pending-count "pinned")))
-    (is (some? (record/degraded "pinned")) "and the failure is nameable")
+    (is (stream/pending? "pinned") "the line that could not be written is held")
+    (is (= 1 (stream/pending-count "pinned")))
+    (is (some? (stream/degraded "pinned")) "and the failure is nameable")
     ;; THE DISK COMES BACK: `retry!` lands the held line, in place, and nothing is behind any
     ;; more -- the offset it lands at is the one the failed line would have got.
     (working-sink!)
-    (record/retry! "pinned")
-    (is (false? (record/pending? "pinned")) "the held line landed")
-    (is (nil? (record/degraded "pinned")) "and the thread is healthy again")
-    (is (= 1 (record/flushed-seq "pinned")) "one line in the file, at offset 0")
-    (is (= {:pending 0 :degraded {}} (record/flush! 10000)))))
+    (stream/retry! "pinned")
+    (is (false? (stream/pending? "pinned")) "the held line landed")
+    (is (nil? (stream/degraded "pinned")) "and the thread is healthy again")
+    (is (= 1 (stream/flushed-seq "pinned")) "one line in the file, at offset 0")
+    (is (= {:pending 0 :degraded {}} (stream/flush! 10000)))))
 
 ;; ------------------------------------------------- 7. the promise (ticket 04)
 
@@ -314,7 +315,7 @@
   no trace a file can show -- the bytes are in the page cache either way -- so the seam
   (`set-forcer!`) is the only place the THREE MOMENTS can be told apart." []
   (let [asked (atom [])]
-    (record/set-forcer! (fn [^java.io.File f] (swap! asked conj (.getAbsolutePath f)) nil))
+    (stream/set-forcer! (fn [^java.io.File f] (swap! asked conj (.getAbsolutePath f)) nil))
     asked))
 
 (deftest the-write-asks-for-the-promise-every-n-lines
@@ -322,8 +323,8 @@
   ;; what is under test is WHEN the promise is asked for, not the number.
   (let [f     (log-file-in "every")
         asked (counting-forcer!)]
-    (with-redefs [record/fsync-every 3]
-      (dotimes [i 7] (record/append! "every" f (line {:n i}))))
+    (with-redefs [stream/fsync-every 3]
+      (dotimes [i 7] (stream/push! "every" f (line {:n i}))))
     (testing "one promise per three lines, and none for the tail that is not due yet"
       (is (= 2 (count @asked)))
       (is (every? #(= (.getAbsolutePath f) %) @asked)
@@ -336,12 +337,12 @@
   ;; SEAM IS REACHED IS `harness.edge.sessions-test`'s case; this is what the verb does.
   (let [f     (log-file-in "put-away")
         asked (counting-forcer!)]
-    (record/append! "away" f (line {:n 1}))
+    (stream/push! "away" f (line {:n 1}))
     (is (empty? @asked) "nothing was asked for yet: the pace is N lines, not every line")
-    (is (true? (record/fsync! "away")) "the promise is asked for, and answered")
+    (is (true? (stream/fsync! "away")) "the promise is asked for, and answered")
     (is (= [(.getAbsolutePath f)] @asked))
     (testing "a thread this process wrote nothing for is not a failure -- there is nothing to promise"
-      (is (true? (record/fsync! "never-written")))
+      (is (true? (stream/fsync! "never-written")))
       (is (= 1 (count @asked))))))
 
 (deftest the-process-leaving-promises-every-file-it-wrote
@@ -350,10 +351,10 @@
   (let [a     (log-file-in "exit-a")
         b     (log-file-in "exit-b")
         asked (counting-forcer!)]
-    (record/append! "a" a (line {:n 1}))
-    (record/append! "b" b (line {:n 2}))
+    (stream/push! "a" a (line {:n 1}))
+    (stream/push! "b" b (line {:n 2}))
     (is (empty? @asked))
-    (is (= {:pending 0 :degraded {}} (record/shutdown!)))
+    (is (= {:pending 0 :degraded {}} (stream/shutdown!)))
     (is (= #{(.getAbsolutePath a) (.getAbsolutePath b)} (set @asked)))))
 
 (deftest a-refused-promise-does-not-fail-the-line-and-is-not-forgotten
@@ -362,11 +363,11 @@
   ;; not survive a crash. `:fsync` carries the second and the LEVEL stays at L0 -- the record is
   ;; complete, and 'complete' is what the levels are about.
   (let [f (log-file-in "unforced")]
-    (record/set-forcer! (fn [_] "the platter said no"))
-    (is (some? (record/append! "unforced" f (line {:n 1}))) "the line landed")
+    (stream/set-forcer! (fn [_] "the platter said no"))
+    (is (some? (stream/push! "unforced" f (line {:n 1}))) "the line landed")
     (is (= 1 (count (written f))))
-    (is (false? (record/fsync! "unforced")) "and the promise was refused, by name")
-    (let [h (record/health "unforced")]
+    (is (false? (stream/fsync! "unforced")) "and the promise was refused, by name")
+    (let [h (stream/health "unforced")]
       (is (= 0 (:level h)) "the record is complete: nothing is held")
       (is (= "the platter said no" (get-in h [:fsync :why])))
       (is (= 1 (get-in h [:fsync :failures]))))))
@@ -377,27 +378,27 @@
   ;; why it can only be said on the way out.
   (let [f (log-file-in "levels")]
     (testing "L0 -- nothing is held, so there is nothing to say about it"
-      (record/append! "lvl" f (line {:n 1}))
-      (is (= 0 (:level (record/health "lvl"))))
-      (is (= :ok (:state (record/health "lvl")))))
+      (stream/push! "lvl" f (line {:n 1}))
+      (is (= 0 (:level (stream/health "lvl"))))
+      (is (= :ok (:state (stream/health "lvl")))))
     (testing "L1 -- behind, and the sentence names the reason the disk gave"
-      (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
-      (record/append! "lvl" f (line {:n 2}))
-      (let [h (record/health "lvl")]
+      (stream/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+      (stream/push! "lvl" f (line {:n 2}))
+      (let [h (stream/health "lvl")]
         (is (= 1 (:level h)))
         (is (= :behind (:state h)))
         (is (= 1 (:pending h)))
         (is (str/includes? (:says h) "disk is full"))))
     (testing "L2 -- the door was used and the disk refused AGAIN"
-      (record/retry! "lvl")
-      (let [h (record/health "lvl")]
+      (stream/retry! "lvl")
+      (let [h (stream/health "lvl")]
         (is (= 2 (:level h)))
         (is (= :stuck (:state h)))
         (is (= 1 (:retries h)))
         (is (str/includes? (:says h) "stuck"))))
     (testing "L3 -- torn down with the lines still held"
-      (record/shutdown!)
-      (let [h (record/health "lvl")]
+      (stream/shutdown!)
+      (let [h (stream/health "lvl")]
         (is (= 3 (:level h)))
         (is (= :lost (:state h)))
         (is (str/includes? (:says h) "SHORTER THAN THE CONVERSATION"))))))
@@ -407,13 +408,13 @@
   ;; behind again -- it is well. A level that only ever went up would be a level nobody could act
   ;; on.
   (let [f (log-file-in "recovers")]
-    (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
-    (record/append! "recovers" f (line {:n 1}))
-    (record/retry! "recovers")
-    (is (= 2 (:level (record/health "recovers"))))
+    (stream/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+    (stream/push! "recovers" f (line {:n 1}))
+    (stream/retry! "recovers")
+    (is (= 2 (:level (stream/health "recovers"))))
     (working-sink!)
-    (record/retry! "recovers")
-    (let [h (record/health "recovers")]
+    (stream/retry! "recovers")
+    (let [h (stream/health "recovers")]
       (is (= 0 (:level h)))
       (is (= 0 (:retries h)) "a thread that caught up is not on its second strike")
       (is (= [1] (mapv :n (written f)))))))
@@ -422,8 +423,8 @@
   ;; TICKET 05's TABLE. Each number is asserted where it comes from rather than as one whole-map
   ;; equality: the shape may grow, the facts may not drift.
   (let [f (log-file-in "metrics")]
-    (dotimes [i 3] (record/append! "m" f (line {:n i})))
-    (let [t   (record/metrics)
+    (dotimes [i 3] (stream/push! "m" f (line {:n i})))
+    (let [t   (stream/metrics)
           row (get-in t [:threads "m"])]
       (is (= 3 (:lines row)))
       (is (= 3 (get-in t [:totals :lines])))
@@ -433,21 +434,73 @@
       (is (= 0 (:pending row)))
       (is (= (.getAbsolutePath f) (:file row))))
     (testing "a held line is in the same table, at the level it puts the thread at"
-      (record/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
-      (record/append! "m" f (line {:n 9}))
-      (let [row (get-in (record/metrics) [:threads "m"])]
+      (stream/set-sink! (fn [_ _] (throw (java.io.IOException. "disk is full"))))
+      (stream/push! "m" f (line {:n 9}))
+      (let [row (get-in (stream/metrics) [:threads "m"])]
         (is (= 1 (:pending row)))
         (is (= 1 (:level row)))
         (is (= 3 (:lines row)) "a line that was never written is not counted as written")))
     (testing "and a promise that went through is counted, apart from one that was refused"
-      (record/set-forcer! (fn [_] nil))
-      (record/fsync! "m")
-      (record/set-forcer! (fn [_] "the platter said no"))
-      (record/fsync! "m")
-      (let [row (get-in (record/metrics) [:threads "m"])]
+      (stream/set-forcer! (fn [_] nil))
+      (stream/fsync! "m")
+      (stream/set-forcer! (fn [_] "the platter said no"))
+      (stream/fsync! "m")
+      (let [row (get-in (stream/metrics) [:threads "m"])]
         (is (= 1 (:promises row)))
         (is (= 1 (:fsync-failures row)))))
     (testing "and every thread this process wrote has a row"
-      (record/append! "other" (log-file-in "metrics-other") (line {:n 1}))
-      (is (= #{"m" "other"} (set (keys (:threads (record/metrics))))))
-      (is (= 2 (get-in (record/metrics) [:totals :threads]))))))
+      (stream/push! "other" (log-file-in "metrics-other") (line {:n 1}))
+      (is (= #{"m" "other"} (set (keys (:threads (stream/metrics))))))
+      (is (= 2 (get-in (stream/metrics) [:totals :threads]))))))
+
+(deftest a-line-goes-to-a-listener-and-to-a-cursor
+  ;; TICKET 01 of `.scratch/record-stream`: ONE QUEUE, TWO WAYS TO READ IT. A LISTENER is a page
+  ;; that is watching -- a push, no cursor, and it stops when it says so. A CONSUMER is a listener
+  ;; with a MEMORY: a cursor, what it missed, and then the same push. Both are fed by the one
+  ;; `push!`, on the writer's own thread, and neither is a second implementation of the other.
+  (let [f     (log-file-in "readers")
+        heard (atom [])
+        stop  (stream/listen! "readers-thread" (fn [item] (swap! heard conj (:seq item))))]
+    (stream/push! "readers-thread" f (line {:type "event" :payload {:n 1}}))
+    (stream/push! "readers-thread" f (line {:type "event" :payload {:n 2}}))
+    (is (= [0 1] @heard) "the listener heard both, in the order they landed")
+    (is (= [0 1] (mapv :seq (stream/after "readers-thread" nil)))
+        "a reader that held nothing is handed both")
+    (is (= [1] (mapv :seq (stream/after "readers-thread" 0)))
+        "one that held 0 is handed only what came after it")
+    (stop)
+    (stream/push! "readers-thread" f (line {:type "event" :payload {:n 3}}))
+    (is (= [0 1] @heard) "a listener that stopped hears nothing more")
+    (let [pulled (atom [])
+          stop   (stream/consume! "readers-thread" 0 (fn [item] (swap! pulled conj (:seq item))))]
+      (stream/push! "readers-thread" f (line {:type "event" :payload {:n 4}}))
+      (stop)
+      (is (= [1 2 3] @pulled)
+          "a consumer starts at its cursor, and keeps hearing what lands after that")))
+  (testing "and the ring is per conversation, not per file"
+    (stream/push! "readers-other" (log-file-in "readers-other") (line {:type "event"}))
+    (is (= [3] (mapv :seq (stream/after "readers-thread" 2)))
+        "this conversation's own lines, and only the ones after the cursor")
+    (is (= [0] (mapv :seq (stream/after "readers-other" nil)))
+        (str "and another conversation keeps its OWN numbering from zero -- one queue, one number"
+             " PER conversation"))))
+
+(deftest an-item-carries-the-row-and-who-wrote-it
+  ;; TICKET 04 of `.scratch/record-stream`: the two ways to read one queue hand out the LINE and the
+  ;; ROW it came from, so a reader inside this process never has to parse back what the writer was
+  ;; just given -- and `:producer` says whose line it is (ticket 03).
+  (let [heard (atom [])
+        row   {:type "message" :payload {:role "assistant" :content "ok"}}]
+    (stream/listen! "readers-shapes" (fn [item] (swap! heard conj item)))
+    (stream/push! "readers-shapes"
+                  (log-file-in "readers-shapes")
+                  (line row)
+                  nil
+                  {:producer :kernel-message :row row})
+    (testing "the listener is handed both shapes, in one item"
+      (is (= row (:row (first @heard))) "the map it was written from")
+      (is (= (line row) (:line (first @heard))) "and the bytes that reached the file")
+      (is (= :kernel-message (:producer (first @heard))) "and whose line it is"))
+    (testing "and a consumer from an old cursor is handed the same thing"
+      (is (= [0] (mapv :seq (stream/after "readers-shapes" nil))))
+      (is (= row (:row (first (stream/after "readers-shapes" nil))))))))

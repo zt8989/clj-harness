@@ -14,14 +14,21 @@
 (use-fixtures :once support/with-builtins)
 
 (defn- drain-chan [ch]
+  ;; THE CONSUMER'S ONE OBLIGATION BESIDES READING (`.scratch/record-stream` ticket 02): when the
+  ;; kernel asks whether the drain has caught up (`:drained`), it ANSWERS. A CONTROL event is
+  ;; answered and never recorded -- no row is written for it in the real edge either -- so it stays
+  ;; out of `seen` and the run's shape below is what it always was.
   (loop [acc []]
     (if-let [ev (async/<!! ch)]
-      (if (= :run/done (:type ev))
+      (cond
+        (= :run/done (:type ev))
         {:history  (:history ev)
          :added    (:added ev)
          :unplaced (:unplaced ev)
          :seen     acc}
-        (recur (conj acc ev)))
+        (= :drained (:type ev))
+        (do (when-some [done (:done ev)] (deliver done true)) (recur acc))
+        :else (recur (conj acc ev)))
       {:history nil :added nil :unplaced nil :seen acc})))
 
 (defn- drive
@@ -57,7 +64,10 @@
 (defn- without-audit [seen]
   "The audit events ride the same stream as the wire-relevant ones; the run's
   shape is asserted over the latter only. Five kinds are audit-only: the three
-  tool-lifecycle ones and the two model-call boundaries (harness.kernel.event)."
+  tool-lifecycle ones and the two model-call boundaries (`harness.kernel.event`).
+
+  `:drained` IS NOT A KIND OF THE RUN AT ALL: it is the kernel asking the consumer whether it has
+  caught up, the consumer answers it inside `drain-chan`, and nothing about it reaches a reader."
   (remove #(contains? #{:tool/pre-execute :tool/execute :tool/post-execute
                         :model/start :model/end}
                       (:type %))
@@ -724,4 +734,7 @@
         (is (empty? (timeouts seen)))
         ;; THE STEP CLOSES BEFORE THE DEADLINE IS JUDGED (ADR 0011): the call was made, it
         ;; reported nothing, and the run ended -- one step, opened and closed.
-        (is (= [:run/start :step/start :model/start :model/end :step/end :run/end] (mapv :type seen)))))))
+        (is (= [:run/start :step/start :model/start :model/end :step/end :run/end]
+               (mapv :type seen))
+            (str "the answer is announced inside the call's own pair -- the kernel says when a"
+                 " message exists, and the edge writes it there"))))))

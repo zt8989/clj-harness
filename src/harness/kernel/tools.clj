@@ -1058,11 +1058,27 @@
   installing a suspend-type rule of its own, alongside the ones a hooks.edn gate
   installs. The verdict of a human override stands: an approved out-of-bounds call
   executes like :pass."
-  ([call] (run! call nil nil))
-  ([call thread-id] (run! call thread-id nil))
-  ([{:keys [id function] :as _call} thread-id on-phase]
+  ([call] (run! call nil nil nil))
+  ([call thread-id] (run! call thread-id nil nil))
+  ([call thread-id on-phase] (run! call thread-id on-phase nil))
+  ([{:keys [id function] :as _call} thread-id on-phase on-result]
    (let [report (fn [e] (when on-phase (on-phase e)))
-         {:keys [name arguments]} function]
+         {:keys [name arguments]} function
+         ;; THE SEAM'S LAST TWO ACTS, IN ONE PLACE: it TELLS the answer -- the result frame and the
+         ;; tool message's row, told WHERE THEY HAPPENED (`.scratch/record-envelopes`) -- and then
+         ;; closes the call. EVERY path that ANSWERS a call goes through this, refused or not, so
+         ;; both facts land between `tools/execute` and `tools/post-execute`, inside the span this
+         ;; call's own lines describe. THE ONE PATH THAT DOES NOT TELL is a PARKED call: nobody has
+         ;; decided, so there is no answer to tell yet.
+         closing (fn
+                   ([] (report (ev/tool-post-execute id name)) nil)
+                   ([answer]
+                    (when on-result
+                      (on-result {:id id :name name
+                                  :content (:content answer)
+                                  :error (boolean (:error answer))}))
+                    (report (ev/tool-post-execute id name))
+                    answer))]
      (if-let [tool (get (effective-tools thread-id) name)]
        (try
          (let [parsed  (json/read-str (if (str/blank? arguments) "{}" arguments)
@@ -1107,6 +1123,15 @@
                                _ (when-not err
                                    (hook/emit :post-tool-use {:tool_name name
                                                               :tool_input parsed}))
+                               ;; AND THE ANSWER IS TOLD WHILE THE CALL IS STILL THE ONE BEING MADE:
+                               ;; the seam hands it to ON-RESULT (the loop's), which applies the spill and
+                               ;; emits the result frame AND the tool message's row before this call
+                               ;; closes. What it answers is the content the history gets -- the same
+                               ;; bytes, so the model never reads the giant text (`harness.cap.spill`).
+                               told (when (and on-result (nil? suspended))
+                                      (on-result {:id id :name name
+                                                  :content (if err (ex-message err) (str result))
+                                                  :error (boolean err)}))
                                _ (report (ev/tool-post-execute id name))]
                            (cond
                              ;; THE CALL COMPLETED ITS OWN STORY: the record it
@@ -1128,10 +1153,10 @@
                                             true (assoc :reason :elicitation))})
 
                              err
-                             {:content (ex-message err) :error true}
+                             {:content (or told (ex-message err)) :error true}
 
                              :else
-                             {:content (str result) :error false})))
+                             {:content (or told (str result)) :error false})))
                park (fn [reason interrupt-id]
                       ;; A THREAD THAT CANNOT WAIT FOR A HUMAN IS TOLD SO INSTEAD OF
                       ;; BEING PARKED. Everything above decided that this call needs a
@@ -1143,8 +1168,7 @@
                       ;; recorded as parked, because nothing is waiting.
                       (if-let [why (unattended-reason thread-id name reason)]
                         (do (report (ev/tool-pre-execute id name :unattended []))
-                            (report (ev/tool-post-execute id name))
-                            {:content why :error true})
+                            (closing {:content why :error true}))
                         (let [interrupt-id (or interrupt-id
                                                (:interrupt-id (parked-for-call thread-id id))
                                                (str (java.util.UUID/randomUUID)))]
@@ -1163,8 +1187,7 @@
              ;; point parking a call that is never going to execute.
              (or (session-disabled? thread-id name) (base-disabled-by name))
              (do (report (ev/tool-pre-execute id name :disabled []))
-                 (report (ev/tool-post-execute id name))
-                 {:content (disabled-message thread-id name) :error true})
+                 (closing {:content (disabled-message thread-id name) :error true}))
 
              ;; ...then the editing mode's subtraction, which is the only other
              ;; thing that can take a registered tool out of a session's set. It
@@ -1174,15 +1197,13 @@
              ;; have executed anyway.
              (not (served? thread-id name))
              (do (report (ev/tool-pre-execute id name :unserved []))
-                 (report (ev/tool-post-execute id name))
-                 {:content (unserved-message thread-id name) :error true})
+                 (closing {:content (unserved-message thread-id name) :error true}))
 
              (seq missing)
              (do (report (ev/tool-pre-execute id name :missing-args missing))
-                 (report (ev/tool-post-execute id name))
-                 {:content (str "missing required argument(s): "
-                                (str/join ", " (map (fn [k] (clojure.core/name k)) missing)))
-                  :error true})
+                 (closing {:content (str "missing required argument(s): "
+                                   (str/join ", " (map (fn [k] (clojure.core/name k)) missing)))
+                           :error true}))
 
              reason
              (let [existing (parked-for-call thread-id id)
@@ -1191,8 +1212,7 @@
                  :approved (do (report (ev/tool-pre-execute id name :approved []))
                                (execute))
                  :vetoed   (do (report (ev/tool-pre-execute id name :vetoed []))
-                               (report (ev/tool-post-execute id name))
-                               {:content (veto-message decision) :error true})
+                               (closing {:content (veto-message decision) :error true}))
                  ;; Nothing decided yet (or the verdict was already spent, which
                  ;; a replay of the same interrupt would be). ASK THE HOOKS
                  ;; before asking a person: this is PermissionRequest, the point
@@ -1213,8 +1233,7 @@
                      "approve" (do (report (ev/tool-pre-execute id name :approved []))
                                    (execute))
                      "deny"    (do (report (ev/tool-pre-execute id name :vetoed []))
-                                   (report (ev/tool-post-execute id name))
-                                   {:content (delegated-veto-message answer) :error true})
+                                   (closing {:content (delegated-veto-message answer) :error true}))
                      (park reason interrupt-id)))))
 
              ;; THE GATE, last of the refusals. Everything above is this harness
@@ -1235,16 +1254,13 @@
              (let [gate (hook/emit :pre-tool-use {:tool_name name :tool_input parsed})]
                (if (= :block (:verdict gate))
                  (do (report (ev/tool-pre-execute id name :hook-blocked []))
-                     (report (ev/tool-post-execute id name))
-                     {:content (hook-block-message (:reason gate)) :error true})
+                     (closing {:content (hook-block-message (:reason gate)) :error true}))
                  (do (report (ev/tool-pre-execute id name :pass []))
                      (execute))))))
          (catch Throwable t
            ;; A malformed argument payload dies before the pass branch even
            ;; starts; the lifecycle still closes on the seam's own terms.
            (report (ev/tool-executed id name (ex-message t)))
-           (report (ev/tool-post-execute id name))
-           {:content (ex-message t) :error true}))
+           (closing {:content (ex-message t) :error true})))
        (do (report (ev/tool-pre-execute id name :unknown-tool []))
-           (report (ev/tool-post-execute id name))
-           {:content (str "unknown tool: " name) :error true})))))
+           (closing {:content (str "unknown tool: " name) :error true}))))))

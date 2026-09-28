@@ -25,7 +25,7 @@
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
-            [harness.edge.record :as record]
+            [harness.infra.stream :as stream]
             [harness.edge.sessions :as sessions]
             [harness.edge.trajectory :as trajectory]
             [harness.infra.shell :as shell]
@@ -54,7 +54,7 @@
   queue returns at once -- and it is deliberately short: a test that needs the
   writer to be slow is a different test."
   []
-  (record/flush! 5000))
+  (stream/flush! 5000))
 
 (defn- wait-degraded!
   "Wait until the record writer has given up on THREAD-ID, answering what it says
@@ -64,7 +64,7 @@
   [tid]
   (let [deadline (+ (System/currentTimeMillis) 3000)]
     (loop []
-      (or (record/degraded tid)
+      (or (stream/degraded tid)
           (when (< (System/currentTimeMillis) deadline)
             (Thread/sleep 10)
             (recur))))))
@@ -395,6 +395,20 @@
                                             ls))
                                     2000)
            msgs  (mapv replay/payload (filter #(= "message" (replay/kind %)) lines))]
+       (testing "every line says who produced it"
+         ;; TICKET 03 of `.scratch/record-stream`: a reader stops GUESSING which side of a call a
+         ;; row is on -- it asks the row where it came from. Before this, 'the first event of the
+         ;; run' was the only answer, and a resume (which answers before it submits) broke it.
+         (is (every? :producer lines) "no line is left without one")
+         ;; THE VALUE IS A NAME IN THE FILE (JSON has no keywords): the row's `:producer` reads back
+         ;; as a string, and the ones a run writes are these.
+         (is (some #(= "request" (:producer %)) lines) "the request side says so about itself")
+         (is (some #(= "kernel-message" (:producer %)) lines)
+             "and so does a message the run produced")
+         (is (some #(= "frame" (:producer %)) lines) "the wire's own frames say frame")
+         (is (every? #{"record" "kernel-event" "frame" "request" "kernel-message" "fact"}
+                     (map :producer lines))
+             "and every name is one of the six the record's rows are written by"))
        (testing "the entries and every emitted frame are on disk"
          (is (contains? (set (map replay/kind lines)) "message"))
          (is (contains? (set (map replay/kind lines)) "event")))
@@ -461,7 +475,10 @@
          ;; History appends tool messages in the provider's call order, whatever
          ;; the completion order on the wire was.
          (let [tools (filter #(= "tool" (:role %)) msgs)]
-           (is (= ["c1" "c2"] (mapv :tool_call_id tools)))
+           (is (= ["c1" "c2"] (sort (mapv :tool_call_id tools)))
+               (str "one row per call. THE ORDER IS COMPLETION ORDER, not call order: each row is"
+                    " written when its call answers (`.scratch/record-envelopes`), and two calls of"
+                    " one turn run concurrently -- which is the point of writing them as they land."))
            ;; The content is what the read tool actually returned -- compared as
            ;; LINES WITH THE ROW PREFIX STRIPPED, so this case stays a case about
            ;; the log holding the tool result rather than about the shape of a
@@ -2025,7 +2042,7 @@
 
   THE RECORD LAGS THE SESSION BY DESIGN, and the writer flushes in its own time: the
   run's own frames reach the client before every line has landed on disk, so 'what the
-  file holds' is only a fact once it stops changing. `record/pending?` is not enough --
+  file holds' is only a fact once it stops changing. `stream/pending?` is not enough --
   it counts what has been handed to the writer, and the writer's own write can still be
   in flight behind an empty queue (measured: a 20KB `model/start` line landed 3ms after
   the queue went quiet)."
@@ -6464,7 +6481,7 @@
 
 (deftest a-record-that-cannot-be-written-is-said-on-the-routes-the-client-reads
   ;; ADR 0002 DECISION 6: writing can be BEHIND, it may not be SILENT. The failure
-  ;; is the record writer's (`harness.edge.record/degraded`), and this is the half
+  ;; is the record writer's (`harness.infra.stream/degraded`), and this is the half
   ;; the browser can see: the two doors it reads a conversation through say so, so
   ;; the page has something to put on screen. The other half -- that a DEGRADED
   ;; session keeps running and holds its lines -- is asserted in record-test.
@@ -6481,7 +6498,7 @@
        ;; if the terminal frame never landed, `sofar` would answer the cut-off
        ;; refusal instead, and the test would be asking a different question.
        (post-run tid)
-       (record/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
+       (stream/set-sink! (fn [_f _line] (throw (java.io.IOException. "disk is full"))))
        (try
          (#'http/log! tid nil "session/rebuilt" {:messages 0 :via "test"})
          (is (some? (wait-degraded! tid)) "the writer stopped on a line it could not write")
@@ -6495,7 +6512,7 @@
          (testing "POST /rebuild -- the read a session is opened through -- says it too"
            (let [answer (read-json (api-call :post (str "/api/threads/" tid "/rebuild") "{}"))]
              (is (= "degraded" (get-in answer [:record :state])))))
-         (finally (record/reset-sink!)))
+         (finally (stream/reset-sink!)))
        (testing "and a session with nothing wrong carries NO record field at all"
          ;; Absence is the client's 'fine'. A field that said 'ok' on every answer
          ;; would be a field nobody acts on, and the one case worth reading would
@@ -6505,8 +6522,8 @@
          ;; line that failed, and a retry against the same broken disk fails again --
          ;; which would leave this assertion reading a record that is still degraded
          ;; for a reason this test made up rather than one it is asking about.
-         (record/retry! tid)
-         (is (= 0 (:pending (record/flush! 10000))))
+         (stream/retry! tid)
+         (is (= 0 (:pending (stream/flush! 10000))))
          (is (nil? (:record (read-json (sofar tid))))))))))
 
 (deftest a-stalled-record-write-holds-the-run-instead-of-buffering-it
@@ -6538,7 +6555,7 @@
              path (.getAbsolutePath ^java.io.File log)]
          ;; PARK THE WRITE, and count only THIS thread's lines: a line another session of the
          ;; same process writes must not read as this run running ahead of its own record.
-         (record/set-sink!
+         (stream/set-sink!
           (fn [^java.io.File f line]
             (when (= path (.getAbsolutePath f))
               (swap! asked conj line)
@@ -6574,7 +6591,7 @@
                         (remove snapshot-frame? kept))
                      (str "and the stall lost nothing: the record is still the wire minus the"
                           " reasoning family minus the per-token text, plus that text's snapshots")))))
-           (finally (record/reset-sink!))))))))
+           (finally (stream/reset-sink!))))))))
 
 ;; -------------------------------------------------------- the window (ticket 05)
 

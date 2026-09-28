@@ -137,7 +137,7 @@
     ;; "all green" line above them counted neither. A new test namespace belongs in this
     ;; list in the same commit as the file.
     harness.edge.sessions-test
-    harness.edge.record-test
+    harness.infra.stream-test
     harness.edge.delegation-test
     harness.edge.delegation-line-test
     harness.edge.frames-route-test

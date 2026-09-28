@@ -22,7 +22,7 @@
                      The records stay where they are -- an ending outlives the id that named
                      it -- while the commands go, because a session this process no longer
                      serves is one whose background commands nothing here could reach again.
-    :put-away!        `harness.edge.record/fsync!`: the other half of the same moment -- the PROCESSES
+    :put-away!        `harness.infra.stream/fsync!`: the other half of the same moment -- the PROCESSES
                       stop, and the BYTES this process was the only one holding get their promise
                       (ticket 04 of `.scratch/event-persistence`). A record is not a command: it
                       stays, and it should stay on the platter.
@@ -33,7 +33,7 @@
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
             [harness.edge.host :as host]
-            [harness.edge.record :as record]
+            [harness.infra.stream :as stream]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
             [harness.kernel.session :as session]))
@@ -85,7 +85,7 @@
    :hand-over! claims/hand-over!}
 
   :stop-jobs! jobs/stop-session!
-  :put-away!  record/fsync!})
+  :put-away!  stream/fsync!})
 
 (defn install!
   "Install the adapter's half of the session mechanism (tickets 08-10): the map above,

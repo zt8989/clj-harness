@@ -93,6 +93,7 @@
   Nothing else here writes: no jsonl, no process log, nothing under the log tree. That
   is asserted, not assumed (see the test)."
   (:require [harness.kernel.frames :as frames]
+            [harness.infra.stream :as record-stream]
             [harness.kernel.stop :as stop])
   (:import (java.util.concurrent Executors ScheduledExecutorService ThreadFactory
                          TimeUnit)))
@@ -218,7 +219,7 @@
 (defonce ^:private unflushed?
   ;; A session whose bytes are not all on disk may not be put away, because putting it
   ;; away would mean rebuilding from a record that is behind it -- and the difference
-  ;; would be silent. TICKET 02 OWNS THE ANSWER (`harness.edge.record/pending?`), and
+  ;; would be silent. TICKET 02 OWNS THE ANSWER (`harness.infra.stream/pending?`), and
   ;; this is the seam it reaches the table through.
   (atom (constantly false)))
 
@@ -227,7 +228,7 @@
   thread-id; `sweep!` will not put away a session it answers true for.
 
   A seam rather than a field because the answer belongs to the writer
-  (`harness.edge.record`), and this namespace must not grow a second opinion about
+  (`harness.infra.stream`), and this namespace must not grow a second opinion about
   what has been written."
   [f]
   (reset! unflushed? f))
@@ -1255,3 +1256,25 @@
                             growth-interval-ms growth-interval-ms TimeUnit/MILLISECONDS)
       (when (compare-and-set! sweeper nil s)
         (fn [] (stop-clock! s))))))
+
+;; ----------------------------------------------------------- the doorbell is a listener now
+
+;; TICKET 04 OF `.scratch/record-stream`: THE WRITER NO LONGER KNOWS ANY READER. The two things a
+;; live session does with a row that was just written -- advance its registered steps
+;; (`row-written!`) and mark the record as grown (`record-grew!`) -- used to be calls the write path
+;; (`harness.edge.http/log!`) made by name. They are ONE listener, attached to the stream, and the
+;; write path only writes; adding a consumer is attaching a reader, never editing the writer.
+;;
+;; ATTACHED HERE, AT NAMESPACE LOAD, AND THAT IS THE WHOLE TRICK: a listener hears only what lands
+;; AFTER it is attached, so a per-session registration would have a window -- a session attaching
+;; late would look like one whose record never grew, which is the failure the mark exists to end. A
+;; process-wide reader is attached before any run has written anything, which is exactly the
+;; guarantee the direct call used to give for free.
+;;
+;; A LINE WITH NO ROW IS NOT THIS READER'S: the record's own header is pushed as bytes
+;; (`harness.edge.http/header-line!`), never went through `row-written!`, and still does not.
+(record-stream/listen-every!
+ (fn [{:keys [thread-id row]}]
+   (when row
+     (row-written! thread-id [nil row])
+     (record-grew! thread-id))))

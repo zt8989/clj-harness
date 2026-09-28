@@ -1,11 +1,19 @@
-(ns harness.edge.record
-  "THE RECORD WRITER: ONE LINE, WRITTEN BY THE CALLER, ON THE CALLER'S THREAD.
+(ns harness.infra.stream
+  "THE RECORD'S WRITER, AND THE TWO WAYS TO READ WHAT IT WROTE: ONE LINE, WRITTEN BY THE CALLER, ON
+  THE CALLER'S THREAD.
+
+  WHY IT LIVES IN INFRA AND NOT IN THE EDGE (`.scratch/record-stream` ticket 01): 'the bytes are
+  on disk, or the line is HELD and nothing more is written until they are' is a promise about IO,
+  and it was being kept under the edge's name. THE EDGE IS ONE OF ITS PRODUCERS now, beside the
+  kernel -- one queue, one number for both. THE READERS COME IN THE TWO KINDS the record has
+  always had and never named: `listen!` (a PUSH: tell me as lines land) and `consume!`/`after` (a
+  PULL: hand me what I missed and keep going).
 
   ADR 0007 (`docs/adr/0007-the-record-is-written-synchronously.md`) overturned ADR 0002 decision 3.
   The queue and its consumer thread are gone, because what async bought was 'IO is not on the
   response path' -- and the response path is an ACK now (`POST /api/agent` hands the run to the
   socket) -- while it cost the one thing the record is asked for: WHEN A LINE IS ON DISK, AND
-  WHICH LINE IT IS. `append!` answers the offset, so the fact families of ADR 0006 and the cursor
+  WHICH LINE IT IS. `push!` answers the offset, so the fact families of ADR 0006 and the cursor
   of ticket 05 can be stamped without a callback on another thread.
 
   THREE THINGS SURVIVED THE REWRITE EXACTLY, and each is a reason it is a rewrite rather than a
@@ -43,6 +51,10 @@
             [harness.infra.log :as log])
   (:import (java.io File FileOutputStream OutputStreamWriter Writer)))
 
+(declare kept!)
+;; THE READERS ARE DEFINED BELOW `push!` but CALLED BY IT: a line that lands is remembered for a
+;; consumer that starts a moment later and handed to every listener, which is why the writer has to
+;; know that name.
 ;; -------------------------------------------------------------------- the seams
 
 (defonce ^:private prepare
@@ -265,7 +277,7 @@
 
 (declare mark-failed!)
 
-(defn append!
+(defn push!
   "Write LINE for THREAD-ID to FILE, ON THIS THREAD, and answer the offset it got -- or nil when
   the write could not go through (the line is then HELD, and `retry!` is the door that lands it).
 
@@ -279,8 +291,10 @@
   queue, and NOTHING more is written for that thread until `retry!` -- writing the next one would
   leave a hole, and a record with a hole is a different, unreplayable conversation."
   ([thread-id ^File file line]
-   (append! thread-id file line nil))
+   (push! thread-id file line nil nil))
   ([thread-id ^File file line lands]
+   (push! thread-id file line lands nil))
+  ([thread-id ^File file line lands opts]
    (let [tid (str thread-id)]
      (entry-for tid)
      (if (some? (:failed (get @threads tid)))
@@ -305,13 +319,109 @@
                         (mark-failed! tid file t)
                         (hold-line! tid file line lands)
                         false))]
+         ;; AND THE TWO WAYS TO READ IT ARE TOLD NOW, AFTER THE LOCK -- a listener is the caller's
+         ;; code, exactly like `lands`, so it must not run while the writer holds it.
+         (when ok? (kept! tid @landed line (:row opts) (:producer opts)))
          (when (and ok? (some? lands))
            (try (lands @landed) (catch Throwable _ nil)))
          @landed)))))
 
+;; ------------------------------------------------------------ the two ways to read it
+
+(defonce ^:private listeners
+  ;; thread-id -> #{f}: whoever asked to be TOLD, at the moment, about every line that lands.
+  ;; A PUSH: no cursor, no catching up -- a listener is a page that is watching.
+  (atom {}))
+
+(defonce ^:private kept
+  ;; thread-id -> [item], oldest first, each `{:thread-id … :seq … :line …}`. BOUNDED, by the same
+  ;; reasoning the fact ring uses (`harness.edge.mux/fact-buffer-size`): this answers a reader that
+  ;; reconnects a moment later, NOT one that was away for a whole turn -- that reader PULLS from
+  ;; the FILE (`harness.edge.replay`), which is what the file is for.
+  (atom {}))
+
+(defonce ^:private everyone
+  ;; The listeners that want EVERY conversation's lines, not one's -- what a reader that belongs to
+  ;; the process rather than to a session attaches (`listen-every!`). They are NOT cleared by
+  ;; `reset-readers!`: they are installed at namespace load, so clearing them would silently
+  ;; unplug a doorbell for the rest of the process (`harness.kernel.session`'s is one).
+  (atom #{}))
+
+(def ^:private kept-per-thread 1024)
+
+(defn- kept!
+  "Remember ITEM for THREAD-ID (bounded) and hand it to every listener. RUNS OUTSIDE this
+  namespace's lock: a listener is the caller's code, the same rule `lands` follows.
+
+  THE ITEM CARRIES BOTH SHAPES OF THE SAME LINE: `:line` is the bytes that reached the file
+  (what a wire reader wants) and `:row` is the map they came from, WHEN THE CALLER HAS ONE --
+  because an in-process reader should not have to parse back what it just handed over
+  (`.scratch/record-stream` ticket 04). `:producer` says who wrote it (ticket 03)."
+  [tid seq line row producer]
+  (let [item {:thread-id tid :seq seq :line line :row row :producer producer}]
+    (swap! kept update tid (fn [k] (vec (take-last kept-per-thread (conj (or k []) item)))))
+    (doseq [f (get @listeners tid)]
+      (try (f item) (catch Throwable _ nil)))
+    (doseq [f @everyone]
+      (try (f item) (catch Throwable _ nil)))))
+
+(defn listen!
+  "PUSH: hand F every item that lands for THREAD-ID from now on, in order, on the thread that
+  pushed it. Answers the way to stop listening.
+
+  IT RUNS ON THE WRITER'S THREAD, with no lock held, so F must return quickly -- the run that
+  pushed the line waits for it. A listener that has to think belongs behind a channel."
+  [thread-id f]
+  (let [tid (str thread-id)]
+    (swap! listeners update tid (fnil conj #{}) f)
+    (fn [] (swap! listeners update tid disj f))))
+
+(defn listen-every!
+  "PUSH, for a reader that belongs to the PROCESS rather than to one conversation: hand F every item
+  that lands for ANY thread, in order, on the thread that pushed it. Answers the way to stop.
+
+  IT IS WHAT MAKES THE DOORBELL RACE-FREE (ticket 04 of `.scratch/record-stream`): a listener hears
+  only what lands after it is attached, so a per-session one has a window -- attach it late and the
+  session looks like one whose record never grew. A process-wide reader attaches AT NAMESPACE LOAD,
+  which is before any run has written anything."
+  [f]
+  (swap! everyone conj f)
+  (fn [] (swap! everyone disj f)))
+
+(defn after
+  "The items this namespace still keeps for THREAD-ID whose `:seq` is greater than SINCE, oldest
+  first -- what a reader that held SINCE missed. SINCE nil means 'I hold nothing'.
+
+  THE RING IS SHORT BY DESIGN (`kept-per-thread`): a reader that was away for a whole turn asks
+  the FILE instead, and `harness.edge.replay` is that reader -- the one that can answer 'what did
+  I miss' without a bound."
+  [thread-id since]
+  (let [items (or (get @kept (str thread-id)) [])]
+    (if (nil? since)
+      (vec items)
+      (vec (filter (fn [i] (> (long (:seq i)) (long since))) items)))))
+
+(defn consume!
+  "PULL: hand F every item for THREAD-ID after CURSOR (nil = 'I hold nothing') -- the ones still
+  kept (`after`), then every new one, in order. Answers the way to stop.
+
+  A CONSUMER IS A LISTENER WITH A MEMORY: one mechanism plus a cursor, so a reader is not written
+  twice and cannot disagree with itself about what it has seen."
+  [thread-id cursor f]
+  (let [tid (str thread-id)]
+    (doseq [item (after tid cursor)] (f item))
+    (listen! tid f)))
+
+(defn reset-readers!
+  "Forget every listener and everything kept -- what a test says between cases. The RECORD is
+  untouched: this is the in-memory half of the stream, not the file."
+  []
+  (reset! listeners {})
+  (reset! kept {}))
+
 (defn pending-count
   "How many of THREAD-ID's lines are HELD -- a line that could not be written, and everything
-  handed over behind it. 0 for a healthy thread: the write is done when `append!` returns, so
+  handed over behind it. 0 for a healthy thread: the write is done when `push!` returns, so
   there is no queue to count."
   [thread-id]
   (count (:held (get @threads (str thread-id)))))
@@ -434,10 +544,10 @@
         (swap! threads assoc-in [tid :failed] nil)
         (let [held (:held (get @threads tid))]
           (swap! threads assoc-in [tid :held] [])
-          ;; RE-ENTRANT (Clojure's `locking` is a monitor): the drain calls `append!`, which takes
+          ;; RE-ENTRANT (Clojure's `locking` is a monitor): the drain calls `push!`, which takes
           ;; this same lock, and that is deliberate -- one writer, one order.
           (doseq [item held]
-            (append! tid (:file item) (:line item) (:lands item)))
+            (push! tid (:file item) (:line item) (:lands item)))
           ;; WHETHER THE DOOR WAS TRIED AND THE DISK REFUSED AGAIN -- the difference between a
           ;; hiccup and an incident (`health`). The clear above already said 'trying'.
           (if (:failed (get @threads tid))
@@ -542,7 +652,7 @@
     ;; AND THE TABLE GOES OUT WITH THE PROCESS (ticket 05): the numbers a run leaves behind are the
     ;; only ones nobody can ask for afterwards, and one line at exit is what a person reads when
     ;; they come looking for what happened.
-    (log/info! :record/metrics (:totals (metrics)))
+    (log/info! :stream/metrics (:totals (metrics)))
     state))
 
 (defonce ^:private exit-hook-installed (atom false))

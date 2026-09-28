@@ -1,10 +1,11 @@
 (ns harness.kernel.event
-  "The kernel's whole vocabulary: nineteen event kinds. Everything AG-UI-shaped
-  is derived from these by harness.edge.ag-ui, never produced here; seven kinds
+  "The kernel's whole vocabulary: twenty event kinds. Everything AG-UI-shaped
+  is derived from these by harness.edge.ag-ui, never produced here; eight kinds
   carry no wire frame at all -- the three tool-lifecycle ones (:tool/pre-execute,
   :tool/execute, :tool/post-execute), the two model-call boundaries
-  (:model/start, :model/end) and the two step boundaries (:step/start, :step/end)
-  -- and the http edge turns those into jsonl audit lines, never into AG-UI frames.
+  (:model/start, :model/end), the two step boundaries (:step/start, :step/end) and
+  the drain barrier (:drained, which waits for the consumer before the kernel writes a row of its
+  own) -- and the http edge turns those into jsonl audit lines, never into AG-UI frames.
   THE TWO STEP BOUNDARIES ARE ALSO FACTS ON THE SESSION'S DOWNLINK, beside `turn/*` and
   `model/*` (`.scratch/step-events`, ADR 0011): written to the record AND pushed.
 
@@ -33,6 +34,21 @@
   "ARGS is the fully accumulated argument text, not a fragment."
   [id name args] {:type :tool/call :id id :name name :args args})
 
+(defn drained
+  "EVERY EVENT BEFORE THIS ONE HAS BEEN DRAINED BY THE CONSUMER, and DONE is delivered once
+  that is true of this one too.
+
+  THE KERNEL WRITES ITS OWN ROWS NOW (ticket 02 of `.scratch/record-stream`), and a row that
+  jumped ahead of the frames this run already emitted would land IN THE MIDDLE of them --
+  `replay/fold-frames` folds a run's frames as ONE GROUP, so a record split that way is one a
+  rebuild reads wrong.
+
+  THE ONLY THING THAT KNOWS THE DRAIN IS THE CONSUMER, so the kernel asks it and waits: this event
+  is a round trip through the same channel, and the answer comes back IN ORDER -- everything the
+  run emitted before it has been dealt with by the time it lands. It carries a promise rather than
+  a value because it is a CONTROL event, not a fact: no row is written for it and no frame is made
+  of it."
+  [done] {:type :drained :done done})
 (defn tool-result [id content error?]
   {:type :tool/result :id id :content content :error error?})
 
