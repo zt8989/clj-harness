@@ -566,8 +566,15 @@
   [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
                                       :messages messages
-                                      :tools tools
                                       :stream true}
+                               ;; AN EMPTY TOOL TABLE IS NOT SENT AT ALL (owner, 2026-09-28).
+                               ;; A vendor that sees `"tools": []` beside an assistant message
+                               ;; carrying `tool_calls` refuses the whole request -- 'tool calls
+                               ;; and tool results do not match', measured on a compaction that
+                               ;; collected 89 refusals in a row while the SAME session's ordinary
+                               ;; calls (which do carry tools) went through every time. No tools
+                               ;; declared is not 'tools: none', it is the field's absence.
+                               (seq tools) (assoc :tools tools)
                                reasoning-effort (assoc :reasoning_effort reasoning-effort)))
         ;; THE REQUEST LANDS BEFORE IT GOES OUT, so a call that never comes back is
         ;; still on the record -- a hang is exactly when somebody wants to read what
