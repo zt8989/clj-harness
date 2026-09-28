@@ -55,6 +55,10 @@ import { SessionRunContext } from "@/components/session-run-state";
 // bar's Fork can name it. A context for the same reason the two above are: the copied
 // element is rendered as `children` and cannot be handed a prop.
 import { ThreadIdContext } from "@/components/composer-chrome";
+// LOCAL (session-fork): asking the PAGE to switch to a session -- what Fork does once the
+// server has made one. The action bar cannot reach `app.tsx`'s `show` any other way, for
+// the same reason ThreadIdContext above exists.
+import { SessionOpenContext } from "@/components/session-open-context";
 // LOCAL (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): THE TURN the server says is open
 // (`turn/start` / `turn/end`), which is what the dot at a turn's end is about -- see
 // `lib/live-turn.ts` for why it is not the run's word.
@@ -869,6 +873,9 @@ const AssistantActionBar: FC = () => {
   // The refusal sentences are the SERVER's, and they are catalogued under `errors` like
   // every other HTTP refusal this page shows (`session-run-stop.tsx` does the same).
   const { t: tErrors } = useTranslation("errors");
+  // AND THE WAY TO OPEN WHAT A FORK MAKES: the page owns which session is on screen, so
+  // the page is what this asks (see `session-open-context.ts`).
+  const openSession = useContext(SessionOpenContext);
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -920,7 +927,13 @@ const AssistantActionBar: FC = () => {
               className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
               title={t("message.forkTitle")}
               onClick={() => {
-                void forkThread(threadId, null, tErrors).catch((err: unknown) => {
+                void forkThread(threadId, null, tErrors)
+                  // THE FORK LANDS ON THE SERVER AND THE PAGE MOVES TO IT (owner,
+                  // 2026-09-27): the point of forking is to continue from the copy,
+                  // and leaving the reader on the parent they just forked would make
+                  // them find it in the sidebar first.
+                  .then((forked) => openSession(forked.threadId))
+                  .catch((err: unknown) => {
                   window.alert(err instanceof Error ? err.message : String(err));
                 });
               }}

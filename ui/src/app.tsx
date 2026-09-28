@@ -107,6 +107,7 @@ import {
 } from "@/components/approval-gate";
 import { Sidebar } from "@/components/sidebar";
 import { SessionTitle } from "@/components/session-title";
+import { SessionOpenContext } from "@/components/session-open-context";
 import { firstUserText, titleOf } from "@/lib/session-title";
 import { SidebarOpenButton, isWideWindow } from "@/components/sidebar-toggle";
 import { THREAD_COMPONENTS } from "@/components/message-parts";
@@ -1925,6 +1926,10 @@ export function App() {
               draws under the session it belongs to. There is no "no session" box any more
               (the roster mints one at mount, so the column is never empty), and there is
               no ask whose refusal could leave one. */}
+          {/* OPENING A SESSION IS THE PAGE'S, and a message's Fork asks for it through
+              this: the fork lands on the server and the page switches to what it made
+              (`showExisting`, the same door the sidebar's rows use). */}
+          <SessionOpenContext.Provider value={showExisting}>
           {roster.live.map((host) => (
             <SessionHost
               key={`${host.id}:${host.attempt}`}
@@ -1957,6 +1962,7 @@ export function App() {
               />
             </SessionHost>
           ))}
+          </SessionOpenContext.Provider>
         </div>
         {/* THE THIRD COLUMN: ONE COLUMN IN TWO STATES, beside the conversation rather than
             over it (`.scratch/right-pane-tasks`, decision 1). It is a `shrink-0` sibling AFTER

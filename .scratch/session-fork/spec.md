@@ -44,6 +44,10 @@
 store 知道）。现在顶栏读 `GET /api/projects` 每一行的 `firstUserText`（页面从 `onListed` 收下、按 thread
 id 存起来），两边一个权威；store 还没命名时退回页面自己的词。
 
+**fork 完就把页面切到新会话**（主人，2026-09-27）：Fork 的意义就是从副本接着走，把人留在刚被
+fork 的那场上，等于让人自己去侧边栏把它找出来。做法：新开一个 `SessionOpenContext`，页面提供
+`showExisting`（侧边栏行用的同一扇门），消息里的 Fork 拿到新 thread id 之后调它。
+
 ## 机制（已摸清）
 
 - 记录文件 = `<projects-dir>/<workspace>/<sanitize(thread-id)>.jsonl`（`harness.infra.home/log-file`），
