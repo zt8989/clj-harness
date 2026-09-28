@@ -62,7 +62,7 @@
                               (replay/compaction-facts records)
                               (replay/prune-facts records)))))
 
-(deftest a-fork-copies-the-log-as-it-stood-just-before-a-compaction
+(deftest a-fork-copies-the-log-up-to-the-last-step
   (support/with-temp-env [_root _home]
     (let [stop (http/start! {:port 0})
           port (:local-port (meta stop))]
@@ -71,12 +71,8 @@
         (spit-lines! (log-file "src-1")
                      [(header-line "src-1")
                       (msg "r1" "u1" "the work I did")
-                      (fact "compaction/start" {:compactionId "c1"})
-                      (fact "context/compacted" {:compactionId "c1" :summary "S"
-                                                 :shadowed [1] :range {:start 1 :end 1}
-                                                 :tokens 10})
-                      (fact "compaction/end" {:compactionId "c1"})
-                      (msg "r2" "u2" "after the compaction")])
+                      (fact "step/end" {})
+                      (msg "r2" "u2" "after the step")])
 
         (let [{:keys [status body]} (post port "/api/threads/src-1/fork" {})
               new-id (:threadId body)]
@@ -84,22 +80,23 @@
             (is (= 200 status))
             (is (string? new-id))
             (is (= "src-1" (:from body)))
-            (is (= "c1" (:compactionId body))))
+            (is (= 2 (:seq body)) "the step's end it cut after"))
 
           (let [new-f (log-file new-id)
                 text  (slurp new-f :encoding "UTF-8")]
-            (testing "the new record holds the conversation BEFORE the compaction, and no more"
+            (testing "the new record holds the conversation up to that step, and no more"
               (is (.exists new-f))
               (is (str/includes? text "the work I did"))
-              (is (not (str/includes? text "after the compaction")))
-              ;; the raw JSON escapes the slash (`session\/forked`), so the audit line is
+              (is (some #(= "step/end" (replay/kind %)) (replay/read-records new-f))
+                  "the named line is KEPT")
+              (is (not (str/includes? text "after the step")))
               (is (str/includes? text "forked"))
               (is (= ["the work I did"] (model-view new-f))))
 
             (testing "it reads as a log every reader accepts"
               (is (= :settled (:state (replay/record-state (vec (replay/read-records new-f))))))
-              (is (= "session/forked"
-                     (replay/kind (second (filter #(= "event" (:type %)) (replay/read-records new-f))))))
+              (is (some #(= "session/forked" (replay/kind %))
+                        (replay/read-records new-f)))
               (is (not (nil? (replay/header-of (first (replay/read-records new-f)))))))
 
             (testing "the new session is a session: a row, a name, a listing entry"
@@ -107,9 +104,8 @@
               (is (= "[fork]" (project/title new-id)))))
 
           (testing "the parent is untouched"
-            (is (= 6 (count (replay/read-records (log-file "src-1")))))))
+            (is (= 4 (count (replay/read-records (log-file "src-1")))))))
         (finally (stop))))))
-
 (deftest a-cut-inside-a-run-closes-it-so-the-fork-reads
   (support/with-temp-env [_root _home]
     (let [stop (http/start! {:port 0})
@@ -121,9 +117,7 @@
                       (msg "r2" "u1" "start")
                       (frame "r2" {:type "RUN_STARTED" :threadId "src-2" :runId "r2"})
                       (frame "r2" {:type "TEXT_MESSAGE_CONTENT" :messageId "m1" :delta "half"})
-                      (fact "compaction/start" {:compactionId "c1"})
-                      (fact "context/compacted" {:compactionId "c1" :summary "S"})
-                      (fact "compaction/end" {:compactionId "c1"})])
+                      (fact "step/end" {})])
         (let [{:keys [status body]} (post port "/api/threads/src-2/fork" {})
               new-id (:threadId body)
               records (vec (replay/read-records (log-file new-id)))]
@@ -134,7 +128,7 @@
             (is (some #(= "RUN_ERROR" (get-in % [:payload :type])) records))))
         (finally (stop))))))
 
-(deftest a-session-with-no-compaction-is-refused-by-name
+(deftest a-session-with-nothing-to-cut-at-is-refused-by-name
   (support/with-temp-env [_root _home]
     (let [stop (http/start! {:port 0})
           port (:local-port (meta stop))]
@@ -189,14 +183,15 @@
           (let [{:keys [status body]} (fetch port "/api/threads/src-steps/fork-points")]
             (is (= 200 status))
             (is (= [3 6] (mapv :seq (:points body))))
-            (is (= ["step" "step"] (mapv :kind (:points body))))))
+            (is (= [nil nil] (mapv :compactionId (:points body)))
+                "no compaction follows either step -- and a point is a step, never a compaction")
+            (is (= [[] []] (mapv :tools (:points body))))))
 
         (testing "a fork may be cut at a named step, and keeps that line"
           (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {:stepSeq 3})
                 new-id (:threadId body)
                 kinds  (mapv replay/kind (replay/read-records (log-file new-id)))]
             (is (= 200 status))
-            (is (= "step" (:kind body)))
             (is (= 3 (:seq body)))
             (is (= 1 (count (filter #{"step/end"} kinds))))
             (is (not (str/includes? (slurp (log-file new-id) :encoding "UTF-8") "second")))
@@ -205,7 +200,6 @@
         (testing "with no name at all it falls back to the LAST step, not to a refusal"
           (let [{:keys [status body]} (post port "/api/threads/src-steps/fork" {})]
             (is (= 200 status))
-            (is (= "step" (:kind body)))
             (is (= 6 (:seq body)))))
 
         (testing "a line that is not a step's end is refused, and says so"

@@ -178,34 +178,36 @@ export async function stopRun(threadId: string, t: Translate): Promise<{ runId: 
   return (await res.json()) as { runId: string };
 }
 
-/// FORK THE CONVERSATION FROM JUST BEFORE A COMPACTION -- `POST /api/threads/<id>/fork`.
+/// FORK THE CONVERSATION AT ITS LAST STEP -- `POST /api/threads/<id>/fork`.
 ///
-/// THE SERVER DECIDES WHERE THE CUT LANDS: the newest recorded compaction unless one is
-/// named, and everything before it is what the new session starts from. This page says
-/// WHICH conversation, never where -- the boundary is a fact about the record, and a page
-/// that picked one would be guessing at event pairs it cannot see.
+/// THE SERVER DECIDES WHERE THE CUT LANDS: the LAST `step/end` -- the boundary that keeps one
+/// model call together with the tools it asked for, and the same one the compaction plan uses
+/// (`tail-anchor`). This page says WHICH conversation, never where: the boundary is a fact
+/// about the record, and a page that picked one would be guessing at lines it cannot see.
+/// (`GET /api/threads/<id>/fork-points` is where a caller that wants to go back FURTHER picks
+/// a line by hand.)
 ///
-/// THE ANSWER IS THE NEW THREAD ID. The new session is a row in the store like any other,
-/// so it arrives in the sidebar on the host stream; nothing here has to draw it.
+/// THE ANSWER IS THE NEW THREAD ID and the line it cut after. The new session is a row in the
+/// store like any other, so it arrives in the sidebar on the host stream -- and the page
+/// switches to it (`SessionOpenContext`); nothing here has to draw it.
 ///
-/// A REFUSAL IS THE OTHER REAL ANSWER: 409 while a run is in flight, 400 when the
-/// conversation has no recorded compaction, 404 when this home has never heard of it -- and
-/// the server's own sentence says which (see `harness.edge.http/fork-post`).
+/// A REFUSAL IS THE OTHER REAL ANSWER: 409 while a run is in flight, 400 when the conversation
+/// has no step behind it, 404 when this home has never heard of it -- and the server's own
+/// sentence says which (see `harness.edge.http/fork-post`).
 export async function forkThread(
   threadId: string,
-  compactionId: string | null,
   t: Translate,
-): Promise<{ threadId: string; from: string; compactionId: string }> {
+): Promise<{ threadId: string; from: string; seq: number }> {
   const res = await fetch(
     `${API_BASE}threads/${encodeURIComponent(threadId)}/fork`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(compactionId ? { compactionId } : {}),
+      body: "{}",
     },
   );
   if (!res.ok) throw new Error(await refusalFrom(res, t));
-  return (await res.json()) as { threadId: string; from: string; compactionId: string };
+  return (await res.json()) as { threadId: string; from: string; seq: number };
 }
 
 /// WHERE A CONVERSATION HAS GOT TO, as `GET /api/threads/<id>/sofar` states it -- and as

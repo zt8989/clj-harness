@@ -927,7 +927,7 @@ const AssistantActionBar: FC = () => {
               className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
               title={t("message.forkTitle")}
               onClick={() => {
-                void forkThread(threadId, null, tErrors)
+                void forkThread(threadId, tErrors)
                   // THE FORK LANDS ON THE SERVER AND THE PAGE MOVES TO IT (owner,
                   // 2026-09-27): the point of forking is to continue from the copy,
                   // and leaving the reader on the parent they just forked would make

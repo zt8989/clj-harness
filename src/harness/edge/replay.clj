@@ -1067,86 +1067,58 @@
 
 (defn fork-points
   "RECORDS -> every line a fork MAY cut at, in record order, each as
-  {:seq n :kind :step|:compaction :at <epoch ms> :tools [name ..]}.
+  {:seq n :at <epoch ms> :tools [name ..] :compactionId <id|nil>}.
 
-  A CUT AT A STEP KEEPS THAT LINE: a `step/end` closes the step it names (one model call
-  plus the tools it asked for), so a fork cut there ends with a whole step. A CUT AT A
-  COMPACTION KEEPS EVERYTHING BEFORE IT: the compaction's own model call and the summary it
-  writes belong to the half that is cut away. Only a compaction that actually produced a
-  `context/compacted` is a point -- a `compaction/start` closed with an error is a failed
-  attempt, and nobody forks from one.
+  A STEP'S END IS THE ONLY CUT, and it is the same boundary the compaction plan itself uses
+  (`tail-anchor`): one model call plus the tools it asked for, both behind you, so no
+  `assistant(tool_calls)` is ever separated from its answers.
 
-  IT IS THE READER A PERSON PICKS FROM (`GET /api/threads/<stem>/fork-points`): the cut is a
-  LINE, so a caller has to be able to see which lines are legal before it names one."
+  IT KNOWS ABOUT COMPACTIONS WITHOUT BEING CUT BY ONE (owner, 2026-09-28). A cut tied to a
+  `compactionId` made every never-compacted session unforkable -- and the step's ends
+  already cover the same ground, because `relieve-pressure!` runs BETWEEN two steps, before
+  a model call. `:compactionId`, when it is there, is the compaction that happens just
+  after this step, which is what makes 'the fork from before the compaction' a step a
+  person can name like any other."
   [records]
-  (let [done (into #{} (keep (fn [row]
-                               (when (= "context/compacted" (kind row))
-                                 (:compactionId (payload row))))
-                             records))]
-    (vec (keep-indexed (fn [i row]
-                         (cond
-                           (= "step/end" (kind row))
-                           {:seq i :kind :step :at (:ts row)
-                            :tools (vec (keep :name (:tools (payload row))))}
-
-                           (and (= "compaction/start" (kind row))
-                                (contains? done (:compactionId (payload row))))
-                           {:seq i :kind :compaction :at (:ts row)
-                            :compactionId (:compactionId (payload row))}))
-                       records))))
+  (let [rows   (vec records)
+        starts (into {} (keep-indexed (fn [i row]
+                                       (when (= "compaction/start" (kind row))
+                                         [i (:compactionId (payload row))]))
+                                     rows))
+        done   (into #{} (keep (fn [row]
+                                 (when (= "context/compacted" (kind row))
+                                   (:compactionId (payload row))))
+                               rows))]
+    (loop [i (dec (count rows)), next-id nil, acc []]
+      (if (neg? i)
+        (vec (reverse acc))
+        (let [row (nth rows i)
+              ok? (and (contains? starts i) (contains? done (get starts i)))
+              nid (if ok? (get starts i) next-id)]
+          (recur (dec i) nid
+                 (if (= "step/end" (kind row))
+                   (conj acc {:seq i :at (:ts row)
+                              :tools (vec (keep :name (:tools (payload row))))
+                              :compactionId nid})
+                   acc)))))))
 
 (defn fork-cut
-  "RECORDS + optional CUT -> where a fork cuts, as
-  {:cut N :kind :step|:compaction :step-seq n|<:compaction-id id>}, or nil.
+  "RECORDS + optional {:step-seq n} -> where a fork cuts, or nil.
 
-  CUT is nil, {:step-seq n} or {:compaction-id id}:
+  THE ONLY CUT IS A STEP'S END -- one of the lines `fork-points` hands out -- and nil means
+  the LAST one. A line that is not a `step/end` is REFUSED rather than rounded to the nearest
+  one: the caller named a line, and cutting somewhere else would be a different fork.
 
-    nil                 the newest SUCCESSFUL compaction; and when the record has none -- a
-                        conversation that was never compacted -- the LAST `step/end`, so it
-                        can still be forked (owner, 2026-09-28: a cut tied to a compaction
-                        made every never-compacted session unforkable)
-    {:step-seq n}       cut AFTER the `step/end` at line n (that line is kept)
-    {:compaction-id id} cut BEFORE that compaction's `compaction/start`
-
-  BOTH KINDS ARE THE SAME DISCIPLINE the compaction plan itself uses (`tail-anchor`): a
-  cut lands where a whole step -- one model call and the tools it asked for -- is behind
-  it, so no `assistant(tool_calls)` is ever separated from its answers. A STEP THAT IS NOT
-  A `step/end`, and a compaction that wrote no fact, are both REFUSED rather than rounded
-  to the nearest one: the caller named a line, and answering a different line would be a
-  fork from somewhere the caller did not ask for."
+  THE CUT KEEPS THAT LINE (`:cut` is one past it): the step's end closes the step, so the new
+  record ends with a whole step -- the same discipline the compaction plan itself uses."
   ([records] (fork-cut records nil))
   ([records cut]
-   (let [starts  (keep-indexed (fn [i row]
-                                 (when (= "compaction/start" (kind row))
-                                   {:id (:compactionId (payload row)) :idx i}))
-                               records)
-         done    (into #{} (keep (fn [row]
-                                  (when (= "context/compacted" (kind row))
-                                    (:compactionId (payload row))))
-                                records))
-         steps   (keep-indexed (fn [i row] (when (= "step/end" (kind row)) i)) records)
-         settled (filter #(contains? done (:id %)) starts)]
+   (let [n     (:step-seq cut)
+         steps (keep-indexed (fn [i row] (when (= "step/end" (kind row)) i)) records)]
      (cond
-       (some? (:step-seq cut))
-       (when (some #(= (:step-seq cut) %) steps)
-         {:cut (inc (:step-seq cut)) :kind :step :step-seq (:step-seq cut)
-          :at (:step-seq cut)})
-
-       (some? (:compaction-id cut))
-       (when-some [p (first (filter #(and (= (:compaction-id cut) (:id %))
-                                         (contains? done (:id %)))
-                                   starts))]
-         {:cut (:idx p) :kind :compaction :compaction-id (:id p) :at (:idx p)})
-
-       (seq settled)
-       (let [p (last settled)]
-         {:cut (:idx p) :kind :compaction :compaction-id (:id p) :at (:idx p)})
-
-       (seq steps)
-       (let [i (last steps)]
-         {:cut (inc i) :kind :step :step-seq i :at i})
-
-       :else nil))))
+       (some? n)   (when (some #(= n %) steps) {:cut (inc n) :at n :step-seq n})
+       (seq steps) (let [i (last steps)] {:cut (inc i) :at i :step-seq i})
+       :else       nil))))
 
 (defn- compaction-summary
   "The message the model reads in a compacted range: one ordinary user message wrapping the

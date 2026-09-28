@@ -114,19 +114,18 @@ fork 的那场上，等于让人自己去侧边栏把它找出来。做法：新
 `step/end`：一步 = 一次模型调用加上它调的那些工具，切在那里就不会把 `assistant(tool_calls)` 和它的回答分开
 ——压缩自己的 `tail-anchor` 用的就是这条边界。
 
-- `harness.edge.replay/fork-points`：列出**可以切的每一行**——每个 `step/end`（切在那里**保留**这一行）与每一次
-  **成功**压缩的 `compaction/start`（切在它之前），各带 `:seq` / `:kind` / `:at` / `:tools`。
-- `harness.edge.replay/fork-cut` 的 CUT 改成 `{:step-seq n}` | `{:compaction-id id}` | nil：
-  - `{:step-seq n}` —— 第 n 行必须**是** `step/end`，切在它之后（`{:cut (inc n)}`）；
-  - `{:compaction-id id}` —— 必须是一次**成功**压缩的 start，切在它之前；
-  - nil —— 最近一次成功压缩；**一个都没有的会话退回它最后一个 `step/end`**（这就是「从没压过也能 fork」）；
-  - 返回多了 `:at`（被命名的**那一行**）与 `:kind`；`:cut` 仍是「新记录保留到哪一行」。
-  - **给的行不是切点就拒绝**，不四舍五入到最近的一个——调用者点了名，换个地方切就是另一件事。
+- `harness.edge.replay/fork-points`：列出**可以切的每一行**——**只有 `step/end`**（切在那里**保留**这一行），各带
+  `:seq` / `:at` / `:tools` / `:compactionId`（紧跟其后的那次**成功**压缩，没有就是 nil）。
+- `harness.edge.replay/fork-cut` 的 CUT 只收 `{:step-seq n}` 或 nil（**`{:compaction-id id}` 去掉了**，主人，
+  2026-09-28：`fork-points` 已经把它覆盖——压缩跑在两步之间，它前面那个 `step/end` 就是「压缩前」）：
+  - `{:step-seq n}` —— 第 n 行必须**是** `step/end`，切在它之后（`{:cut (inc n)}`）；不是就**拒绝**，不四舍五入；
+  - nil —— 最后一个 `step/end`（所以从没压过的会话也 fork 得动）；
+  - 返回 `{:cut :at :step-seq}`：`:at` 是被命名的**那一行**，`:cut` 是新记录保留到哪一行。
 - `GET /api/threads/<stem>/fork-points`：把上面那些点列出来（尾部 200 条，`:total` 说总数），因为切点是**行号**，
   调用者得先看得见有哪些行可选。
-- `POST /api/threads/<stem>/fork` 的 body 收 `stepSeq`（行号，整数）或 `compactionId`（字符串）；给了但类型不对 → 400
-  `bad-cut`，两个都没给 → 默认。
-- 判据：`fork-test` 的 `a-record-with-no-compaction-forks-at-its-last-step`（默认退到最后一步、任意一步可
-  指、不是 `step/end` 的行被拒、`fork-points` 与它同一批行）；`fork-http-test` 的
-  `the-cut-can-be-any-step-and-the-points-are-listable`（列表、按 step 切并**保留**那一行、无参数退到最后一步、
-  非法行 400 `no-fork-point`、类型不对 400 `bad-cut`）。
+- `POST /api/threads/<stem>/fork` 的 body 只收 `stepSeq`（行号，整数）；给了但不是整数 → 400 `bad-cut`；不给 → 最后一个
+  `step/end`。
+- 判据：`fork-test` 的 `the-cut-is-a-step-end-and-nothing-else`（默认最后一步、任意一步可指、不是 `step/end`
+  的行被拒）、`a-record-with-no-step-behind-it-has-no-fork-point`、
+  `the-points-are-step-ends-and-each-names-the-compaction-after-it`；`fork-http-test` 的
+  `a-fork-copies-the-log-up-to-the-last-step`、`the-cut-can-be-any-step-and-the-points-are-listable`。
