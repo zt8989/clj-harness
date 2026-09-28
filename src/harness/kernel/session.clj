@@ -308,7 +308,16 @@
                        (fn [fs]
                          (reduce-kv (fn [fs name step]
                                       (update fs name step
-                                              {:messages (fn [] (mapv :message (:entries e)))}
+                                              ;; THE SAME ARRAY `messages` HANDS A RUN, COMPACTION
+                                              ;; AND ALL (owner, 2026-09-28): a consumer fold -- the
+                                              ;; meter -- subtracts what it prices here from what the
+                                              ;; vendor priced, so an UNFOLDED reading here charges the
+                                              ;; anchor for text the model is no longer given.
+                                              {:messages (fn [] ((:model-messages @seams)
+                                                                  (:entries e)
+                                                                  (:compactions e)
+                                                                  (:prunes e)))}
+
                                               [i row]))
                                     (or fs {})
                                     steps))))))

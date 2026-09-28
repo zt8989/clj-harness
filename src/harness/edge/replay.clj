@@ -1330,7 +1330,16 @@
       (-> acc
           (assoc :sofar sofar)
           (update :folds folds-step folds
-                  {:messages (fn [] (:messages (:own sofar)))}
+                  ;; THE SAME ARRAY THE LIVE SURFACE SPELLS, COMPACTION AND ALL (owner,
+                  ;; 2026-09-28): the anchor estimate is subtracted from a reading of
+                  ;; `sessions/messages`, which HAS the compaction folded in. Handing the anchor
+                  ;; the UNFOLDED entries charged it for text the model is no longer given --
+                  ;; one session's anchor estimate came out 845,871 against a vendor-measured
+                  ;; 792,609, the anchor was dropped for it, and the fallback estimate (built
+                  ;; from the folded side) read the same session at 54% while it was really 79%.
+                  {:messages (fn [] (compacted-messages (:entries (:own sofar))
+                                                        (:compactions sofar)
+                                                        (:prunes sofar)))}
                   item)))))
 
 (defn- session-init [folds]

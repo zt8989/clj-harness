@@ -262,9 +262,12 @@
   client never holds the prompt (`harness.edge.replay/entries`) -- and it is the single
   largest fixed cost in every request."
   [records]
-  (messages-of (mapv :message (replay/entries records))
-               (some-> (system-row records) replay/payload)
-               (injected-rows (last (trajectory/run-segments records)))))
+  (let [entries (vec (replay/entries records))]
+    (messages-of (replay/compacted-messages entries
+                                          (vec (replay/compaction-facts records))
+                                          (vec (replay/prune-facts records)))
+                 (some-> (system-row records) replay/payload)
+                 (injected-rows (last (trajectory/run-segments records))))))
 
 (defn- identity-index
   "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
