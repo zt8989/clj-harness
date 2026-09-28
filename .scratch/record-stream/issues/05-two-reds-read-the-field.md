@@ -145,3 +145,35 @@ wrote）。所以 `trajectory_test` 里把开篇块写在客户之前的那几�
 `[type payload.role source payload.tool_call_id]` 打出来——**以那条用例自己的真行为准**，
 而不是再去猜 record 的形状。另外：主人提醒「所有消息都该被 start/end 信封包裹，否则要先 fork 重整化」，
 **我看的那条出生序可能来自未重整化的记录**，所以「夹具写反了」这个结论**先不执行**，等重整化后的记录再确认。
+
+## 第六次：探那条 http 用例**自己的记录**（2026-09-28）——根因是「行没写下来」
+
+按票里那一步，在用例里把 `records` 逐行打出来（`[type source payload.role payload.tool_call_id]` +
+每段的规模），然后只跑它一条。读数（43 行，`SEGMENTS [["172308fc…" 4 1] ["2d36ed70…" 2 1]]`）：
+
+```
+ 7 message src=system-prompt role=system
+ 8 message src=client        role=user
+ 9 message src=opening       role=user      ← 真序：客户在前、开篇在后（与出生记录一致）
+10 message src=opening       role=user
+17 message src=model role=assistant
+29 event   role="tool"                      ← 工具那条**答复只有一行 event（线上帧 TOOL_CALL_RESULT）**
+32 message src=system-prompt role=system    ← resume 段开始
+33 message src=client        role=user
+38 message src=model role=assistant
+```
+
+**整份记录里没有任何 `message role="tool"` 行，也没有任何 `tool_call_id`。**
+
+⇒ 那条用例的 `wait-for-recorded`（等一条 content 为 `wrote it` 的 `message` 行）**等超时**，
+`returned` 只剩 `["assistant"]`。**这不是「判据把行分错侧」，是「被 resume 重放的工具答复根本没有写成一
+行 `message`」**——它是 `harness.edge.replay` 与「returned 侧」两处读者共同缺的那一行。
+
+**于是票 05 该拆成**：
+
+1. **补那一行**（resume 重放的工具答复要作为 `message` 行落下——落点在内核重放答复的那条路 /
+   `:run/done` 的对账），这一条才是 `http_test:1397-1399` 红的正主；
+2. **哪一侧**（本轮已定的 `run-produced?`：tool/reasoning 与「真说了话」的 assistant → 返回侧，
+   含**开段那一行**）——第 1 条落地后它的效果才可验；
+3. **夹具的开篇块位置**：本条用例的真记录证实是 `system-prompt → client → opening`，
+   与出生记录一致（主人提醒的「未重整化」在此不适用：这是当前代码真跑写出来的）。夹具按此改。
