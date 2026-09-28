@@ -34,6 +34,11 @@
 七个事件**没有帧**（三条工具生命周期 + 两条模型调用边界 + **两条步边界**）：它们落 jsonl 审计行，
 读它们的是记录的读侧（[edge](edge.md) 那一侧），不是对话。加一帧去装一个统计量就是改协议。
 
+**记录里还有一整族「边缘自己写的 fact」**（`session/*`、`context/*`、`project/*`、`provider/*`、
+`hook/<Point>`、`git/branch` …）——它们既不是内核事件，也不在上面这张表里；清单与含义在
+[edge](edge.md) 的记录一节（`/api/threads/<stem>/fork` 这类路由写下的 `session/forked` 就在那儿）。
+这条界线是「谁说的话」：内核说的是**这一轮发生了什么**，边缘说的是**这场会话自己经历了什么**。
+
 ## 循环：`harness.kernel.loop`
 
 ```

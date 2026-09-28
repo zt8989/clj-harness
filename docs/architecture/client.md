@@ -30,7 +30,8 @@ components/
                      rail 与列表都是 `hidden` 而不是卸载（侧栏那份 `/api/projects` 的挂载读只有它发，见下）
   app-brand.tsx     品牌行的记号（内联 SVG，`aria-hidden`）与产品名；产品名是常量不是词表条目，
                      所以它从 `lib/session-title.ts` 取（同一个词在 tab 尾巴上还要说一遍）
-  session-title.tsx 对话列顶栏那行标题：读这一场的第一句用户消息，画出来，并让浏览器 tab 跟上
+  session-title.tsx 对话列顶栏那行标题：画**库里的** title（`app.tsx` 从每次 `/api/projects` 收下、按
+                     thread id 传给会话列），并让浏览器 tab 跟上
                      （只有 `visible` 的那个 host 渲染它，所以「哪一场可见」不用问页面）。
                      顶栏是 `app.tsx` 里一个 **`h-12`（= demo 的 `3rem`）的两行块**：
                      上行标题、下行 视图页签。这个高度是**与侧边栏品牌行对齐**用的——
@@ -101,14 +102,15 @@ lib/
                     `running`），与仍然要拒的两句话（归档 / 删项目）。**改名自 `run-state.ts`**：
                     旧名字说的是「整页在跑」，而那个前提没了
   session-title.ts  一场会话的**标题**：原始一句人话变成标题的那条规矩（`titleOf`：空白折叠 +
-                    按**码点**裁到 60 并加 `…`）、从运行时消息里取第一句（`firstUserText`）、
-                    没说过话时用的那句词（`sessionTitle`，词由调用方传），
+                    没说过话时用的那句词（`sessionTitle`，词由调用方传）、
+                    `firstUserText`（从运行时消息里取第一句——**页面自己那份**，见下）、
                     以及 tab 尾巴上的 `<标题> · clj-harness`（`documentTitle`）与产品名常量。
                     **零 import**（只有类型），被 UI 套件当成数来测。
-                    **标题有两个来源、却只有这一条规矩**：库里 `sessions.title` 那份（第一次
-                    收到消息的那次 run 写下的，列表给每一行都带着）与页面自己握着的运行时那份
-                    （`firstUserText`，刚打完的那句立刻就在）。两份都过 `titleOf`，所以行与顶栏
-                    永远不会对「什么是标题」有不同看法
+                    **顶栏与列表读的是同一份**（2026-09-27）：库里 `sessions.title` 那份（第一次
+                    收到消息的那次 run 写下的，每次 `/api/projects` 都带着），所以 fork 出来的
+                    会话在顶栏也显示 `[fork] …`。页面自己那份（`firstUserText`）只在**列表还没
+                    命名它**的那一小段时间兜底（刚打完的第一句）。两份都过 `titleOf`，所以对
+                    「什么是标题」仍只有一条规矩。
   reveal.ts         「够着才出现」那串类（行上的归档 / 取消归档 / 删除、项目那行的「更多」）：
                     **一处定义**，因为两个调用点曾经以同一种方式错——`Button` 底座的
                     `disabled:opacity-50` 与揭示用的 `opacity-0` 是**同一个工具类的同一个变体**，
