@@ -484,3 +484,23 @@
     (is (= [0] (mapv :seq (stream/after "readers-other" nil)))
         (str "and another conversation keeps its OWN numbering from zero -- one queue, one number"
              " PER conversation"))))
+
+(deftest an-item-carries-the-row-and-who-wrote-it
+  ;; TICKET 04 of `.scratch/record-stream`: the two ways to read one queue hand out the LINE and the
+  ;; ROW it came from, so a reader inside this process never has to parse back what the writer was
+  ;; just given -- and `:producer` says whose line it is (ticket 03).
+  (let [heard (atom [])
+        row   {:type "message" :payload {:role "assistant" :content "ok"}}]
+    (stream/listen! "readers-shapes" (fn [item] (swap! heard conj item)))
+    (stream/push! "readers-shapes"
+                  (log-file-in "readers-shapes")
+                  (line row)
+                  nil
+                  {:producer :kernel-message :row row})
+    (testing "the listener is handed both shapes, in one item"
+      (is (= row (:row (first @heard))) "the map it was written from")
+      (is (= (line row) (:line (first @heard))) "and the bytes that reached the file")
+      (is (= :kernel-message (:producer (first @heard))) "and whose line it is"))
+    (testing "and a consumer from an old cursor is handed the same thing"
+      (is (= [0] (mapv :seq (stream/after "readers-shapes" nil))))
+      (is (= row (:row (first (stream/after "readers-shapes" nil))))))))

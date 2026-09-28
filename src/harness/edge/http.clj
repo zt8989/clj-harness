@@ -611,7 +611,7 @@
                             (when-some [h (header-line! f)]
                               (stream/push! thread-id f h))
                               f))]
-                  (stream/push! thread-id f line lands {:producer (get row :producer)}))]
+                  (stream/push! thread-id f line lands {:producer (get row :producer) :row row}))]
      ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
      ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
      ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,

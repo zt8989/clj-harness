@@ -321,7 +321,7 @@
                         false))]
          ;; AND THE TWO WAYS TO READ IT ARE TOLD NOW, AFTER THE LOCK -- a listener is the caller's
          ;; code, exactly like `lands`, so it must not run while the writer holds it.
-         (when ok? (kept! tid @landed line (:producer opts)))
+         (when ok? (kept! tid @landed line (:row opts) (:producer opts)))
          (when (and ok? (some? lands))
            (try (lands @landed) (catch Throwable _ nil)))
          @landed)))))
@@ -344,9 +344,14 @@
 
 (defn- kept!
   "Remember ITEM for THREAD-ID (bounded) and hand it to every listener. RUNS OUTSIDE this
-  namespace's lock: a listener is the caller's code, the same rule `lands` follows."
-  [tid seq line producer]
-  (let [item {:thread-id tid :seq seq :line line :producer producer}]
+  namespace's lock: a listener is the caller's code, the same rule `lands` follows.
+
+  THE ITEM CARRIES BOTH SHAPES OF THE SAME LINE: `:line` is the bytes that reached the file
+  (what a wire reader wants) and `:row` is the map they came from, WHEN THE CALLER HAS ONE --
+  because an in-process reader should not have to parse back what it just handed over
+  (`.scratch/record-stream` ticket 04). `:producer` says who wrote it (ticket 03)."
+  [tid seq line row producer]
+  (let [item {:thread-id tid :seq seq :line line :row row :producer producer}]
     (swap! kept update tid (fn [k] (vec (take-last kept-per-thread (conj (or k []) item)))))
     (doseq [f (get @listeners tid)]
       (try (f item) (catch Throwable _ nil)))))
