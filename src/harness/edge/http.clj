@@ -367,7 +367,10 @@
   conversation's own file. runId is nil: this happens on the way to a record, not
   inside a run. A caller that cannot afford this to throw swallows it."
   [^java.io.File f kind payload]
-  (spit f (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil}
+  (spit f (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil
+                                      ;; THE RECORD'S OWN FURNITURE TOO: it is a line about the
+                                      ;; record (a leftover segment it carried), not a run's doing
+                                      :producer :record}
                                       (row-of kind payload)))
                "\n")
         :append true :encoding "UTF-8"))
@@ -525,10 +528,33 @@
           [before _] (swap-vals! headers-written #(if (contains? % p) % (conj % p)))]
       (when-not (contains? before p)
         (when-some [payload (@header-fn (str/replace (.getName f) #"\.jsonl$" ""))]
-          (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil}
+          (str (json/write-str (merge {:ts (System/currentTimeMillis) :runId nil
+                                      ;; THE RECORD'S OWN FURNITURE, not a run's doing
+                                      :producer :record}
                                       (row-of "record/header" payload)))
                "\n"))))
     (catch Throwable _ nil)))
+(def ^:dynamic *producer*
+  "WHO IS WRITING, for the row's own `:producer` (`.scratch/record-stream` ticket 03).
+
+  A ROW SAYS WHERE IT CAME FROM, and the readers need it: 'is this line part of what a call was
+  HANDED, or something the run produced?' is the question `harness.edge.trajectory` used to answer
+  by POSITION -- and position stopped being an answer the moment the record began to be written as
+  the run happens (a resume answers before it submits). Bound by the two chokepoints that write a
+  batch -- the request side (`:request`) and the kernel's messages (`:kernel-message`) -- and
+  worked out from the KIND when nobody said (`producer-of`)."
+  nil)
+
+(defn- producer-of
+  "The default producer of a row of KIND carrying PAYLOAD: an audit row derived from a kernel
+  event, a CUSTOM frame (a fact the harness stated on its own), or a plain wire frame. A `message`
+  row is the RUN's unless the caller says otherwise -- the request batch is the one that does."
+  [kind payload]
+  (case kind
+    "message" :kernel-message
+    "event"   (if (and (map? payload) (= "CUSTOM" (:type payload))) :fact :frame)
+    :kernel-event))
+
 (defn- log!
   "The line goes to the record writer, which appends it off this thread's own
   path (`harness.infra.stream`). NOTHING HERE TOUCHES THE FILE: the File is
@@ -566,6 +592,9 @@
   ([thread-id run-id kind payload lands extra]
    (let [row  (merge {:ts (System/currentTimeMillis) :runId run-id}
                      extra
+                     ;; WHO PRODUCED IT, ON THE ROW: the envelope may say, then whoever is bound
+                     ;; (a batch says it about itself), then the kind's own default.
+                     {:producer (or (:producer extra) *producer* (producer-of kind payload))}
                      (row-of kind payload))
          line (str (json/write-str row) "\n")
          ;; THE OFFSET COMES BACK FROM THE WRITE ITSELF (ADR 0007), and this is the caller that
@@ -582,7 +611,7 @@
                             (when-some [h (header-line! f)]
                               (stream/push! thread-id f h))
                               f))]
-                  (stream/push! thread-id f line lands))]
+                  (stream/push! thread-id f line lands {:producer (get row :producer)}))]
      ;; WHERE THE LINE GOES IS STILL DECIDED UNDER `log-lock` -- a bind rewrites the binding and
      ;; MOVES the file (`move-log!`), and a line resolved outside the lock could be addressed to
      ;; a workspace the conversation has just left -- WHILE THE WRITE ITSELF HAPPENS OUTSIDE IT,
@@ -843,7 +872,11 @@
   the wire does, and a reader watching a run sees each tool's ANSWER and each answer's row as it
   happens instead of in one lump after the run's terminal frame."
   [thread-id run-id message]
-  (log! thread-id run-id "message" message nil {:source (returned-source message)}))
+  ;; A MESSAGE ROW WRITTEN HERE IS THE KERNEL'S (`:message/added`, and the account's tail) -- so it
+  ;; says so. Ticket 02 of `.scratch/record-stream` hands the pen itself over; until then the row
+  ;; names whose message it is, which is what the readers ask.
+  (binding [*producer* :kernel-message]
+    (log! thread-id run-id "message" message nil {:source (returned-source message)})))
 
 (defn- log-messages!
   "The same rows in a batch -- what the run's own ACCOUNT (`:added`) is reconciled against at
@@ -1321,8 +1354,15 @@
         ;; lands when the call it was assembled for begins.
         queued (atom [])
         hold!  (fn [thunk] (swap! queued conj thunk) nil)
-        request-log! (fn [& args] (hold! (fn [] (apply log! args))))
-        request-messages! (fn [& args] (hold! (fn [] (apply log-messages! args))))
+        ;; THE REQUEST SIDE SAYS SO ABOUT ITSELF (ticket 03): these are the rows this run wrote FOR
+        ;; a call, and the binding is CAPTURED here because the thunk runs later, at the flush.
+        request-log! (fn [& args]
+                       (let [p (or *producer* :request)]
+                         (hold! (fn [] (binding [*producer* p] (apply log! args))))))
+        request-messages! (fn [& args]
+                            (let [p (or *producer* :request)]
+                              (hold! (fn [] (binding [*producer* p]
+                                             (apply log-messages! args))))))
         flush-request! (fn []
                          (let [writes (first (reset-vals! queued []))]
                            (doseq [write writes] (write))))

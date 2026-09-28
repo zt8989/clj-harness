@@ -291,8 +291,10 @@
   queue, and NOTHING more is written for that thread until `retry!` -- writing the next one would
   leave a hole, and a record with a hole is a different, unreplayable conversation."
   ([thread-id ^File file line]
-   (push! thread-id file line nil))
+   (push! thread-id file line nil nil))
   ([thread-id ^File file line lands]
+   (push! thread-id file line lands nil))
+  ([thread-id ^File file line lands opts]
    (let [tid (str thread-id)]
      (entry-for tid)
      (if (some? (:failed (get @threads tid)))
@@ -319,7 +321,7 @@
                         false))]
          ;; AND THE TWO WAYS TO READ IT ARE TOLD NOW, AFTER THE LOCK -- a listener is the caller's
          ;; code, exactly like `lands`, so it must not run while the writer holds it.
-         (when ok? (kept! tid @landed line))
+         (when ok? (kept! tid @landed line (:producer opts)))
          (when (and ok? (some? lands))
            (try (lands @landed) (catch Throwable _ nil)))
          @landed)))))
@@ -343,8 +345,8 @@
 (defn- kept!
   "Remember ITEM for THREAD-ID (bounded) and hand it to every listener. RUNS OUTSIDE this
   namespace's lock: a listener is the caller's code, the same rule `lands` follows."
-  [tid seq line]
-  (let [item {:thread-id tid :seq seq :line line}]
+  [tid seq line producer]
+  (let [item {:thread-id tid :seq seq :line line :producer producer}]
     (swap! kept update tid (fn [k] (vec (take-last kept-per-thread (conj (or k []) item)))))
     (doseq [f (get @listeners tid)]
       (try (f item) (catch Throwable _ nil)))))

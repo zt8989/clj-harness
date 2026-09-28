@@ -395,6 +395,20 @@
                                             ls))
                                     2000)
            msgs  (mapv replay/payload (filter #(= "message" (replay/kind %)) lines))]
+       (testing "every line says who produced it"
+         ;; TICKET 03 of `.scratch/record-stream`: a reader stops GUESSING which side of a call a
+         ;; row is on -- it asks the row where it came from. Before this, 'the first event of the
+         ;; run' was the only answer, and a resume (which answers before it submits) broke it.
+         (is (every? :producer lines) "no line is left without one")
+         ;; THE VALUE IS A NAME IN THE FILE (JSON has no keywords): the row's `:producer` reads back
+         ;; as a string, and the ones a run writes are these.
+         (is (some #(= "request" (:producer %)) lines) "the request side says so about itself")
+         (is (some #(= "kernel-message" (:producer %)) lines)
+             "and so does a message the run produced")
+         (is (some #(= "frame" (:producer %)) lines) "the wire's own frames say frame")
+         (is (every? #{"record" "kernel-event" "frame" "request" "kernel-message" "fact"}
+                     (map :producer lines))
+             "and every name is one of the six the record's rows are written by"))
        (testing "the entries and every emitted frame are on disk"
          (is (contains? (set (map replay/kind lines)) "message"))
          (is (contains? (set (map replay/kind lines)) "event")))

@@ -84,3 +84,24 @@ harness.infra.stream      ;; 新：队列 + 两种读法，唯一主人
 「哪一侧」），**这一刀没多出一处红**。
 
 **下一站**：票 02 与票 03（都被 01 解锁），之后 04 → 05 → 06。
+
+## 落地：票 03（2026-09-28）
+
+**每一行都说自己从哪来**：行的信封多一个 `:producer`，取值为
+`record`（记录自己的家具：head 行、carry-back 的审计行）／`kernel-event`（由内核事件派生的审计行）／
+`kernel-message`（内核产出的消息，含它的注入与重放答复）／`request`（这一轮为某次调用写下的请求批：
+prompt、动作的条目、指令更新、压力读数）／`frame`（线上帧）／`fact`（以 CUSTOM 帧形态落行的那些事实）。
+
+- **一个咽喉决定默认值**（`harness.edge.http/producer-of`）：`message` 默认 `kernel-message`、
+  `event` 看是不是 CUSTOM（是则 `fact`，否则 `frame`）、其余 `kernel-event`；
+- **写批次的两个人自己说**（`*producer*` 动态绑定，在请求批与 message 行两处）：请求批绑 `request`
+  （绑定在 thunk 里**重新捕获**，因为那个 thunk 是稍后才跑的），消息行绑 `kernel-message`；
+- `harness.infra.stream/push!` 收一个可选 `{:producer …}`，把它带进**内存 item**（读者两种都能用）；
+- **一个绕过也补上了**：`carry-audit!` 是直接 `spit` 的（不走 `log!`），行上没有 producer —— 用例抓到了，
+  现在它也是 `:record`。
+
+**判据**：`records-the-run-as-jsonl` 里新增一段断言——每一行都有 `:producer`、请求侧说 `request`、
+返回的消息说 `kernel-message`、线帧说 `frame`、且**所有取值都落在那六个名字里**（值在文件里是**字符串**：
+JSON 没有 keyword）。`http-test` = **115 / 1246 / 3**，那 3 条仍是既有的、票 05 要收的那一处。
+
+**下一站**：票 02（内核 push 它的消息）——它一落地，04 就解锁。
