@@ -1110,12 +1110,17 @@ const SessionColumn: FC<{
   /// same reason: `null` when this host is not following a window at all, which is every
   /// session that was opened from the sidebar or whose log had to be repaired.
   window: WindowControls | null;
+  /// THE TITLE THE STORE HOLDS FOR THIS SESSION, or null before a listing names it.
+  /// The page keeps it from every `GET /api/projects` the sidebar hands up (owner,
+  /// 2026-09-27): the top bar draws the SAME copy the row beside it draws, so the two
+  /// cannot disagree -- and a session that was FORKED keeps the name it was given.
+  title: string | null;
   /// THE PAGE'S OWN PENDING BINDINGS, BY SESSION ID -- the map the first run registers
   /// from (`registerPending`), which is where a minted session's directory lives until
   /// somebody sends. Handed down so the composer can tell the two kinds of session
   /// apart; see `heldSession`.
   binds: Map<string, string | null>;
-}> = ({ threadId, view, onView, folded, record, window, binds }) => {
+}> = ({ threadId, view, onView, folded, record, window, binds, title }) => {
   const { t } = useTranslation();
   /// THE COMPOSER'S STOP, AS A COMPONENT THE ELEMENT CAN DRAW (ticket 09 of
   /// `.scratch/session-after-refresh`): it carries THIS session's id, which is what the
@@ -1177,7 +1182,7 @@ const SessionColumn: FC<{
               rendered INSIDE this host's runtime provider (this component is that
               provider's child), which is what lets it read the messages with nothing
               plumbed through App. */}
-          <SessionTitle />
+          <SessionTitle title={title} />
           {/* `-ms-2` PUTS THE FIRST TAB'S WORD UNDER THE TITLE'S FIRST LETTER: a tab carries
               `px-2` of its own, so without it the row below would read as indented against
               the row above. The demo takes the same 8px back off its header's first control
@@ -1284,6 +1289,23 @@ type HostSpec = { id: string; read: HistoryRead; attempt: number };
 /// Which session is on screen, and every session that has a live host.
 type Roster = { shown: string; live: readonly HostSpec[] };
 
+
+/// EVERY SESSION'S STORE TITLE, keyed by thread id -- what the top bar reads now
+/// (owner, 2026-09-27), so that it and the sidebar row beside it cannot disagree.
+/// A session the store has not named yet is simply absent, and the bar falls back to
+/// its own word (`session.untitled`).
+const listingTitles = (listing: SidebarListing): Record<string, string> => {
+  const titles: Record<string, string> = {};
+  for (const project of listing.projects) {
+    for (const session of project.sessions) {
+      if (session.firstUserText !== null) titles[session.threadId] = session.firstUserText;
+    }
+  }
+  for (const task of listing.tasks) {
+    if (task.firstUserText !== null) titles[task.threadId] = task.firstUserText;
+  }
+  return titles;
+};
 const dropKey = <T,>(record: Record<string, T>, key: string): Record<string, T> => {
   if (record[key] === undefined) return record;
   const next = { ...record };
@@ -1391,6 +1413,11 @@ export function App() {
   // conversation's first. For a minted session this is fresher than the store's copy by
   // exactly the message that has not been listed yet, which is the one just typed.
   const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
+  /// AND THE STORE'S OWN TITLE PER SESSION, which the top bar draws now (owner,
+  /// 2026-09-27): it is the copy every listing carries, so the bar and the sidebar row
+  /// read one authority instead of two that could drift (a fork's name is written by the
+  /// fork, and the runtime's messages cannot know it).
+  const [storeTitles, setStoreTitles] = useState<Record<string, string>>({});
   // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
   // their host on the read that opens the session and on every poll after it. A
   // session that is absent from this map is FINE -- that is the ordinary answer, and
@@ -1777,6 +1804,7 @@ export function App() {
       // minted has arrived (see `forgetListedTitles`), and the sidebar hands up each one
       // it lands. The restore below is the part that happens once.
       forgetListedTitles(listing);
+      setStoreTitles(listingTitles(listing));
       if (restored.current || pending === null) return;
       restored.current = true;
       const listed = listedSession(pending, listing);
@@ -1922,6 +1950,10 @@ export function App() {
                 // directory picker writes the directory the first send will bind with, and
                 // `registerPending` reads it out of this same object.
                 binds={pendingBinds.current}
+                // THE STORE'S TITLE FIRST (owner, 2026-09-27): the bar draws the same
+                // copy the sidebar's row does. `liveTitles` is only the page's own word
+                // for a session no listing has named yet.
+                title={storeTitles[host.id] ?? liveTitles[host.id] ?? null}
               />
             </SessionHost>
           ))}

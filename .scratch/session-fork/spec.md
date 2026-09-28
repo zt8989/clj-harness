@@ -39,6 +39,11 @@
 被 fork 的那场会话里，消息动作条有三个按钮：**复制、刷新、更多**；「更多」的下拉里加一项 **Fork**。
 点它 → Project 栏（侧边栏）新增一个 Thread ID，标题与原来的**一致**，前面加 `[fork]`。
 
+**顶栏那份标题也改成读同一个 store 的 title**（主人，2026-09-27）：它原先由 `useAuiState` 从运行时的
+消息里现画「第一句」，而列表行读的是 store —— fork 把这两份的不一致照了出来（新会话的 `[fork] …` 只有
+store 知道）。现在顶栏读 `GET /api/projects` 每一行的 `firstUserText`（页面从 `onListed` 收下、按 thread
+id 存起来），两边一个权威；store 还没命名时退回页面自己的词。
+
 ## 机制（已摸清）
 
 - 记录文件 = `<projects-dir>/<workspace>/<sanitize(thread-id)>.jsonl`（`harness.infra.home/log-file`），

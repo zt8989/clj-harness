@@ -10,11 +10,11 @@
 // session that has been spoken to is named for every browser, every machine and every
 // reload (`harness.infra.db/sessions-remember-their-title` has the whole argument for
 // why a store that may not hold conversation content holds this). The sidebar's rows
-// read that copy. The OTHER copy is the live one this module derives from a
-// conversation the runtime is holding (`firstUserText`), which is what the TOP BAR
-// uses -- `components/session-title.tsx` has the runtime, so it asks the runtime --
-// and what a row uses while this page is the thing holding that session, so the first
-// message shows up on the row it was typed into rather than after the next listing.
+// read that copy -- AND SO DOES THE TOP BAR (owner, 2026-09-27), which used to derive its
+// own from the runtime's messages and could therefore disagree with the row beside it.
+// The OTHER copy is the live one this module derives from a conversation the runtime is
+// holding (`firstUserText`), which is now only the page's own word for a session no
+// listing has named yet: the message just typed, before `remember-send!` has been listed.
 //
 // BOTH GO THROUGH `titleOf`, so there is still exactly ONE clip, ONE tidy and ONE
 // idea of when a title is absent -- which is what the two sources cost and what

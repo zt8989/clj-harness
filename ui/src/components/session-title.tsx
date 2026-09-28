@@ -24,37 +24,32 @@
 //
 // --------------------------------------------------------- where the words come from
 //
-// FROM THIS SESSION'S OWN MESSAGES, read here because this component is rendered
-// inside the runtime provider this host owns -- and rendered ONLY while this host is
-// the session on screen (`SessionHost`'s `{visible ? children : null}`). Both facts
-// are load-bearing: the first is why there is no plumbing through `App`, and the
-// second is why there is no per-session title registry. The module that decides what
-// the title IS is `lib/session-title.ts`; this one decides where it is drawn and that
-// the browser tab follows it.
+// FROM THE `projects` LISTING -- THE STORE'S OWN COPY (owner, 2026-09-27). The title is
+// `sessions.title`, written once by the first run that arrives, and it is the copy every
+// sidebar row draws. The top bar draws THAT one now, so the two cannot disagree -- and a
+// session that was FORKED keeps the name the fork gave it (`[fork] …`) instead of the first
+// user message it happens to share with the parent it was forked from.
 //
-// THE SELECTOR RETURNS A STRING, and that is deliberate rather than incidental:
-// `useAuiState` compares what a selector returns BY VALUE, so a session whose
-// assistant message is streaming token by token does not re-render this row (or write
-// `document.title`) on every token -- the string only changes when the first thing
-// the user said changes, which is once. `components/message-parts.tsx` argues the same
-// point for a reasoning preview.
+// IT IS A PROP RATHER THAN A READ, and the reason is what being a READ would mean: this
+// component is rendered inside the runtime provider, so it COULD ask the runtime for the
+// first message -- it did, until 2026-09-27 -- but the runtime's messages are a WINDOW, and
+// a window opened in the middle does not hold the first thing anybody said. The row beside
+// it read the store's copy, this read the window's, and the fork is what exposed the
+// difference. The listing belongs to the page (the sidebar is its one reader and hands each
+// one up), so the page is what keeps the titles and hands them down.
 //
-// THE EMPTY CASE IS A WORD, NOT AN ID: `session.untitled` ("New session" / "新会话"),
-// from the shell catalog like every other sentence a person reads. See
-// `lib/session-title.ts` for why the fallback is a parameter there and not a key.
-import { useAuiState } from "@assistant-ui/react";
+// THE EMPTY CASE IS A WORD, NOT AN ID: `session.untitled` ("New session" / "新会话"), from
+// the shell catalog like every other sentence a person reads.
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
 import { useDocumentTitle } from "@/hooks/use-document-title";
-import { firstUserText } from "@/lib/session-title";
 
-export const SessionTitle: FC = () => {
+export const SessionTitle: FC<{ title: string | null }> = ({ title }) => {
   const { t } = useTranslation();
-  const said = useAuiState((s) => firstUserText(s.thread.messages));
-  const title = said ?? t("session.untitled");
+  const shown = title ?? t("session.untitled");
   // The tab follows the session on screen, and this component is that session's.
-  useDocumentTitle(title);
+  useDocumentTitle(shown);
   return (
     <span
       data-slot="session-title"
@@ -62,10 +57,10 @@ export const SessionTitle: FC = () => {
       // first message can be longer than the window, the tab has no ellipsis of its own,
       // and `lib/session-title.ts` clips at 60 characters -- so a title clipped by CSS
       // has no other way to be read.
-      title={title}
+      title={shown}
       className="min-w-0 truncate text-[13px] font-medium"
     >
-      {title}
+      {shown}
     </span>
   );
 };
