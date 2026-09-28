@@ -103,14 +103,16 @@
   no place to put the answer, so it goes to the end -- where the run's own reader can
   still find it -- and the caller reports it as unplaced. Inventing an adjacency would
   be worse than saying so."
-  [history added message]
+  [barrier write! history added message]
   (if-some [i (call-position @history (:tool_call_id message))]
     (do (swap! history (fn [h]
                          (let [at (answer-position h i)]
                            (vec (concat (subvec h 0 at) [message] (subvec h at))))))
         (swap! added conj message)
+        (write! message)
         true)
     (do (added! history added message)
+        (write! message)
         false)))
 
 (defn- replay!
@@ -133,7 +135,7 @@
   answer had no call to sit behind>}. A verdict is spent once, so a replay of a decided
   interrupt parks afresh and the run must stop on that interrupt rather than carry on to
   the provider with an unanswered call."
-  [decisions thread-id emit history added on-result]
+  [decisions thread-id emit barrier write! history added on-result]
   (let [outcomes (mapv (fn [{:keys [interrupt-id verdict payload]}]
                          (let [rec (tools/parked interrupt-id)]
                            (when-not rec
@@ -147,7 +149,7 @@
                              (if parked
                                {:parked parked}
                                (do (emit (ev/tool-result call-id content error))
-                                   (if (answer! history added {:role "tool" :tool_call_id call-id
+                                   (if (answer! barrier write! history added {:role "tool" :tool_call_id call-id
                                                                :content content})
                                      {}
                                      {:unplaced call-id}))))))
@@ -720,7 +722,7 @@
     (emit (ev/run-start))
     (try
       (let [replay   (if (seq resume)
-                       (replay! resume thread-id emit history added on-result)
+                       (replay! resume thread-id emit barrier write! history added on-result)
                        {:parked [] :unplaced []})
             replayed (:parked replay)
             _        (swap! unplaced into (:unplaced replay))

@@ -77,3 +77,103 @@
 
 **结论**：05 剩下的不是「规则对不对」，是「什么时候被看见」。规则本身在两次尝试里都把三条目标断言
 改绿了；代价那条红的机制指向活视图的时序，值得单独一票来处理，不要和规则混在一起改。
+
+## 第四次：探针找到真根因（2026-09-28，代码**未落地**，回退到 HEAD）
+
+**A 路线（真记录）结论**：`~/.clj-harness/logs/` 下的记录都是**旧格式**（`kind`、无 `source`），但在
+`~/.clj-harness/projects/<project>/<uuid>.jsonl` 找到一条**新格式、带开篇块**的真记录，它出生的行序是：
+
+```
+5: "type":"message" "source":"system-prompt"  role=system
+6: "type":"message" "source":"client"         role=user     ← 客户那条
+7: "type":"message" "source":"opening"        role=user     ← 开篇块
+8: "type":"message" "source":"opening"        role=user
+```
+
+**客户那条在开篇块之前**（`run-agent!` 的注释也这么说：the client's own messages **plus** what the birth
+wrote）。所以 `trajectory_test` 里把开篇块写在客户之前的那几处夹具**与真记录不符**——这是要改的。
+
+**探针找到我那一版判据的真 bug**：`source "opening"` 但**没有 id** 的行（一轮**重新派生**的块）
+落进了 `(= "user" role) → entry-row?` 那一支，返回 `false` = 「这一轮产出的」✗；它其实是**这次调用
+真读到的**，应当返回 `nil`（落回位置）。改成 `(and (= "user" role) (entry-row? row)) true` 之后：
+
+- 轨迹用例的红 **5 → 1**；
+- **1 条是 HEAD 上绿的**（`a-resume-continues-the-parked-turn`）：`["…" "context" "tool" "assistant"]`
+  变成了 `[… "context" "assistant" "tool" "assistant"]`——`role "assistant"` 的行与 tool 行**对调**；
+- `http_test:1397-1399` 三条**依然红**（`returned` 仍是 `["assistant"]`，期望 `["tool" "assistant"]`）
+  → 说明那条被 resume 重放的答复，**在记录里的形状不是我以为的 `role "tool"`**。
+
+**净账是 4 红 > HEAD 的 3 红**，所以**没有落地**。下一步（很短，一次探针就够）：把这两条场景的行
+原样打出来（`[type source id role producer]` + 段落归属），照**真实行形状**定判据，而不是照我猜的 role 名。
+
+## 第五次：以真 JSONL 为准（2026-09-28，代码**未落地**）
+
+**真数据的行形状普查**（12 条真记录、约 1.4 万行，`~/.clj-harness/projects/<project>/<uuid>.jsonl`）：
+
+```
+2648 tool / tool     2109 assistant / model     432 reasoning / -
+4464 tool / -        3901 assistant / -         111 user / -
+  49 user / client     24 user / opening   15 user / job   1 user / skill
+  65 system / system-prompt
+```
+
+**结论**：真正产出答复的行是 `role` = `tool` / `assistant` / `reasoning`（新格式还带 `source` = `tool` / `model`）。
+按这条定的判据是：
+
+```clojure
+(defn- run-produced?            ; 这一轮自己产出的 → 返回侧，无论它坐在哪
+  [row]
+  (let [m (get-in row [:payload]) r (:role m)]
+    (or (contains? #{"tool" "reasoning"} r)
+        (and (= "assistant" r)
+             (or (seq (:tool_calls m)) (not= "" (str (:content m))))))))  ; 空 assistant（resume 给停住的调用
+                                                                          ; 重写的占位）**不算**产出
+```
+
+**两处要一起改**（这是这一轮的新发现）：
+
+1. 分类器那一支：返回侧 = `(or (:streaming current) (run-produced? record))`；
+2. **开段那一行**（`segments-step` 建新段时 `:submitted [(row-message record)]`）：resume 重放的那条答复
+   就是**开段的第一行**，它也走 `run-produced?`（产出的 → `:returned`，否则 → `:submitted`）。
+
+**效果**：`harness.edge.trajectory-test` **29/125/0 全绿**（含那条 live 推送用例——它之前红是我更早那版判据
+造成的）；但 `http_test:1397-1399` **仍红**（`(:returned (last runs))` 仍是 `["assistant"]`）——
+说明那条被重放的答复**既不在开段那一支、也不在 message 分类那一支**里被我判到（另有写它的路径）。
+**净账与 HEAD 相同（3 红），所以没落地。**
+
+**下一次探针（就一步）**：在那条 http 用例里把 `records` 逐行的
+`[type payload.role source payload.tool_call_id]` 打出来——**以那条用例自己的真行为准**，
+而不是再去猜 record 的形状。另外：主人提醒「所有消息都该被 start/end 信封包裹，否则要先 fork 重整化」，
+**我看的那条出生序可能来自未重整化的记录**，所以「夹具写反了」这个结论**先不执行**，等重整化后的记录再确认。
+
+## 第六次：探那条 http 用例**自己的记录**（2026-09-28）——根因是「行没写下来」
+
+按票里那一步，在用例里把 `records` 逐行打出来（`[type source payload.role payload.tool_call_id]` +
+每段的规模），然后只跑它一条。读数（43 行，`SEGMENTS [["172308fc…" 4 1] ["2d36ed70…" 2 1]]`）：
+
+```
+ 7 message src=system-prompt role=system
+ 8 message src=client        role=user
+ 9 message src=opening       role=user      ← 真序：客户在前、开篇在后（与出生记录一致）
+10 message src=opening       role=user
+17 message src=model role=assistant
+29 event   role="tool"                      ← 工具那条**答复只有一行 event（线上帧 TOOL_CALL_RESULT）**
+32 message src=system-prompt role=system    ← resume 段开始
+33 message src=client        role=user
+38 message src=model role=assistant
+```
+
+**整份记录里没有任何 `message role="tool"` 行，也没有任何 `tool_call_id`。**
+
+⇒ 那条用例的 `wait-for-recorded`（等一条 content 为 `wrote it` 的 `message` 行）**等超时**，
+`returned` 只剩 `["assistant"]`。**这不是「判据把行分错侧」，是「被 resume 重放的工具答复根本没有写成一
+行 `message`」**——它是 `harness.edge.replay` 与「returned 侧」两处读者共同缺的那一行。
+
+**于是票 05 该拆成**：
+
+1. **补那一行**（resume 重放的工具答复要作为 `message` 行落下——落点在内核重放答复的那条路 /
+   `:run/done` 的对账），这一条才是 `http_test:1397-1399` 红的正主；
+2. **哪一侧**（本轮已定的 `run-produced?`：tool/reasoning 与「真说了话」的 assistant → 返回侧，
+   含**开段那一行**）——第 1 条落地后它的效果才可验；
+3. **夹具的开篇块位置**：本条用例的真记录证实是 `system-prompt → client → opening`，
+   与出生记录一致（主人提醒的「未重整化」在此不适用：这是当前代码真跑写出来的）。夹具按此改。
