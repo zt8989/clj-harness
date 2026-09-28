@@ -50,7 +50,13 @@ import { isOpeningEntryId, textOfParts } from "@/lib/injections";
 import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
-import { SessionRunContext } from "@/components/session-run-state";
+import { SessionRunContext, SessionWritableContext } from "@/components/session-run-state";
+// LOCAL (ticket 04 of `.scratch/record-normalization`): WHETHER THIS CONVERSATION'S RECORD MAY BE
+// WRITTEN TO -- the server's verdict (`harness.edge.normalized`), off the `sofar` read that opened
+// this session. A record whose rows and frames do not say the same thing is refused a run (409,
+// `unnormalized`), so the composer is shut on the same word and the way through -- a fork -- is
+// drawn above it.
+import { NormalizationNotice } from "@/components/normalization-notice";
 // LOCAL (session-fork ticket 03): WHICH conversation this element is inside, so the action
 // bar's Fork can name it. A context for the same reason the two above are: the copied
 // element is rendered as `children` and cannot be handed a prop.
@@ -475,8 +481,33 @@ const ThreadSuggestionItem: FC = () => {
 // instruction, not a model word, so it is copy and follows the language.
 const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
   const { t } = useTranslation("elements-thread");
+  // LOCAL (ticket 04 of `.scratch/record-normalization`): the record's own verdict, and the fork
+  // that is the way through when it says the record may not be written to. `openSession` is the
+  // page's (it owns the switch), and forking is a request -- so the notice takes the ACTION and
+  // this file, which holds the thread id, is where it is aimed.
+  const writable = useContext(SessionWritableContext);
+  const blocked = writable?.normalized === false;
+  const threadId = useContext(ThreadIdContext);
+  const openSession = useContext(SessionOpenContext);
+  const { t: tErrors } = useTranslation("errors");
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
+      {/* LOCAL (ticket 04 of `.scratch/record-normalization`): THE WAY THROUGH, drawn where the
+          composer is, because the composer is what it applies to. The fork lands on the server as a
+          record that reads, and the page moves to it -- the same idiom the message menu's Fork
+          uses. */}
+      {blocked && threadId !== null && (
+        <NormalizationNotice
+          reasons={writable?.reasons ?? []}
+          onFork={() => {
+            void forkThread(threadId, tErrors)
+              .then((forked) => openSession(forked.threadId))
+              .catch((err: unknown) => {
+                window.alert(err instanceof Error ? err.message : String(err));
+              });
+          }}
+        />
+      )}
       <ComposerPrimitive.AttachmentDropzone asChild>
         <div
           data-slot="aui_composer-shell"
@@ -484,6 +515,10 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
         >
           <ComposerAttachments />
           <ComposerPrimitive.Input
+            // THE DOOR IS SHUT ON THE RECORD'S OWN VERDICT: a turn sent into a record nobody may
+            // write to is refused by the run edge (409, `unnormalized`), so the input does not take
+            // one. The notice above says why and offers the fork.
+            disabled={blocked}
             placeholder={t("composer.placeholder")}
             className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
             rows={1}
@@ -513,6 +548,11 @@ const ComposerAction: FC = () => {
   // stopping costs (a request, a signal, a wait), and the one thing every case shares is
   // that Send is not it.
   const runState = useContext(SessionRunContext);
+  // LOCAL (ticket 04 of `.scratch/record-normalization`): AND WHETHER THESE BYTES MAY BE WRITTEN TO.
+  // Send against a record nobody may write to has one answer -- the run edge's 409 -- so the button
+  // is not drawn (`SessionWritableContext`; the composer's own notice offers the fork instead).
+  const writable = useContext(SessionWritableContext);
+  const blocked = writable?.normalized === false;
   const ownRunning = useAuiState((s) => s.thread.isRunning);
   const serverRunning = runState === "running";
   // LOCAL: upstream's literal tooltips and `aria-label`s for the dictation and send
@@ -565,7 +605,7 @@ const ComposerAction: FC = () => {
             CONVERSATION -- not this page, and not the process. While the server says
             `running`, the send button's place is the caller's STOP: Send against the
             server's own word is a button whose only answer is the run edge's 409. */}
-        {!ownRunning && !serverRunning && (
+        {!ownRunning && !serverRunning && !blocked && (
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
               tooltip={t("composer.send")}

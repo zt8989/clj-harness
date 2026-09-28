@@ -77,7 +77,7 @@ import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import { HeldSessionContext, ThreadIdContext, type HeldSession } from "@/components/composer-chrome";
-import { SessionRunContext } from "@/components/session-run-state";
+import { SessionRunContext, SessionWritableContext } from "@/components/session-run-state";
 // THE TURN'S OWN WORD (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): which turn the
 // server says is open, as a value this host holds and the message footer reads -- see
 // `lib/live-turn.ts` for why the run's word cannot answer that question.
@@ -437,9 +437,14 @@ function useWindowFeed(args: {
   /// reload, so without this the composer offered Send for a conversation the server was
   /// still answering and the answer was the run edge's 409.
   onState: (state: string | null) => void;
+  /// AND WHETHER THE RECORD MAY BE WRITTEN TO, which the window's frames do NOT carry -- so this
+  /// host asks `sofar` once, as it opens (ticket 04 of `.scratch/record-normalization`), and hands
+  /// the verdict up: the composer's gate and the notice that offers the fork are the page's.
+  onWritable: (verdict: { normalized: boolean; reasons: readonly string[] } | null) => void;
   onControls: (controls: WindowControls) => void;
 }): void {
-  const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onState, onControls } =
+  const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onState, onControls,
+    onWritable } =
     args;
 
   /// WHAT THIS PAGE HOLDS, and the mirror of it that re-renders: the ref is what the
@@ -726,6 +731,36 @@ function useWindowFeed(args: {
     };
   }, [read, started, start, follow, onState]);
 
+  // THE RECORD'S OWN VERDICT, READ ONCE PER SESSION (ticket 04 of `.scratch/record-normalization`).
+  //
+  // NOT OFF THE WINDOW'S EFFECT ABOVE, and that is what the browser walkthrough taught: a session the
+  // page only LOOKS at opens NO window (a settled conversation is handed over by `rebuild`, and
+  // `start` stays null), so an effect hanging off that one never asked -- and the notice stayed
+  // invisible on exactly the conversation it exists for. Every door lands here instead, because every
+  // door is about the same thread.
+  //
+  // `sofar` AND NO FALLBACK TO `rebuild`: this is a yes/no question about the bytes, and a read that
+  // REPAIRED them would answer about a record nobody asked it to touch (the refusal names the fork,
+  // and forking is a person's decision). NO VERDICT IS NOT 'NORMALIZED': an unreadable record leaves
+  // the door as it was, and the run edge is what refuses.
+  useEffect(() => {
+    let asked = false;
+    onWritable(null);
+    void sofarThread(threadId, t)
+      .then((answer) => {
+        if (asked) return;
+        onWritable(
+          answer.normalized === undefined
+            ? null
+            : { normalized: answer.normalized, reasons: answer.normalizationReasons ?? [] },
+        );
+      })
+      .catch(() => {});
+    return () => {
+      asked = true;
+    };
+  }, [threadId, t, onWritable]);
+
   // THE HOST IS GONE: hang up, and stop any timer that would reconnect for it. Without
   // this a page that navigated away keeps a request loop alive behind it.
   useEffect(() => {
@@ -865,6 +900,16 @@ const SessionHost: FC<{
   /// which reach it from here).
   const [runState, setRunState] = useState<string | null>(null);
 
+  /// WHETHER THIS SESSION'S RECORD MAY BE WRITTEN TO, and why not when it may not -- the verdict
+  /// `readSofar` carries (`ThreadSofar.normalized`, ticket 01 of `.scratch/record-normalization`).
+  ///
+  /// A THIRD THING OUTSIDE THE HOOK, for the reason `runState` is one: the composer's gate is a
+  /// runtime OPTION and so has to be known in this body (`isSendDisabled` below), and the composer
+  /// itself is inside the copied element and can only be reached through a context. `null` means
+  /// THIS PAGE HAS NO VERDICT -- a window frame carries none, and a brand-new session has no record
+  /// to judge -- and then the door stays open: the server is the authority.
+  const [writable, setWritable] = useState<{ normalized: boolean; reasons: readonly string[] } | null>(null);
+
   /// WHAT THE SERVER SAYS ABOUT THIS SESSION'S OPEN TURN (`turn/start` / `turn/end`), which is
   /// what the dot at a turn's end is about -- see `lib/live-turn.ts` for why the run's word
   /// cannot answer it. TWO SOURCES, ONE VALUE, and they are not two opinions about one thing:
@@ -925,7 +970,12 @@ const SessionHost: FC<{
     // so the composer can be shut without shutting the only door -- the way through is that
     // card. `unfinished` is still not included: a process that died mid-run has no card to
     // press. See `lib/session-status.ts`'s `statusOf`.
-    isSendDisabled: gateOpen || runState === "running" || runState === "parked",
+    // AND THE RECORD'S OWN VERDICT (ticket 04 of `.scratch/record-normalization`): a record whose
+    // rows and frames do not say the same thing is refused a run (409, `unnormalized`), and a door
+    // whose only answer is a 409 is a door to shut. `writable === null` is 'this page has no
+    // verdict' and leaves the door as it was.
+    isSendDisabled:
+      gateOpen || runState === "running" || runState === "parked" || writable?.normalized === false,
     adapters: {
       // IMAGES IN THE COMPOSER, and this one line is what enables them -- see
       // lib/attachments.ts: `capabilities.attachments` is `!!adapters.attachments`,
@@ -1006,6 +1056,13 @@ const SessionHost: FC<{
         const answer = await readSofar(threadId, tErrors);
         if (cancelled) return;
         reportRecord(answer.record ?? null);
+        // AND THE RECORD'S OWN VERDICT, from the same read (ticket 04 of
+        // `.scratch/record-normalization`): the composer is shut on it and the fork is offered.
+        setWritable(
+          answer.normalized === undefined
+            ? null
+            : { normalized: answer.normalized, reasons: answer.normalizationReasons ?? [] },
+        );
       } catch {
         // The read failed -- a session that is gone, a harness that is not answering.
         // Nothing to say about the record, and the conversation on screen stays as it
@@ -1042,6 +1099,7 @@ const SessionHost: FC<{
     onRecord: reportRecord,
     isOwnRun,
     onState: onServerState,
+    onWritable: setWritable,
     onControls: reportControls,
   });
 
@@ -1054,6 +1112,7 @@ const SessionHost: FC<{
     // IT WRAPS THE PROVIDER RATHER THAN SITTING INSIDE IT, deliberately: which run this
     // session has going is not a fact about the runtime (that is exactly what the bug was),
     // and nothing between these two lines reads it.
+    <SessionWritableContext.Provider value={writable}>
     <SessionRunContext.Provider value={runState}>
       {/* AND THE TURN'S OWN WORD, by the same door and for the same reason: the message footer is
           inside the copied element too, and what it draws at a turn's end is about THAT TURN
@@ -1085,6 +1144,7 @@ const SessionHost: FC<{
       </AssistantRuntimeProvider>
       </SessionTurnContext.Provider>
     </SessionRunContext.Provider>
+    </SessionWritableContext.Provider>
   );
 };
 

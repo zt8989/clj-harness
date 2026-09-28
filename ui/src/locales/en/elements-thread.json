@@ -15,7 +15,9 @@
     "voiceInputStart": "Start voice input",
     "dictationStop": "Stop dictation",
     "dictationStopLabel": "Stop voice input",
-    "send": "Send message"
+    "send": "Send message",
+    "notNormalized": "This record is not normalized yet: continuing would write to a history no reader can fold back. Fork a copy and continue there.",
+    "notNormalizedFork": "Normalize (fork)"
   },
   "message": {
     "working": "Assistant is working",

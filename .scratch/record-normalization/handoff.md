@@ -4,19 +4,24 @@
 
 ## 0. 你现在该做什么
 
-`.scratch/record-normalization/` 的四张票，**01、02、03 已落地并合进 main**（提交 `73c2170`、之后那一笔）。
-只剩**一张：04（前端强制 fork）**。
+`.scratch/record-normalization/` 的四张票**全部落地**（`73c2170` 起，最后一笔见 git log）。
+**没有下一张票了**；下面是这一程留下的**三件没做完的事**，都不是票里的：
 
-- **03 已落地**（`replay/missing-tool-rows` + `fork-session!` 按 run 分组补那一行；幂等靠「没缺的行就一行不写」；
-  旧格式按名字拒绝、不迁移）。落地小节在 `spec.md` 的「落地：票 03」；数字 **286/2047/0**。
-- 04：`ui/` —— 未重整化 ⇒ 禁用输入（发送/resume/compact）+ 一条说明 + 一个「重整化（fork）」按钮，
-  点它走 03 的门，成功后自动开新会话；文案进 i18n（`ui-i18n` 的词表）。
-  后端**已经就绪**：记录路径答 `:normalized false` + `:normalizationReasons`（中文句子），
-  写门（run/resume/compact）答 409 + `:reason "unnormalized"` + 一条点名 fork 地址的英文句子。
+1. **旧格式记录要不要真的迁移**（票 03 留的取舍）：今天顶层 `kind` 的行被读侧按名字拒绝
+   （`:old-contract`），fork 照直答 400。要动就**单开一票**，先问主人。
+2. **`pressure` 那一条既有的红**：`the-live-band-and-the-record-fold-answer-the-same-thing`，
+   实测差 9 token（`49072` vs `49081`），**与本 tracker 无关**——stash 掉 `src/harness/edge/http.clj`
+   后在 HEAD 上同样红。它是 `.scratch/record-stream` 票 05 那笔账的另一半（`pressure` 的活表与折法），
+   记在这里免得下一位当成新红。
+3. **`sofar` 的 live 分支现在是会话自己的 fold**（票 04 的走查逼出来的修正）：判据挂在 `start!` 的
+   `register-fold!` / `register-step!` 上。**这一处没有单测**（`sessions` 的 fold 表由 `sessions-test`
+   覆盖形状，但没有一条断言 `:normalized` 在会话里长起来）；要钉就往 `sessions_test` 或 `http_test`
+   加一条「一场会话出生后 `(sessions/fold-value tid :normalized)` 与记录折出来的一样」。
 
 ## 1. 位置与状态（写这份文档时）
 
-- 主工作树：`C:\Users\zhouteng\Documents\workspace\lisp-harness`，**main = `73c2170`**，工作树干净。
+- 主工作树：`C:\Users\zhouteng\Documents\workspace\lisp-harness`，**main** 见 `git log -1`（写这份文档时是
+  `71f119d` + 票 04 那一笔），工作树干净。
 - 「记录重整化」的账在 `.scratch/record-normalization/spec.md`（两张票的**落地小节**都在文末，
   含判据数字与两个例外）；判据对着真记录的走查读数在
   `.scratch/record-normalization/evidence/real-records.md`。
@@ -58,14 +63,21 @@
    「写手正在写最后一行」吞掉，于是用例会以 `no-fork-point` 而不是 `old-contract` 红——旧格式的
    判例至少要**两行**。
 
-## 4. 04 的落点
+## 4. 04 落地了（走到的地方与一条走查的教训）
 
-- 客户端拿 `:normalized` 的两条路：**本进程持有**的会话（`sofar`/`rebuild` 的内存分支）答 `true`；
-  **从记录读**的那条带 `false` + `:normalizationReasons`（中文句子，直接可画）。
-- 「未重整化」今天主要出现在：旧格式记录（读侧直接 400）、被切/被停**且**答复行仍缺的记录、
-  外来记录。所以 04 的界面不要假设「经常出现」。
-- 合之前按 `AGENTS.md`：`cd ui && npm test && npm run typecheck`，再
-  `node scripts/dev.mjs --scripted` 起服务、自己开浏览器走一趟（机器门挡不住「渲染看不到布局」）。
+- **live 分支那条修正**（见 §0 第 3 条）是这一票最重要的一行：原来它对任何本进程持有的会话都答
+  `true`，而那是一句**没人审过的断言** —— 走查现场：钉一份未重整化的记录、在页面里打开它 ⇒
+  没有任何提示（feed 一认领它，记录路径就再也不答了）。
+- 前端：`ThreadSofar` 带 `:normalized` / `:normalizationReasons`；页面**每开一场会话读一次 `sofar`**
+  （**不走 `rebuild`**：它会把记录修好，答的就不是原来那份），交给 `SessionWritableContext`；
+  输入框 `disabled`、Send 不画、提示（`components/normalization-notice.tsx`）画在输入框上方，按钮走
+  `forkThread` + `openSession`。
+- **走查教训，留给下一位**：`readSofar` 那条路只服务 window 门与「跑完一次之后的补读」；点击侧栏打开
+  一场**已结算**的会话走的是 `rebuild`，`start` 不设值 ⇒ 挂在 window effect 上的读取**根本不会跑**。
+  判定要挂在只依赖 `threadId` 的 effect 上。
+- 文案进 i18n（`elements-thread` 的 `composer.notNormalized` / `composer.notNormalizedFork`）；
+  合之前按 `AGENTS.md`：`cd ui && npm test && npm run typecheck && npm run build`，再
+  `node scripts/dev.mjs --scripted` 自己开浏览器走一趟（这一票正是靠它抓到上面那条的）。
 
 ## 5. 硬知识（省得重走）
 

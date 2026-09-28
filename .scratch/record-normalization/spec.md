@@ -118,3 +118,33 @@ run / resume / compact **都拒**；只读的门不受影响；被拒的 run **�
 `stats` + `context` + `http` = **286 / 2047 / 0**（http 一套 189.7s）。新用例三条：缺行的那一份 fork 后
 **已重整化**且行在、被切的记录 fork 后**已重整化**、旧格式**按名字拒绝**；再一条幂等与一条「原会话字节不变」
 在第一条用例里一起钉住。
+
+## 落地：票 04（2026-09-28）
+
+**未重整化的会话：输入区禁用 + 一条说清的提示 + 一个真能按的「重整化（fork）」按钮。**
+
+**先修了一条后端的路**（这一票的走查发现的）：`sofar` 的 **live 分支不再无条件答 `true`**。
+判据现在挂在会话自己的两条缝上（`start!` 里 `register-fold!` / `register-step!`，与 `turn` /
+`pressure` 同一个形状）：出生时从记录折出来，此后每写一行往前走一步。原来那句 `true` 是一句
+**没人审过的断言**——在跑着的进程里「打开」一场会话（feed 会认领它）就足以把一份谁都写不得的记录藏起来。
+
+- `ThreadSofar` 带 `:normalized` / `:normalizationReasons`；
+- 页面**每开一场会话读一次 `sofar`**（**不走 `rebuild`**：它会把记录修好，答的就不是原来那份了），
+  判定交给 `SessionWritableContext`：输入框 `disabled`、Send 不画、提示画在输入框上方
+  （`components/normalization-notice.tsx`，服务器给的理由**原样**列出），按钮走 `forkThread` +
+  `openSession`（与消息菜单的 Fork 同一套）；
+- **文案进 i18n**：`elements-thread` 的 `composer.notNormalized` / `composer.notNormalizedFork`（zh/en）。
+
+**判据数字**：`ui` = **173 / 173 / 0**（新 suite `normalization` 两条：两种语言下提示与按钮都渲染、
+理由原样；没有理由时不画空列表）；`tsc` 与 `vite build` 干净。后端那一轮 **292 / 2031 / 1**，那一条是
+**既有的** pressure 红（`the-live-band-and-the-record-fold-answer-the-same-thing`，差 9 token——
+stash 掉本票的改动后在 HEAD 上同样红，所以不是这一票的账）。
+
+**浏览器走查**（`node scripts/dev.mjs --scripted`，2026-09-28）：
+
+1. 正常路径：新会话发一句话 → 回放渲染、输入区照常、没有提示；
+2. 钉一条**未重整化**的记录（`projects/<dir>/walkthrough-unnormalized.jsonl`：一次调用只有
+   `TOOL_CALL_RESULT` 帧、没有 `message` 行）后打开它 ⇒ 输入框 `disabled`、提示与
+   「1 次工具调用没有 message 行答复」都画出来、Send 不在；
+3. 按「重整化（fork）」⇒ 页面切到 `[fork]`，会话回来、输入区可用；新记录里那一行在
+   （`source "tool"`、`producer "kernel-message"`），原记录一个内容字节没动。

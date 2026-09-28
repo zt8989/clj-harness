@@ -243,6 +243,17 @@ export type ThreadSofar = {
   state: SofarState;
   openRuns?: readonly string[];
   interrupts?: readonly unknown[];
+  /// WHETHER THESE BYTES MAY BE WRITTEN TO (`harness.edge.normalized`, ticket 01 of
+  /// `.scratch/record-normalization`): `false` on a record whose rows and its frames do not say the
+  /// same thing yet -- a tool call answered by a frame alone, a `START` with no `END`, an old-contract
+  /// line. `normalizationReasons` then says WHAT is missing, in the criterion's own words (the
+  /// sentences the fork's button is drawn beside).
+  ///
+  /// ABSENT IS NOT FALSE. The live branch of `sofar` answers about the SESSION rather than by
+  /// re-reading the bytes, and a window frame does not carry the field at all -- a client with no
+  /// verdict keeps its door open, and the run edge is what refuses (409, `:reason "unnormalized"`).
+  normalized?: boolean;
+  normalizationReasons?: readonly string[];
   /// THE RECORD'S OWN HEALTH, and its absence is the ordinary answer -- only a
   /// session whose writer gave up on a line carries one (see `lib/record-health.ts`).
   record?: RecordHealth;

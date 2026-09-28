@@ -57,6 +57,7 @@ import { coalesceSuite } from "./suites/coalesce";
 import { rightPaneSuite } from "./suites/right-pane";
 import { threadMessagesSuite } from "./suites/thread-messages";
 import { timeoutSuite } from "./suites/llm-timeout";
+import { normalizationSuite } from "./suites/normalization";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -74,7 +75,7 @@ import { timeoutSuite } from "./suites/llm-timeout";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -480,10 +481,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// ...167 -> 170: the two readings of a turn's step count get their own cases (`.scratch/step-events`
 /// 第 1 条) -- the server's number only for the turn it closed, the read side everywhere else, and a
 /// live run where the two are compared to each other.
+/// 171 -> 173: the `normalization` suite's two -- the notice a 未重整化的记录 owes (`还没重整化` 那句话
+/// 与它的 `normalization-fork` 按钮) rendered in BOTH languages, with the server's own reason
+/// sentences drawn verbatim. Ticket 04 of `.scratch/record-normalization`; the composer being shut
+/// and the fork really opening the new session are the browser walkthrough's (the copied element
+/// reaches the assistant runtime, which this run has no DOM for).
 ///
 /// ...170 -> 171: the client's half of `a dropped socket is repaired` -- how far the page got, and
 /// that the step frames are in that count (ticket 04 of `.scratch/step-events`).
-const EXPECTED_CASES = 171;
+const EXPECTED_CASES = 173;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -25,3 +25,20 @@ import { createContext } from "react";
 /// the composer's action row: `running` is the one word that turns Send into Stop, because
 /// it is the one word that means a run of this conversation is going in the process.
 export const SessionRunContext = createContext<string | null>(null);
+
+/// WHETHER THIS CONVERSATION'S RECORD MAY BE WRITTEN TO, and why not when it may not -- the
+/// verdict `GET /api/threads/<id>/sofar` carries (`ThreadSofar.normalized`,
+/// `.scratch/record-normalization` ticket 01), or null while the page has not read one.
+///
+/// A CONTEXT FOR THE SAME REASON AS THE RUN'S: the composer lives inside the copied element
+/// (`<Thread/>`), so the page cannot hand it anything as a prop. It is what shuts the composer on
+/// a record nobody may write to -- the run edge refuses such a run 409 (`unnormalized`), and a door
+/// whose only answer is a 409 is a door to shut rather than to leave open.
+///
+/// NULL IS NOT `false`: absent means this page has no verdict (a window frame carries none, and a
+/// brand-new session has no record to judge), and the door stays open -- the server is the
+/// authority, and it answers.
+export const SessionWritableContext = createContext<{
+  normalized: boolean;
+  reasons: readonly string[];
+} | null>(null);

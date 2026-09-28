@@ -4403,9 +4403,15 @@
   AND ONE FIELD ABOUT THE BYTES: `:normalized` -- whether this record may be WRITTEN to any
   further (`harness.edge.normalized`, ticket 01 of `.scratch/record-normalization`). The client
   disables its composer on `false`, shows `:normalizationReasons` and offers the fork. It rides
-  the same walk that folded the conversation, so the verdict and the messages cannot come from
-  two states of the file; the live branch above answers it about the SESSION (see there) rather
-  than by re-reading the bytes on every poll.
+  disables its composer on `false`, shows `:normalizationReasons` and offers the fork.
+  
+  TWO SOURCES, ONE QUESTION, and neither re-reads the bytes on a poll: the RECORD path folds them
+  on the walk that already folded the conversation (so the verdict and the messages cannot come from
+  two states of the file), and the LIVE branch reads the session's OWN FOLD -- the criterion is
+  registered on both of a session's seams (`start!`), seed from the record at birth and advanced by
+  every row this process writes. A live session answered `true` unconditionally before that, which
+  was a claim about bytes nothing had judged: opening a session in the running process (a feed rings
+  the claim) was enough to hide a record that no reader may write to.
 
   THE TWO HALVES OF THE LIVENESS QUESTION ARE ANSWERED BY THEIR OWNERS: the file
   says whether a run has a terminal frame (`replay/sofar`), and the process says
@@ -4428,7 +4434,12 @@
     (let [messages (sessions/drawn stem)
           context  (or (sessions/context stem) [])
           health   (record-health stem)
-          st       (sessions/state stem)]
+          st       (sessions/state stem)
+          ;; AND WHETHER THESE BYTES MAY BE WRITTEN TO, from the session's OWN FOLD -- the criterion
+          ;; registered on both of its seams (see `start!`), so a session born from a record starts
+          ;; with that record's verdict and every row this process writes advances it. No re-read of
+          ;; the bytes on a poll, and no claim about a record this process never judged.
+          verdict  (normalized/finish (sessions/fold-value stem :normalized))]
       (cond
         ;; THE SAME REFUSAL THE RECORD PATH MAKES, and for the same reason: the log ends
         ;; mid-run, nobody here is running it, and closing it off is a decision made by
@@ -4442,13 +4453,10 @@
         :else
         (api-response 200 (cond-> {:threadId stem :messages messages :context context
                                    :state    (name st)
-                                   ;; A LIVE SESSION SAYS "normalized": this process IS serving these
-                                   ;; bytes -- either it is writing them (a writer that wraps every
-                                   ;; message) or it was handed the session by a door that judged the
-                                   ;; record, and the door that would WRITE to it asks the record itself
-                                   ;; (see the refusal in `handle-run`). The record path below is where the
-                                   ;; question is answered from the bytes; this answer is about the session.
-                                   :normalized true}
+                                   ;; THE RECORD'S OWN VERDICT, about the SESSION (the fold above):
+                                   ;; the composer's gate and the notice that offers the fork read it.
+                                   :normalized (boolean (:normalized? verdict))
+                                   :normalizationReasons (:reasons verdict)}
                             (seq (:interrupts live)) (assoc :interrupts (:interrupts live))
                             (some? health)           (assoc :record health)))))
    (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
@@ -6446,6 +6454,13 @@
     ;; AND THE TRAJECTORY'S LIVE STEP, the same shape as the meter's: the view is built ON
     ;; DEMAND (`harness.edge.trajectory/view-value`) and this step advances it (ticket 13).
     (trajectory/install!)
+    ;; AND THE RECORD'S OWN VERDICT (`harness.edge.normalized`), on the same two seams: a session
+    ;; born from a record gets the verdict of THOSE bytes (its birth walk feeds this fold), and every
+    ;; row this process writes advances it -- so `sofar`'s live branch can answer whether the record
+    ;; may be written to WITHOUT re-reading it on every poll (ticket 01/04 of
+    ;; `.scratch/record-normalization`).
+    (sessions/register-fold! :normalized normalized/fold)
+    (sessions/register-step! :normalized (:step normalized/fold))
     (println (str "logging to " root "/logs/harness.infra.log (rotated by date and size)"))
     ;; THE ONE ORIGIN THIS PROCESS ANSWERS BY NAME, settled before the socket opens --
     ;; the same shape as the port below it and for the same reason: both are facts

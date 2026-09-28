@@ -6195,8 +6195,8 @@
          (is (= (:context rebuilt) (:context answer)))
          (is (true? (:normalized answer))
              "a session THIS process holds is answerable: it is the process that writes these bytes")
-         (is (nil? (:normalizationReasons answer))
-             "and it carries no reasons -- the record path is where the bytes are judged (ticket 02)"))
+         (is (= [] (:normalizationReasons answer))
+             "and no reasons: this session's own fold says the record is fine (see `sofar-get`)"))
 
        (testing "and the window shows the conversation ONCE -- the half turn was not a copy"
          ;; THE OTHER HALF OF TICKET 04: mid-run the window answered from the RECORD, and at
