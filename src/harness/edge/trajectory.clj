@@ -68,6 +68,17 @@
   [row]
   (and (contains? #{"client" "injection" "opening"} (:source row))
        (or (= "client" (:source row)) (some? (:id row)))))
+(defn- run-produced?
+  "Did THIS RUN produce ROW -- the model said it, a tool answered it, it was a thought -- rather than
+  being something the call was handed? A message the run produced is on the RETURNED side even when it
+  is the FIRST row of its run: a resume ANSWERS BEFORE IT SUBMITS, the one case position gets wrong
+  (ticket 05 of `.scratch/record-stream`, grounded in the real records: `tool/tool` 2648 rows,
+  `assistant/model` 2109). An EMPTY assistant -- the placeholder a resume writes for a parked call --
+  is not something the run produced, and keeps its position."
+  [row]
+  (let [m (get-in row [:payload]) r (:role m)]
+    (or (contains? #{"tool" "reasoning"} r)
+        (and (= "assistant" r) (or (seq (:tool_calls m)) (not= "" (str (:content m))))))))
 
 (defn- row-message
   "A `message` row as the message it carries, WITH THE ROW'S OWN `:id` PUT BACK -- the
@@ -104,8 +115,8 @@
                       :at           (:ts record)
                       :brought      []
                       :brought-rows []
-                      :submitted    [(row-message record)]
-                      :returned     []
+                      :submitted    (if (run-produced? record) [] [(row-message record)])
+                      :returned     (if (run-produced? record) [(row-message record)] [])
                       :calls        []
                       :tool-ids     []
                       :streaming    false}
@@ -124,7 +135,7 @@
                 ;; message row it writes -- and that is a KNOWN OPEN ITEM (the record is written AS
                 ;; THE RUN HAPPENS now, so this positional guess has to become a question about the
                 ;; row itself: `.scratch/record-envelopes`).
-                (if (:streaming current)
+                (if (or (:streaming current) (run-produced? record))
                   (update current :returned conj (row-message record))
                   (-> current
                       (update :submitted conj (row-message record))
