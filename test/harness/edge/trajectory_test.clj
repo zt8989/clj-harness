@@ -467,6 +467,73 @@
     (is (not (contains? (item-of turn "tool") :startedAt))
         "no timing on the tool item at all -- durations are the model call's business (ticket 05)")))
 
+(deftest a-call-the-run-is-still-making-is-drawn-while-it-makes-it
+  ;; THE OWNER'S REPORT (2026-09-27): a trajectory watched DURING a run showed the question and
+  ;; the injected blocks and NOT the calls the run was making. The reason was structural -- the
+  ;; returned `message` rows land at `:run/done`, one beat after the terminal frame, so a fold of
+  ;; `message` rows alone has nothing to draw for work still in flight. WHAT A RUN IN FLIGHT DOES
+  ;; LEAVE BEHIND is the audit line, and this is where the trajectory reads it.
+  (let [records [(client 0 (user "u1" "读一下 README"))
+                 (system-prompt 10 "You are a coding agent.")
+                 (frame 12 "RUN_STARTED" {:threadId "t" :runId "r1"})
+                 (pre-execute 20 "c1" "read")]
+        answer  (trajectory/records->trajectory (rows records))
+        [turn]  (:turns answer)]
+    (is (true? (:incomplete answer)) "the run has not ended, and the answer says so")
+    (is (= ["system" "user" "tool"] (kinds turn))
+        "the call is drawn the moment it reaches the seam -- no assistant row, no result row")
+    (is (= {:kind "tool" :toolCallId "c1" :name "read" :executed false
+            :outcome "pass" :arrivedAt 20}
+           (item-of turn "tool"))
+        "the name comes off the audit line, which is the only place a call in flight has one")
+    (is (not (contains? (item-of turn "tool") :result))
+        "the ANSWER is absent, never an empty string: nobody has given one yet")
+    (is (not (contains? (item-of turn "tool") :argsText))
+        "and so are the arguments -- those live on the assistant message, not written yet")))
+
+(deftest the-answer-replaces-the-call-in-flight-rather-than-joining-it
+  ;; ONE CALL, ONE ROW. The item built from the returned messages is the fuller account -- name,
+  ;; arguments and result together -- and the in-flight one must give way to it. Two rows for one
+  ;; call would make this view the one thing it may not be: a trajectory that says a run did
+  ;; something twice.
+  (let [[turn] (turns-of
+                [(client 0 (user "u1" "读一下 README"))
+                 (system-prompt 10 "S")
+                 (pre-execute 20 "c1" "read")
+                 (executed 21 "c1" "read")
+                 (post-execute 25 "c1" "read")
+                 finished
+                 (message 30 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "c1" "read" "{}")]})
+                 (message 31 (tool-msg "c1" "# clj-harness"))])]
+    (is (= ["system" "user" "assistant" "tool"] (kinds turn)))
+    (is (= 1 (count (filter #(= "tool" (:kind %)) (:items turn)))) "one call, one row")
+    (is (= "# clj-harness" (:result (item-of turn "tool"))))))
+
+(deftest a-closed-segment-does-not-draw-its-unanswered-call
+  ;; THE RULE THAT KEEPS ONE CALL ONE CALL, and the reason the in-flight reading is asked of the
+  ;; OPEN segment alone. A park and its resume write TWO segments and ONE tool message: the
+  ;; parked half has the arrival line and no answer. Drawing that as a call in flight as well
+  ;; would draw one call twice in one turn -- and, worse, read the RESUME's verdict ('vetoed')
+  ;; off the merged life map, which is the future inside a past the reader asked about.
+  (let [[turn] (turns-of
+                [(system-prompt 10 "S")
+                 (client 0 (user "u1" "读 /etc/hosts"))
+                 (pre-execute 20 "c1" "read" "needs-approval")
+                 (frame 30 "RUN_FINISHED" {:threadId "t" :runId "r1"})
+                 (message 40 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "c1" "read" "{}")]})
+                 ;; the human decided, so the run goes out again over the same conversation
+                 (system-prompt 110 "S")
+                 (pre-execute 120 "c1" "read" "vetoed")
+                 (post-execute 121 "c1" "read")
+                 finished
+                 (message 130 (tool-msg "c1" "vetoed by human: the call was not executed."))])]
+    (is (= 1 (count (filter #(= "tool" (:kind %)) (:items turn)))) "one call, one row")
+    (is (= "vetoed" (:outcome (item-of turn "tool")))
+        "the verdict that stuck, not the park's")
+    (is (= "vetoed by human: the call was not executed." (:result (item-of turn "tool"))))))
+
 (deftest the-system-message-appears-again-only-when-it-changes
   (let [turns (turns-of
                [(system-prompt 10 "S1")
@@ -855,6 +922,7 @@
         (if (or (ended? records) (> (System/currentTimeMillis) finish))
           records
           (do (Thread/sleep 25) (recur)))))))
+
 
 (deftest the-endpoint-folds-what-the-run-wrote
   ;; The whole path, once, over real HTTP: a real run writes the log, and the route

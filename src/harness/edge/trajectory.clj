@@ -107,6 +107,7 @@
                       :submitted    [(row-message record)]
                       :returned     []
                       :calls        []
+                      :tool-ids     []
                       :streaming    false}
                (entry-row? record)
                (assoc :brought      [(row-message record)]
@@ -132,6 +133,21 @@
     (or (= "model/start" (replay/kind record)) (= "model/end" (replay/kind record)))
     (update state :open (fn [current] (when current (update current :calls conj record))))
 
+    ;; A TOOL CALL THAT HAS ARRIVED BELONGS TO THE SEGMENT IT ARRIVED IN, because that is the
+    ;; only place the record says so while the run is still going: the tool message that answers
+    ;; it lands at `:run/done` (see `pending-tool-items`). A line carrying ANOTHER run's id is
+    ;; not this segment's -- a summarizer call is logged with no run id at all
+    ;; (`harness.edge.pressure`) -- so what is collected here is the run's own calls, in the
+    ;; order they reached the seam.
+    (and (= "tools/pre-execute" (replay/kind record))
+         (= (:runId record) (:run-id (:open state))))
+    (update state :open
+            (fn [current]
+              (when current
+                (let [id (:toolCallId (replay/payload record))]
+                  (update current :tool-ids
+                          (fn [ids] (if (some #(= id %) ids) ids (conj (or ids []) id))))))))
+
     :else state))
 
 (defn segments-answer
@@ -142,7 +158,7 @@
 (defn run-segments
   "RECORDS split into runs, in order:
   [{:opener <row> :at <ms> :brought [msg…] :submitted [msg…] :returned [msg…]
-    :calls [row…] :streaming bool :prompt-row <the run's system row or nil>}].
+    :calls [row…] :tool-ids [id…] :streaming bool :prompt-row <the run's system row or nil>}].
 
   A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there.
   `harness.edge.http` writes the prompt BEFORE the action's own entries, so that row IS the
@@ -269,7 +285,13 @@
   (let [payload (replay/payload record)
         ts      (:ts record)
         id      (:toolCallId payload)
-        seen    (get acc id)]
+        seen    (get acc id)
+        ;; THE TOOL'S OWN NAME IS ON EVERY AUDIT LINE (`:toolName`), and it is the only name a
+        ;; call has until the assistant message that asked for it lands -- that row is written
+        ;; at `:run/done` (see `pending-tool-items`). Read once here rather than by each item
+        ;; builder, and a later line of the same call leaves it alone.
+        acc     (cond-> acc
+                  (some? (:toolName payload)) (assoc-in [id :name] (:toolName payload)))]
     (case (replay/kind record)
       "tools/pre-execute"
       (-> acc
@@ -290,7 +312,7 @@
       acc)))
 
 (defn- tool-lifecycles
-  "toolCallId -> {:arrivedAt :resumedAt :executedAt :closedAt :outcome :error}, from the
+  "toolCallId -> {:name :arrivedAt :resumedAt :executedAt :closedAt :outcome :error}, from the
   audit lines the seam and the kernel leave behind.
 
   THE FOUR MARKS ARE FOUR DIFFERENT MOMENTS, and the reason this function exists is that
@@ -488,6 +510,30 @@
     turns
     (update-in turns [(dec (count turns)) :calls] into calls)))
 
+(defn- tool-marks
+  "The marks a TOOL item carries EVERYWHERE it is built -- the one a result message yields
+  (`returned-items`) and the one a call still in flight yields (`pending-tool-items`) -- so
+  the same call reads the same way on both sides of the run's end.
+
+  A TOOL CALL HAS A LIFE OF ITS OWN: `arrivedAt` (it reached the seam), `resumedAt` (a park
+  ended -- absent when nobody had to decide), `executedAt` (it LEFT execution, i.e. the tool
+  finished) and `closedAt` (the seam is done). The span a tool occupied is arrivedAt ->
+  executedAt; reading `executedAt` as a START is the mistake that makes every tool look
+  instantaneous, and it is a mistake the line's own name invites. `executed` false means no
+  execute line at all -- a vetoed call, which is not 'it ran in zero seconds'.
+
+  `:executed` IS DERIVED FROM ONE OF THE MARKS, so the two cannot disagree about whether a
+  call ran; every other mark is written only when there is something to write."
+  [item id life-of]
+  (let [lif (get life-of id)]
+    (cond-> (assoc item :executed (some? (:executedAt lif)))
+      (some? (:arrivedAt lif))  (assoc :arrivedAt (:arrivedAt lif))
+      (some? (:resumedAt lif))  (assoc :resumedAt (:resumedAt lif))
+      (some? (:executedAt lif)) (assoc :executedAt (:executedAt lif))
+      (some? (:closedAt lif))   (assoc :closedAt (:closedAt lif))
+      (some? (:error lif))      (assoc :error (:error lif))
+      (some? (:outcome lif))    (assoc :outcome (:outcome lif)))))
+
 (defn- returned-items
   "The items one run's RETURNED tail contributes, in order: assistant replies (with their
   reasoning, when the vendor reported any) and tool results. A user message in the tail
@@ -506,13 +552,13 @@
   inventing one. A resumed run passes the turn's own count instead, so numbering continues
   and the pointer stays an index into that turn's `:calls`.
 
-  A TOOL ITEM CARRIES ITS OWN four marks as well, because a tool call has a life of its
-  own: `arrivedAt` (it reached the seam), `resumedAt` (a park ended -- absent when nobody
-  had to decide), `executedAt` (it LEFT execution, i.e. the tool finished) and `closedAt`
-  (the seam is done). The span a tool occupied is arrivedAt -> executedAt; reading
-  `executedAt` as a START is the mistake that makes every tool look instantaneous, and it
-  is a mistake the line's own name invites. `executed` false means no execute line at all
-  -- a vetoed call, which is not 'it ran in zero seconds'."
+  A TOOL ITEM CARRIES ITS OWN marks as well (`tool-marks`), because a tool call has a life
+  of its own: `arrivedAt`, `resumedAt`, `executedAt`, `closedAt`, `executed`, `outcome` and
+  `error`.
+
+  A RUN STILL GOING HAS NO RETURNED TAIL YET, so this function draws nothing for the calls
+  it has started -- those are `pending-tool-items`' business, and reading the two together is
+  what makes a call appear the moment it arrives and then read the same once it is answered."
   [tail call-of life-of offset]
   (first
    (reduce (fn [[items next-call current] message]
@@ -527,23 +573,16 @@
                   (or mine current)])
 
                "tool"
-               (let [id  (:tool_call_id message)
-                     lif (get life-of id)]
-                 [(conj items (cond-> {:kind      "tool"
-                                       :toolCallId id
-                                       :name      (get-in call-of [id :name])
-                                       :argsText  (get-in call-of [id :argsText])
-                                       :result    (text-of (:content message))
-                                       ;; RAN means an execute line exists. NOT the same as
-                                       ;; 'took no time': a vetoed call is the other case.
-                                       :executed  (some? (:executedAt lif))}
-                                (some? current)           (assoc :call current)
-                                (some? (:arrivedAt lif))  (assoc :arrivedAt (:arrivedAt lif))
-                                (some? (:resumedAt lif))  (assoc :resumedAt (:resumedAt lif))
-                                (some? (:executedAt lif)) (assoc :executedAt (:executedAt lif))
-                                (some? (:closedAt lif))   (assoc :closedAt (:closedAt lif))
-                                (some? (:error lif))      (assoc :error (:error lif))
-                                (some? (:outcome lif))    (assoc :outcome (:outcome lif))))
+               (let [id (:tool_call_id message)]
+                 [(conj items
+                        (cond-> (tool-marks
+                                 {:kind      "tool"
+                                  :toolCallId id
+                                  :name      (get-in call-of [id :name])
+                                  :argsText  (get-in call-of [id :argsText])
+                                  :result    (text-of (:content message))}
+                                 id life-of)
+                                (some? current) (assoc :call current)))
                   next-call
                   current])
 
@@ -558,6 +597,51 @@
                [items next-call current]))
            [[] 0 nil]
            tail)))
+
+(defn- answered-ids
+  "The tool calls this run's RETURNED tail has already answered -- the ids its `tool` role
+  messages speak for. A call with a result message is NOT pending: that message is the fuller
+  account, and drawing both would draw one call twice."
+  [tail]
+  (into #{} (keep #(when (= "tool" (:role %)) (:tool_call_id %)) tail)))
+
+(defn- pending-tool-items
+  "The tool calls THIS RUN has started but not yet answered, as items -- the live half of a
+  record that is still being written. See `tool-marks` for the marks they share with a call
+  the run has answered.
+
+  WHY THIS EXISTS: the kernel writes a run's returned side -- the assistant message that asks
+  for a call and the tool message that answers it -- at `:run/done`, ONE BEAT AFTER the
+  terminal frame (`harness.edge.http`'s `log-messages!`). So a reader of `message` rows alone
+  sees a tool call only once the run is over, and a run being watched shows the question and
+  the injected blocks while the work it is doing stays invisible. THE AUDIT LINES ARE NOT
+  LIKE THAT: `tools/pre-execute` lands the moment the call reaches the seam. This is where
+  the trajectory stops ignoring them -- a call in flight is drawn as a call in flight.
+
+  ONLY THE SEGMENT THAT IS STILL OPEN IS ASKED (`:live?`, set by `trajectory-answer`), and
+  that is the load-bearing choice. A segment that has closed is a record that is finished:
+  what it left unanswered was answered by a LATER segment of the same turn -- a park and its
+  resume write two segments and one tool message -- and drawing the call under the parked
+  half as well would draw one call twice and, worse, read the resume's verdict off the merged
+  life map, putting the future inside a past the reader asked about.
+
+  WHAT THE RECORD CANNOT SAY BY NOW IS SAID BY ABSENCE. Mid-run there is no `:result` (the
+  tool message is not written yet) and no `:argsText` unless a parked call's assistant
+  message has already landed; neither is invented. `:name` falls back to the audit line's own
+  `:toolName`, which is the only name a run in flight has left."
+  [run life-of call-of]
+  (when (:live? run)
+    (let [answered (answered-ids (:returned run))]
+      (vec (keep (fn [id]
+                   (when-not (contains? answered id)
+                     (let [lif  (get life-of id)
+                           name (or (get-in call-of [id :name]) (:name lif))
+                           args (get-in call-of [id :argsText])]
+                       (tool-marks (cond-> {:kind "tool" :toolCallId id}
+                                     (some? name) (assoc :name name)
+                                     (some? args) (assoc :argsText args))
+                                   id life-of))))
+                 (:tool-ids run))))))
 
 ;; ------------------------------------------------------------------- the answer
 
@@ -695,6 +779,7 @@
                       (add-context after)
                       (append-last (returned-items (:returned run) call-of life-of
                                                    (when (seq calls) 0)))
+                      (append-last (pending-tool-items run life-of call-of))
                       (append-calls calls))]
         {:seen seen' :shownSystem texts :turns turns
          :history (into raw (:returned run))})
@@ -708,6 +793,7 @@
                       (cond-> changed?
                         (append-last [(system-item texts false (:tools (:prompt-row run)))]))
                       (append-last (returned-items (:returned run) call-of life-of offset))
+                      (append-last (pending-tool-items run life-of call-of))
                       (append-calls calls))]
         {:seen seen' :shownSystem texts :turns turns
          :history (into raw (:returned run))}))))
@@ -764,7 +850,12 @@
   same rule `stats/incomplete?` uses, kept here so no reader has to walk the record again."
   [state]
   (let [{:keys [segments folding life calls last-event]} state
-        folding (if-some [open (:open segments)] (one-run folding open life calls) folding)]
+        ;; THE OPEN SEGMENT IS THE LIVE ONE: its record is still being written, so a tool call
+        ;; it has already started is drawn as a call in flight (`pending-tool-items`). A closed
+        ;; segment is a finished record and is folded exactly as every other reader sees it.
+        folding (if-some [open (:open segments)]
+                  (one-run folding (assoc open :live? true) life calls)
+                  folding)]
     {:turns      (mapv finish-turn (:turns folding))
      :incomplete (boolean (and last-event (not (frames/terminal? (replay/payload last-event)))))}))
 
@@ -813,7 +904,8 @@
     context    :text
     user       :id :text
     assistant  :text :call :reasoning (only when the vendor reported some)
-    tool       :toolCallId :name :argsText :result :executed
+    tool       :toolCallId :name :argsText :executed
+               :result (ABSENT while a run in flight has not answered the call yet)
                :arrivedAt :resumedAt :executedAt :closedAt :outcome :error
 
   -- and a call is :index, :model, :tools (absent when the request carried none),

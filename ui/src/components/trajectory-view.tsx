@@ -162,7 +162,11 @@ const ItemRow: FC<{
             that gets cut first -- a single truncating span would always sacrifice the
             second half, and the second half is what happened.
             NO TIME AND NO TOKEN COUNT OUT HERE EITHER: those are the pane's, and numbers
-            on every line turn a scan into a read. */}
+            on every line turn a scan into a read.
+            A CALL THE RUN HAS STARTED BUT NOT ANSWERED HAS NO SECOND HALF YET: the result is
+            a tool message, written at the run's end, so the arrow and the result are drawn
+            only once there is one -- an arrow pointing at nothing would read as an empty
+            answer rather than as no answer yet. */}
         {item.kind === "tool" ? (
           <>
             <span
@@ -171,15 +175,22 @@ const ItemRow: FC<{
             >
               {headline(item, t)}
             </span>
-            <span className="shrink-0 font-mono text-xs text-muted-foreground" aria-hidden="true">
-              →
-            </span>
-            <span
-              data-slot="trajectory-item-result"
-              className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
-            >
-              {preview(item.result)}
-            </span>
+            {item.result !== undefined && (
+              <>
+                <span
+                  className="shrink-0 font-mono text-xs text-muted-foreground"
+                  aria-hidden="true"
+                >
+                  →
+                </span>
+                <span
+                  data-slot="trajectory-item-result"
+                  className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+                >
+                  {preview(item.result)}
+                </span>
+              </>
+            )}
           </>
         ) : (
           <span
@@ -485,7 +496,18 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           <>
             <Facts
               pairs={[
-                [t("facts.executed"), item.executed ? t("values.yes") : t("values.no")],
+                [
+                  t("facts.executed"),
+                  /// THREE ANSWERS, NOT TWO. `executed` is 'an execute line exists', so a
+                  /// call IN FLIGHT and a call a human VETOED both read false; what tells
+                  /// them apart is the ANSWER -- a vetoed call has one (the veto notice),
+                  /// a call the run has not answered yet has none. See `TrajectoryItem`.
+                  item.executed
+                    ? t("values.yes")
+                    : item.result === undefined
+                      ? t("values.pending")
+                      : t("values.no"),
+                ],
                 [t("facts.outcome"), item.outcome ?? null],
                 /// THE TWO DURATIONS ARE DIFFERENT KINDS OF TIME. `waited` is the park --
                 /// a person deciding; `ran` is the tool working, from the moment execution
@@ -508,7 +530,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
             />
             {item.argsText !== undefined && <Block label={t("blocks.arguments")} text={item.argsText} mono />}
             {item.error !== undefined && <Block label={t("blocks.error")} text={item.error} mono />}
-            <Block label={t("blocks.result")} text={item.result} mono />
+            {item.result !== undefined && <Block label={t("blocks.result")} text={item.result} mono />}
           </>
         )}
       </div>
