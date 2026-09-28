@@ -15,7 +15,10 @@
             [harness.edge.replay :as replay]
             [harness.edge.ag-ui :as ag]
             [harness.edge.compaction :as compaction]
-            [harness.kernel.frames :as frames]))
+            [harness.kernel.frames :as frames]
+            [harness.infra.shell :as shell]
+            [clojure.java.io :as io]
+            [clojure.string :as str]))
 
 ;; ------------------------------------------------------------------ the records
 
@@ -278,3 +281,69 @@
     (is (= 1 (#'compaction/tail-anchor nodes records 2))
         "a tail asked to start inside the second node backs off to the step it falls inside")
     (is (= 3 (#'compaction/tail-anchor nodes records 3)))))
+
+;; ------------------------------------------------- where the work is happening
+
+(deftest the-environment-block-reads-like-a-sentence
+  ;; What the summary request carries about the working tree (owner, 2026-09-27). PURE:
+  ;; the shape is a test's, not git's.
+  (is (nil? (compaction/environment-block nil)))
+  (is (nil? (compaction/environment-block {})) "nothing to say answers nothing")
+  (is (= (str "worktree: /w\nbranch:   main\nuncommitted (1 path(s)):\n   M a.clj")
+         (compaction/environment-block {:worktree "/w" :branch "main"
+                                        :uncommitted [" M a.clj"] :dirty-total 1})))
+  (is (str/includes?
+       (compaction/environment-block {:branch "main" :uncommitted (vec (repeat 20 " M a"))
+                                      :dirty-total 25})
+       "...and 5 more")
+      "a tree too big to transcribe says how many it left out"))
+
+(deftest the-environment-is-read-off-git
+  ;; The fact thread 068fd63f lost: which worktree, which branch, what is uncommitted. READ,
+  ;; not remembered -- so this test makes a real (throwaway) repository and moves a file in it.
+  (let [dir (io/file (System/getProperty "java.io.tmpdir")
+                     (str "harness-env-" (java.util.UUID/randomUUID)))]
+    (.mkdirs dir)
+    (try
+      (let [d (.getAbsolutePath dir)
+            g (fn [cmd] (shell/run {:command cmd :dir d :timeout-ms 60000}))]
+        (g "git init -q")
+        (spit (io/file dir "a.txt") "hi\n")
+        (g "git add a.txt")
+        (g "git -c user.email=t@example.com -c user.name=t commit -q -m x")
+        (spit (io/file dir "b.txt") "new\n")
+        (let [env (compaction/environment d)]
+          (is (some? env) "a repository answers")
+          (is (not (str/blank? (str (:branch env)))) "a branch was read")
+          (is (some #(str/includes? % "b.txt") (:uncommitted env))
+              "the uncommitted file is named")
+          (is (= 1 (:dirty-total env)))))
+      (finally
+        (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
+
+(deftest a-directory-that-is-not-a-repository-answers-nothing
+  (let [dir (io/file (System/getProperty "java.io.tmpdir")
+                     (str "harness-no-git-" (java.util.UUID/randomUUID)))]
+    (.mkdirs dir)
+    (try
+      (is (nil? (compaction/environment (.getAbsolutePath dir)))
+          "no git here is a fact worth reporting as nothing, never as a failure")
+      (finally (io/delete-file dir true)))))
+
+(deftest the-summary-request-carries-every-part-and-only-the-ones-that-exist
+  ;; The shape of what the summarizer is told (owner, 2026-09-27): the instruction always,
+  ;; and each other part only when there is something to say.
+  (let [bare (compaction/summary-content {})]
+    (is (= compaction/summary-instruction bare) "nothing to add is nothing added")
+    (is (not (str/includes? bare "read off the tool calls above"))
+        "no section for a part that is not there -- the instruction alone is what goes"))
+  (let [full (compaction/summary-content {:facts ["src/a.clj"]
+                                           :environment "branch:   main"
+                                           :blocks ["read AGENTS.md first"]})]
+    (is (str/includes? full "Already produced"))
+    (is (str/includes? full "src/a.clj"))
+    (is (str/includes? full "Where this work is happening"))
+    (is (str/includes? full "branch:   main"))
+    (is (str/includes? full "read AGENTS.md first"))
+    (is (< (.indexOf full "Already produced") (.indexOf full "Where this work"))
+        "facts, then the environment, then the hook's words -- one order")))

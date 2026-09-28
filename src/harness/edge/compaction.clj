@@ -26,7 +26,8 @@
             [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]
             [clojure.data.json :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [harness.infra.shell :as shell]))
 
 (def summary-instruction
   "What the summarizer is told. It asks for the facts a continuing model needs and for
@@ -88,6 +89,85 @@ not invent anything. Be concise.")
          distinct
          sort
          vec)))
+
+(def ^:private git-timeout-ms
+  "How long one git question may take at a compaction. SHORT ON PURPOSE: this runs on the
+  path whose whole job is to shrink a request, and a working tree that does not answer in a
+  ten seconds is not going to make the summary better."
+  10000)
+
+(defn- git
+  "One git question in DIR, or nil when it does not answer. EVERY FAILURE IS NIL -- no git,
+  no repository, a timeout -- because the environment block is a courtesy the summary gets
+  and never a reason a compaction fails."
+  [dir args]
+  (try
+    (let [r (shell/run {:command (str "git " args) :dir dir :timeout-ms git-timeout-ms})]
+      (when (and (zero? (long (or (:exit r) 1))) (not (:timeout r)))
+        (str/trim (str (:out r)))))
+    (catch Throwable _ nil)))
+
+(def ^:private uncommitted-limit
+  "How many `git status` lines the block carries. A cap rather than a promise: a tree with
+  four hundred changed files is a fact worth knowing and not worth transcribing."
+  20)
+
+(defn environment
+  "DIR -> what the WORKING TREE looks like right now, as
+  {:worktree .. :branch .. :uncommitted [line ..] :dirty-total n} -- or nil when DIR is nil
+  or git says nothing there.
+
+  IT IS READ, NOT REMEMBERED, AND NOT THE MODEL'S TO INVENT (owner, 2026-09-27). This is the
+  fact thread `068fd63f` lost: a model compacted mid-task could not see which worktree it
+  was in, took its OWN uncommitted work for another session's, and stopped. The branch, the
+  worktree and the dirty paths are read off git at the moment of the compaction, so the
+  summary cannot get them wrong -- and a `/tmp`-style path is reported as git spells it."
+  [dir]
+  (when (and dir (not (str/blank? (str dir))))
+    (let [worktree (git dir "rev-parse --show-toplevel")
+          branch   (git dir "rev-parse --abbrev-ref HEAD")
+          dirty    (some-> (git dir "status --porcelain") str/split-lines)]
+      (when (or worktree branch (seq dirty))
+        {:worktree    worktree
+         :branch      branch
+         :uncommitted (vec (take uncommitted-limit dirty))
+         :dirty-total (count dirty)}))))
+
+(defn environment-block
+  "ENVIRONMENT (`environment`'s answer) -> the text appended to the summary request, or nil
+  when there is nothing to say. PURE, so the shape a person reads is a test's rather than
+  git's."
+  [env]
+  (when (seq env)
+    (let [{:keys [worktree branch uncommitted dirty-total]} env]
+      (->> [(when (seq worktree) (str "worktree: " worktree))
+            (when (seq branch)   (str "branch:   " branch))
+            (when (seq uncommitted)
+              (str "uncommitted (" dirty-total " path(s)):"
+                   (str/join (map #(str "\n  " %) uncommitted))
+                   (when (> dirty-total (count uncommitted))
+                     (str "\n  ...and " (- dirty-total (count uncommitted)) " more"))))]
+           (remove nil?)
+           (str/join "\n")))))
+
+(defn summary-content
+  "THE ONE USER MESSAGE THE SUMMARIZER IS HANDED, assembled from what the caller knows:
+
+    :facts       the artifacts read off the tool calls (`product-facts`)
+    :environment the working tree, read off git (`environment-block`)
+    :blocks      what a `:pre-compact` hook printed, verbatim and in declaration order
+
+  EACH PART IS OPTIONAL AND AN EMPTY ONE IS SIMPLY ABSENT -- no heading for nothing to say.
+  IT LIVES HERE, PURE, so that what the summarizer is told is a test's rather than a run's:
+  the caller supplies the facts and this decides the shape."
+  [{:keys [facts environment blocks]}]
+  (str summary-instruction
+       (when (seq facts)
+         (str "\n\nAlready produced (read off the tool calls above):\n" (str/join "\n" facts)))
+       (when (seq environment)
+         (str "\n\nWhere this work is happening (read from git just now):\n" environment))
+       (when (seq blocks)
+         (str "\n\n" (str/join "\n\n" blocks)))))
 
 (defn check-ratios!
   "Validate a merged compaction pair, or throw naming what is wrong. Split out so the

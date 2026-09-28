@@ -137,8 +137,8 @@ echo '{"hook":"PreToolUse","thread_id":"t","project_dir":null,
 | `:file-changed` | `FileChanged` | — | `file` | `file` | 观察者 | 放行 |
 | `:elicitation` | `Elicitation` | ✓ | `server` `request` | — | 观察者 | 放行 |
 | `:elicitation-result` | `ElicitationResult` | ✓ | `server` `response` | — | 观察者 | 放行 |
-| `:pre-compact` | `PreCompact` | — | — | — | 观察者 | 放行 |
-| `:post-compact` | `PostCompact` | — | — | — | 观察者 | 放行 |
+| `:pre-compact` | `PreCompact` | ✓ | — | — | 观察者 | 放行 |
+| `:post-compact` | `PostCompact` | ✓ | — | — | 观察者 | 放行 |
 | `:subagent-start` | `SubagentStart` | — | `subagent` | — | 观察者 | 放行 |
 | `:subagent-stop` | `SubagentStop` | — | `subagent` | — | 观察者 | 放行 |
 | `:teammate-idle` | `TeammateIdle` | — | `teammate` | — | 观察者 | 放行 |
@@ -147,10 +147,10 @@ echo '{"hook":"PreToolUse","thread_id":"t","project_dir":null,
 | `:worktree-create` | `WorktreeCreate` | — | `path` | — | 观察者 | 放行 |
 | `:worktree-remove` | `WorktreeRemove` | — | `path` | — | 观察者 | 放行 |
 
-「有触发源」列是「**今天真的会触发**」——9 个点。**没标的 18 个永不触发，这是设计，不是遗漏**：
+「有触发源」列是「**今天真的会触发**」——11 个点。**没标的 16 个永不触发，这是设计，不是遗漏**：
 它们声明得下、校验得过、进得了表，只是等各自的子系统（文件监视、上下文压缩、子代理、任务、worktree）
 落地时才接——这就是为什么一个 P3 点的代价是一行数据，而不是一个接口。另外两处读表时要留意：
-**匹配对象是 `—` 的点拒绝 `:matcher`**；**`:system-prompt` 的 stdout 不是答案而是内容**（下一节）。
+**匹配对象是 `—` 的点拒绝 `:matcher`**；**两个点的 stdout 不是答案而是内容**（下一节）：`:system-prompt` 的追加到 system 消息，`:pre-compact` 的追加到**摘要请求**——项目交代「worktree 是哪一个、分支是什么、先读这个目录里的 AGENTS.md」的地方（`.scratch/session-fork` 那次误判之后，2026-09-27）。
 
 两个装配点**并排**，各管 run 开场的一半，且**不可能交错**（不同的 message role）：
 

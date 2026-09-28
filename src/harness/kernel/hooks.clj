@@ -134,8 +134,13 @@
     :payload #{:server :request} :matches nil :gate? false :on-error :proceed}
    {:name "ElicitationResult" :when "the user answered an elicitation, before it goes back"
     :payload #{:server :response} :matches nil :gate? false :on-error :proceed}
+   ;; AND THIS ONE'S STDOUT IS CONTENT TOO (owner, 2026-09-27): what a declaration prints is
+   ;; appended to the SUMMARY REQUEST -- the place a project says 'the worktree is this one',
+   ;; 'read the AGENTS.md in this directory first' -- exactly as SystemPrompt's stdout is
+   ;; appended to the system message. PostCompact stays an observer: it runs after the summary
+   ;; is written, and there is nothing left for its words to ride on.
    {:name "PreCompact" :when "context compaction is about to run"
-    :payload #{} :matches nil :gate? false :on-error :proceed}
+    :payload #{} :matches nil :gate? false :on-error :proceed :stdout :content}
    {:name "PostCompact" :when "context compaction finished"
     :payload #{} :matches nil :gate? false :on-error :proceed}
    {:name "SubagentStart" :when "a subagent starts"

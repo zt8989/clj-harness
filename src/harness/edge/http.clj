@@ -5497,6 +5497,10 @@
         put       (fn [kind payload]
                     (swap! written conj [kind payload])
                     (log! stem nil kind payload))
+        ;; FIRED BEFORE THE SUMMARY REQUEST IS BUILT, so that what a declaration prints can
+        ;; ride on it (`.scratch`: the place a project says which worktree this is). The
+        ;; post one below is still just an observer.
+        pre       (hook/emit :pre-compact {:thread-id stem})
         summarize (fn [messages]
                     (let [specs []
                           ;; AND THIS SUMMARY IS A MODEL CALL TOO, so it carries the same
@@ -5527,10 +5531,17 @@
                                                   ;; that cannot see what it already made
                                                   ;; mistakes its own work for somebody
                                                   ;; else's).
-                                                  :content (str compaction/summary-instruction
-                                                                (when-some [facts (seq (compaction/product-facts messages))]
-                                                                  (str "\n\nAlready produced (read off the tool calls above):\n"
-                                                                       (str/join "\n" facts))))})
+                                                  ;; THE REQUEST'S OWN SHAPE IS THE COMPACTION
+                                                  ;; NAMESPACE'S (`summary-content`): the artifacts
+                                                  ;; read off the tool calls, where the work is
+                                                  ;; happening (git, now), and what a
+                                                  ;; `:pre-compact` hook printed.
+                                                  :content (compaction/summary-content
+                                                            {:facts (compaction/product-facts messages)
+                                                             :environment (compaction/environment-block
+                                                                           (compaction/environment
+                                                                            (project/binding-for stem)))
+                                                             :blocks (:blocks pre)})})
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)
                           (let [content (:content message)]
@@ -5538,10 +5549,11 @@
                         (catch Throwable t
                           (put "model/end" {})
                           (throw t)))))]
-    ;; THE TWO HOOK POINTS THE TABLE ALREADY DECLARED (`harness.kernel.hooks`), fired around every
-    ;; compaction -- automatic or manual. Observers (`:gate? false`), so neither can gate it; with
-    ;; no sink bound (a manual compaction outside a run) they are simply quiet.
-    (hook/emit :pre-compact {:thread-id stem})
+    ;; THE TWO HOOK POINTS THE TABLE DECLARED (`harness.kernel.hooks`) BRACKET every compaction,
+    ;; automatic or manual. THE PRE ONE HAS ALREADY FIRED -- above, before the summary request
+    ;; was built, so that what it printed could ride on it. Neither can gate: they are
+    ;; observers (`:gate? false`), and with no sink bound (a manual compaction outside a run)
+    ;; both are simply quiet.
     (let [result (compaction/perform! records
                                       {:window       window
                                        :retain-ratio (:retain-ratio ratios)

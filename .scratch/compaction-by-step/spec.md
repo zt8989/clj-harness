@@ -72,3 +72,27 @@
 - 判据：`harness.edge.compaction-test` 的 `the-opening-is-never-in-a-compaction-head`（含开场块的
   记录，压缩的 `:shadowed` 不含开场块那一节点，且 head 从它之后开始）；`compaction-test` 与
   `compaction-run-test` 全绿。
+
+## 落地（追加：压缩前交代「工作在哪」，2026-09-27）
+
+**摘要请求现在自带一段「工作在哪」，以及一个可注入的钩子。**（主人：`pre-compact` / `post-compact` 两个
+钩子待用；「你想办法在压缩前增加提示词，留下当前正在操作的 worktree、git 分支等信息，防止前后不认识，
+或者在 hook 里注入」。两条都做。）
+
+- `harness.edge.compaction/environment`：**当场读 git** —— `rev-parse --show-toplevel` 的 worktree、
+  `rev-parse --abbrev-ref HEAD` 的分支、`status --porcelain` 的未提交（最多 20 行，多了报数）。
+  在会话的**项目绑定目录**上跑，10s 超时，**任何失败都是 nil**（没 git、不是仓库、超时）——
+  环境块是摘要的顺带，绝不是压缩失败的理由。`environment-block` 把它渲染成几行文本（纯函数，可测）。
+- `harness.edge.compaction/summary-content`：摘要请求那一条 user 消息的**唯一**拼装处 —— 指令 +
+  `Already produced`（工具调用投影）+ `Where this work is happening`（上面那段）+ `:pre-compact` 钩子
+  打印的字，顺序固定，没有内容的那段连标题都不出现。
+- `PreCompact` 这个钩子点加了 `:stdout :content`：**声明打印的 stdout 会原文附到摘要请求上**
+  （和 `SystemPrompt` 之于 system 消息同一套机制），所以项目可以自己说「worktree 是这一个，先读这里的
+  AGENTS.md」。它照旧在压缩**之前**发；`PostCompact` 保持观察者（摘要已经写完，字无处可附）。
+- 文档跟上：`docs/architecture/hooks.md` 的表格把这两个点的「有触发源」标上（9 → 11），并写明
+  两个 stdout 是内容的点。
+- 判据：`compaction-test` 的 `the-environment-block-reads-like-a-sentence`、
+  `the-environment-is-read-off-git`（建一个真仓库、改一个文件再看）、
+  `a-directory-that-is-not-a-repository-answers-nothing`、
+  `the-summary-request-carries-every-part-and-only-the-ones-that-exist`；`http-test` 整轮
+  （115 用例 / 1240 断言）全绿 —— 压缩这条路上多了三个 git 子进程，它不能把压缩弄坏。
