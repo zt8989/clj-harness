@@ -493,7 +493,7 @@
 (defn closing-frames
   "What a log that ends mid-run is MISSING, as a vector of {:run-id .. :last-frame
   .. :frames [frame ..]} -- one entry per run the log never closed, oldest first --
-  or nil when the log ends where a log should.
+  .. :frames [frame ..] :messages [row ..]} -- one entry per run the log never closed, oldest
 
   PURE: it says what is missing, and the writer is the edge, which owns the file.
 
@@ -529,6 +529,13 @@
                            unanswered))]
              {:run-id     run-id
               :last-frame last-frame
+              ;; AND THE ROWS THOSE RESULTS ANSWER: a call whose answer is the cut-off sentence needs
+              ;; the `message` too, or the repaired record would still be 未重整化 (`.scratch/
+              ;; record-normalization` 判据 3) and a session that a killed process cost us the last
+              ;; line of would be read-only until somebody forked it. ONE SPELLING of the row, from
+              ;; `harness.kernel.frames` -- the same function the run loop writes its results with.
+              :messages   (mapv (fn [{:keys [toolCallId content]}] (frames/tool-message toolCallId content))
+                                results)
               :frames     (conj results
                                 {:type    "RUN_ERROR"
                                  :message (str "the run was cut off: this record ends "

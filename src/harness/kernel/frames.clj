@@ -35,6 +35,23 @@
   would be two ways for the record to describe one thing."
   [] "the run was cut off before this call returned; no result was recorded")
 
+(defn tool-message
+  "THE ROW THAT ANSWERS CALL-ID: `{:role \"tool\" :tool_call_id .. :content ..}` -- the one spelling of
+  'this is what the tool said back'.
+
+  SHARED, AND THAT IS THE POINT (`.scratch/record-normalization` ticket 03): the kernel writes this
+  row as the call's result lands, and the repair/fork writes the rows a record is MISSING -- a call
+  whose answer was only ever a frame. Two spellings of the row would be the very defect those two
+  paths exist to fix, wearing a different hat."
+  [call-id content]
+  {:role "tool" :tool_call_id call-id :content content})
+
+(defn cut-off-message
+  "The same row when the answer IS the cut-off sentence: what a stopped run's call is given, and
+  what a repaired log's open call is given. See `cut-off-result` and `tool-message`."
+  [call-id]
+  (tool-message call-id (cut-off-result)))
+
 (defn- patch-by-id [messages id f]
   (mapv (fn [m] (if (= id (:id m)) (f m) m)) messages))
 

@@ -24,6 +24,11 @@
 
 第 3 条正是票 05 那个根因的形式化——**先修那条路的写手**，再谈把老记录判成未重整化。
 
+**2026-09-28 实测（票 01 落地时）**：第 2 条按**成对**读——信封成对（每个 START 有它的 END，
+反之亦然）+ 工具调用与答复成对。按**位置**读的那一版（`message` 夹在 START/END **之间**）被真记录
+排除了：写手是「帧先落、它描述的那条 message 行紧跟其后」，一条工具答复的正文**按结构不可能**
+出现在 `TOOL_CALL_END` 之前（结果得先算出来）。读数与理由：`evidence/real-records.md`。
+
 ## 决策
 
 - **未重整化的会话是只读的**：能看（`sofar`/`trajectory`/`stats`/`page` 照旧），
@@ -40,3 +45,56 @@
 | 02 | 后端拒绝续跑（并指向 fork） | 01 |
 | 03 | fork 变成重整化（补信封、补缺失的消息行） | 01（写手那条修好之后才有「补什么」） |
 | 04 | 前端校验：未重整化 → 禁用输入 + 强制走 fork | 01、02 |
+
+## 落地：票 01（2026-09-28）
+
+**判据对着真记录定下来的**（`evidence/real-records.md`，40 条真记录）：
+
+- **两种读法，读数排除了「位置读法」**：它在**每一条**真记录上发声（5–385 行，头几条是
+  `system-prompt`/`client`/`opening` 这些出生行）。落地的判据是**成对读法**：
+  (1) 每行都是新格式；(2) 信封成对（每个 START 有它的 END，反之亦然）；
+  (3) 每次工具调用有一行 `message` 答复它，每条工具答复也有它自己的调用。
+- **读数**：40 条里过 29 条；11 条未重整化，理由只有两类——5 条旧格式（读侧在判据之前就按
+  名字拒绝 `:old-contract`）、6 条「N 次工具调用没有 message 行答复」（被停/被切/正在跑的
+  调用，答复只剩一行帧——票 05 的现场就是它）。**信封不成对的一条都没有**。
+
+**判据与信号**：
+
+- `src/harness/edge/normalized.clj`：`step` / `finish` / `fold` / `normalized?`，一份 `step` 与
+  `finish` 两条路共用（`fold` 是挂进 `harness.edge.replay` 那一趟读的形状，`:init` 是 thunk）；
+- **读侧**（`harness.edge.http/sofar-get`）：`:normalized` 与 `:normalizationReasons`，判据与消息
+  **同走一趟读**（`replay/fold-sofar` 喂 `normalized/fold`），所以两件事不会来自文件的两个时刻；
+- **正在本进程写的那条不给判定**（记录天然是半截的：一次还没答复的调用不是损坏），
+  正在跑的那条读侧本来就答 `:unfinished`；能不能续由起点那道门（票 02）问记录。
+
+**判据数字**（01 与 02 一起跑的那一轮，2026-09-28）：`normalized-test` + `replay-test` +
+`trajectory-test` + `loop-test` + `http-test` = **217 / 1730 / 0**（http 一套 177.9s，
+`normalized-test` 先落时是 6/16/0，票 02 加了判例之后 7/19/0）。
+
+**判例里的两个例外，都是真形状逼出来的**（不是我放宽判据）：
+
+- **停车的调用不算缺行**：`RUN_FINISHED` 的 `outcome.interrupts` 点了名的调用，是等人裁，不是没人答
+  （`normalized.clj/parked-calls`；与 `replay/open-runs` 同一个例外）。没有这条，`a-parked-run-asks-
+  over-http-and-resumes` 与 `an-answer-lands-behind-its-call…` 两条既有用例会被新门拒掉。
+- **被停/被切的调用要把那一行写下来**：`RUN_ERROR` 之后只剩帧的调用是真的缺行（走查读数里 6 条就是它）。
+  于是**写手那一侧一起补上**：内核按停止键时（`loop.clj` 的停止分支）与修缮一条折断的记录时
+  （`replay/closing-frames` 的 `:messages` → `close-off-open-run!` / `fork-session!` 落行）都写下
+  那一行，两处共用 `harness.kernel.frames/tool-message`（**一处拼法**，票 03 也用它）。
+  所以「按了停的会话还能继续」（`a-stop-does-not-wait-for-a-vendor…` 的「a stop is not a lock」）一个字没变。
+
+## 落地：票 02（2026-09-28）
+
+**未重整化的记录不许写。**
+
+- `handle-run` 的第 4b 条决定：修缮（close-off）之后**只读一次**记录（`record-shape`），一次答两个问题
+  ——`:violations`（run 的信封）与 `:normalized`（判据）；两者都不合格就按各自的名字拒绝，拒绝语
+  点名 fork 与它的地址（`POST /api/threads/<stem>/fork`）。**修缮在前**，因为修缮本身就是重整化的
+  一步（它现在连那一行一起写下），所以「被切/被停的会话还能继续」这条既有行为一个字没变。
+- `compact-post` 拿**它已经读的那份记录**答同一个判定，不合格就拒（同一条句子）。
+- `rebuild` 不在此列：它是**修缮并交回**那道门（`sofar` 的 400 正指着它），把读回来的路堵死换不来
+  安全——这条纪律管的是**会写这份记录**的路。
+- **读的门一个字节没动**：`sofar` 照样答（记录路径带上 `:normalized false` 与理由），
+  `page`/`stats`/`trajectory`/`frames` 照旧。
+
+**判据数字**：与票 01 同一轮——**217 / 1730 / 0**。新用例「一份未重整化的记录不能写」钉住三件事：
+run / resume / compact **都拒**；只读的门不受影响；被拒的 run **一个字节**没往记录里写。

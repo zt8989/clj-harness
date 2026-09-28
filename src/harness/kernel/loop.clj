@@ -149,8 +149,8 @@
                              (if parked
                                {:parked parked}
                                (do (emit (ev/tool-result call-id content error))
-                                   (if (answer! barrier write! history added {:role "tool" :tool_call_id call-id
-                                                               :content content})
+                                   (if (answer! barrier write! history added
+                                                                (frames/tool-message call-id content))
                                      {}
                                      {:unplaced call-id}))))))
                        decisions)]
@@ -707,7 +707,7 @@
                       ;; AND THE ROW IS WRITTEN BY THE KERNEL ITSELF, once the drain has dealt with
                       ;; the frames of this call (`drained!`).
                       (drained! emit)
-                      (write! {:role "tool" :tool_call_id id :content final})
+                      (write! (frames/tool-message id final))
                       final))
         with-skills (fn []
                       (let [[before after] (swap-vals! history prepare thread-id)
@@ -917,7 +917,15 @@
                         ;; pressed stop must see the call it asked to stop as CANCELLED rather
                         ;; than as a call that quietly finished.
                         (doseq [{:keys [id]} calls :when (not (contains? @done id))]
-                          (emit (ev/cut-off-result id (frames/cut-off-result))))
+                          (emit (ev/cut-off-result id (frames/cut-off-result)))
+                          ;; AND ITS ROW, by the same hand and through the same door the ordinary
+                          ;; result takes (`on-result` above): an answer that lives ONLY as a frame
+                          ;; is the defect `.scratch/record-normalization` exists to catch -- 判据 3
+                          ;; of ticket 01 -- and a stopped session would be read-only for it. NO
+                          ;; BARRIER here for the reason that path has none: the answer's frames are
+                          ;; being dealt with in this same call, and asking the consumer to drain from
+                          ;; inside the stop would have the two wait on each other.
+                          (write! (frames/cut-off-message id)))
                         ;; AND A STOPPED STEP CLOSES WITH THEM: its calls have their cut-off
                         ;; answers now, so the step has the ending it is going to get.
                         (close-step!)

@@ -99,6 +99,7 @@
             [harness.infra.stream :as stream]
             [harness.edge.sessions :as sessions]
             [harness.edge.mux :as mux]
+            [harness.edge.normalized :as normalized]
             [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
@@ -2235,18 +2236,24 @@
                    " fresh threadId when asked with no id -- and send the run again.")
     :threadId thread-id}))
 
-(defn- torn-record
+(defn- record-shape
   "THREAD-ID's record's ENVELOPE VIOLATIONS, or nil when it has none (or cannot be read).
 
   A RUN THIS PROCESS IS ANSWERING IS NOT TORN, which is why the registry is asked first:
   the file cannot tell a run still going from one whose process died, and the registry can
   (`running?`). Reading the log is best-effort -- a record that is corrupt or missing is
-  left to the reader that refuses it by name, not turned into a second refusal here."
+  left to the reader that refuses it by name, not turned into a second refusal here.
+
+  TWO QUESTIONS, ONE READ: `:normalized` (`harness.edge.normalized` -- may these bytes be written
+  to any further?) and `:violations` (did a RUN fall out of its envelope?). Both are asked of the
+  same rows, and this record can be hundreds of megabytes of them."
   [thread-id]
   (when-not (running? thread-id)
     (try
       (when-some [f (replay/find-log (home/projects-dir) thread-id)]
-        (seq (replay/envelope-violations (vec (replay/read-records f)))))
+        (let [rows (replay/read-records f)]
+          {:normalized (normalized/normalized? rows)
+           :violations (seq (replay/envelope-violations rows))}))
       (catch Throwable _ nil))))
 
 (defn- refuse-torn-record!
@@ -2270,6 +2277,30 @@
     :threadId   thread-id
     :reason     "torn-record"
     :violations (vec torn)}))
+
+(defn- refuse-unnormalized!
+  "The answer a client gets when a run (or a compaction) aims at a record that is NOT 已重整化.
+  409, not 400: the conversation exists and is perfectly readable -- what it cannot be is WRITTEN
+  to, because this record's rows and frames do not say the same thing yet, and every further run
+  would append to a history whose reading is a guess.
+  
+  THE DOOR OUT IS THE FORK, and the sentence names it and says what to do with it, because a
+  refusal that only says no is a wall. `verdict`'s reasons say WHAT is missing -- one sentence
+  each, for the client to draw beside the button (they are the same sentences `sofar` answers).
+  
+  TEMPORARY (owner, 2026-09-28): 'every message must be wrapped by its start/end envelope' is the
+  rule this gate makes real, and forking is how a record that breaks it is normalized."
+  [thread-id verdict]
+  (api-response
+   409
+   {:error    (str "this conversation's record is not normalized ("
+                   (str/join "; " (:reasons verdict))
+                   "), so continuing it would write to a history no reader can fold back to what"
+                   " happened. Fork it to normalize a copy -- POST /api/threads/" thread-id "/fork"
+                   " -- and continue in the new session.")
+    :threadId thread-id
+    :reason   "unnormalized"
+    :normalizationReasons (:reasons verdict)}))
 
 (defn- refuse-retired-messages!
   "The answer a client gets for a run body that still carries the accumulated `messages`.
@@ -2730,20 +2761,32 @@
       (running? thread-id)
       (refuse-second-run! thread-id)
 
-      ;; 4b. THE RECORD'S OWN ENVELOPES. A message that fell OUT of its event pair (a run
-      ;; that never ended, a `model/start` with no `model/end`, a `step/start` with no
-      ;; `step/end`) is a record no vendor will read; the run is refused by name, and the
-      ;; answer points at fork. TEMPORARY (owner, 2026-09-27): it keeps OLD JSONL records
-      ;; honest until the format settles, and it is meant to be deleted then.
+      ;; 4b. THE RECORD'S OWN ROWS AND ENVELOPES, asked of ONE read after the repair.
+      ;; Two refusals live here and they are different questions about the same bytes:
+      ;;
+      ;;   * NOT NORMALIZED (`harness.edge.normalized`): this record's rows and frames do not say
+      ;;     the same thing (a tool call answered only by a frame, a `START` with no `END`, an
+      ;;     old-contract line). Writing another run into it would append to a history whose
+      ;;     reading is a guess, so the run is refused and the sentence names the FORK -- which
+      ;;     copies the conversation into a record that reads. TEMPORARY (owner, 2026-09-28).
+      ;;   * TORN: a run that never reached a terminal frame. This is the 2026-09-27 gate, kept
+      ;;     for the same reason and pointing at the same door.
+      ;;
+      ;; A RUN THAT NEVER CLOSED IS REPAIRED FIRST, NOT REFUSED: closing it off is what `rebuild`
+      ;; has always done, and doing it here means a process that died mid-flight does not cost the
+      ;; conversation its next run. The repair WRITES (a terminal frame and the row for every call
+      ;; it answers), so the judgment is made on the record as it stands after it.
       :else
-      ;; A RUN THAT NEVER CLOSED IS REPAIRED FIRST, NOT REFUSED: closing it off is what
-      ;; `rebuild` has always done, and doing it here means a process that died mid-flight
-      ;; does not cost the conversation its next run. Only a record that is STILL torn
-      ;; after that (a corrupt one) is refused by name.
-      (let [_    (close-off-open-run! thread-id (log-file-for thread-id))
-            torn (torn-record thread-id)]
-        (if torn
-          (refuse-torn-record! thread-id torn)
+      (let [_     (close-off-open-run! thread-id (log-file-for thread-id))
+            shape (record-shape thread-id)]
+        (cond
+          (and shape (:violations shape))
+          (refuse-torn-record! thread-id (:violations shape))
+
+          (and shape (not (:normalized? (:normalized shape))))
+          (refuse-unnormalized! thread-id (:normalized shape))
+
+          :else
           (start-run input run-id))))))
 
 ;; ----------------------------------------------------- the management edge
@@ -4035,14 +4078,19 @@
     (try
       (when-let [closures (seq (replay/closing-frames
                                 (replay/lines->records (replay/read-lines path))))]
-        (doseq [{:keys [run-id last-frame frames]} closures]
+        (doseq [{:keys [run-id last-frame frames messages]} closures]
           (log! stem nil "session/closed-off" {:run-id     run-id
                                                :last-frame last-frame
                                                :frames     (mapv :type frames)})
           (doseq [frame frames]
             ;; RUN-ID IS THE CLOSED RUN'S: the frames belong to it, and that is how a
             ;; reader pairs a terminal frame with the run it ended.
-            (log! stem run-id "event" frame)))
+            (log! stem run-id "event" frame))
+          ;; AND THE ROWS THE CUT-OFF ANSWERS ARE (`closing-frames`' own `:messages`): the frames say
+          ;; what happened and the rows are what every reader folds into the conversation, and a
+          ;; record missing one is not normalized -- so the repair that exists to make a killed
+          ;; session continuable would leave it read-only instead (`.scratch/record-normalization`).
+          (log-messages! stem run-id messages))
         (mapv (fn [{:keys [run-id frames]}] {:run-id run-id :frames (mapv :type frames)})
               closures))
       (catch Throwable t
@@ -4151,12 +4199,16 @@
               :seq  (:at where)})
         (when-let [closures (seq (replay/closing-frames folded))]
           (doseq [{:keys [run-id last-frame frames]} closures]
-            (log! new-id nil "session/closed-off"
-                  {:run-id run-id :last-frame last-frame
-                   :frames (mapv :type frames) :via "fork"}))
-          (doseq [{:keys [run-id frames]} closures
+            (log! new-id nil "session/closed-off" {:run-id run-id :last-frame last-frame
+                  :frames (mapv :type frames) :via "fork"}))
+          (doseq [{:keys [run-id frames messages]} closures
                   frame frames]
-            (log! new-id run-id "event" frame)))
+            (log! new-id run-id "event" frame))
+          ;; AND THE ROWS THOSE ANSWERS ARE (`closing-frames`' own `:messages`): a fork's product
+          ;; must BE 已重整化 -- a cut-off call answered by a frame alone would leave it exactly as
+          ;; un-normalized as the record it was forked from.
+          (doseq [{:keys [run-id messages]} closures]
+            (log-messages! new-id run-id messages)))
         (project/set-title! new-id
                             (str/trim (str "[fork] " (or (project/title thread-id) ""))))
         (host/ring!)
@@ -4336,6 +4388,13 @@
                         is not running here needs a human decision (rebuild closes it
                         off), and this route is not where that decision is taken
 
+  AND ONE FIELD ABOUT THE BYTES: `:normalized` -- whether this record may be WRITTEN to any
+  further (`harness.edge.normalized`, ticket 01 of `.scratch/record-normalization`). The client
+  disables its composer on `false`, shows `:normalizationReasons` and offers the fork. It rides
+  the same walk that folded the conversation, so the verdict and the messages cannot come from
+  two states of the file; the live branch above answers it about the SESSION (see there) rather
+  than by re-reading the bytes on every poll.
+
   THE TWO HALVES OF THE LIVENESS QUESTION ARE ANSWERED BY THEIR OWNERS: the file
   says whether a run has a terminal frame (`replay/sofar`), and the process says
   whether that run is still being answered (`running?`, the session table's run set).
@@ -4370,13 +4429,20 @@
 
         :else
         (api-response 200 (cond-> {:threadId stem :messages messages :context context
-                                   :state    (name st)}
+                                   :state    (name st)
+                                   ;; A LIVE SESSION SAYS "normalized": this process IS serving these
+                                   ;; bytes -- either it is writing them (a writer that wraps every
+                                   ;; message) or it was handed the session by a door that judged the
+                                   ;; record, and the door that would WRITE to it asks the record itself
+                                   ;; (see the refusal in `handle-run`). The record path below is where the
+                                   ;; question is answered from the bytes; this answer is about the session.
+                                   :normalized true}
                             (seq (:interrupts live)) (assoc :interrupts (:interrupts live))
                             (some? health)           (assoc :record health)))))
    (let [located (try {:ok (replay/locate (home/projects-dir) stem)}
                      (catch Throwable t {:error (ex-message t)}))
         read    (when (nil? (:error located))
-                  (try {:ok (replay/sofar (:ok located))}
+                  (try {:ok (replay/fold-sofar (:ok located) {:normalized normalized/fold})}
                        (catch Throwable t {:error (ex-message t)})))]
     (cond
       (some? (:error located))
@@ -4387,10 +4453,19 @@
 
       :else
       (let [{:keys [messages context state open-runs interrupts]} (:ok read)
-            health (record-health stem)]
+            health (record-health stem)
+            ;; THIS ANSWER IS ABOUT THE BYTES, and it rides the SAME walk that folded the
+            ;; conversation (`replay/fold-sofar` fed `normalized/fold`): the verdict and the
+            ;; messages cannot be read from two different states of the file.
+            verdict (normalized/finish (get-in read [:ok :folds :normalized]))]
         (cond
           (= :unfinished state)
           (if (running? stem)
+            ;; NO VERDICT ON THIS ONE: a record a run IN THIS PROCESS is still writing is
+            ;; incomplete by nature -- a call whose answer has not been written yet is not damage
+            ;; -- and continuing it is refused by the one-run-at-a-time rule regardless. Whether
+            ;; these bytes may be written to is judged when the run settles, above the record
+            ;; read below.
             (api-response 200 (cond-> {:threadId stem
                                        :messages messages
                                        :context  (or context [])
@@ -4410,7 +4485,11 @@
           (api-response 200 (cond-> {:threadId stem
                                      :messages messages
                                      :context  (or context [])
-                                     :state    (name state)}
+                                     :state    (name state)
+                                     :normalized (boolean (:normalized? verdict))
+                                     ;; WHY NOT: the sentences above, for a client that shows the
+                                     ;; reason next to the fork button. Empty when the record is fine.
+                                     :normalizationReasons (:reasons verdict)}
                               (seq interrupts) (assoc :interrupts interrupts)
                               (some? health)   (assoc :record health)))))))))
 
@@ -5965,14 +6044,20 @@
                       (catch Throwable t {:error (ex-message t)}))]
         (if (some? (:error read))
           (api-response 400 {:error (:error read) :threadId stem})
-          (try
+          ;; A COMPACTION WRITES ROWS TO THIS RECORD (`context/compacted`, the summary's rows),
+          ;; so it is one of the doors that may not write to a record that is not normalized --
+          ;; the same refusal a run gets, naming the same door out (the fork).
+          (let [verdict (normalized/normalized? (:ok read))]
+            (if-not (:normalized? verdict)
+              (refuse-unnormalized! stem verdict)
+              (try
             (let [result (run-compaction! stem provider (:ok read)
                                             (:context-window provider) (compaction/config stem) nil)]
               (api-response 200 {:threadId  stem
                                  :compacted (some? result)
                                  :shadowed  (:shadowed result)}))
             (catch Throwable t
-              (api-response 400 {:error (ex-message t) :threadId stem})))))))))
+              (api-response 400 {:error (ex-message t) :threadId stem})))))))))))
 
 (defn- dispatch
   "The route table, with no safety net -- see `handler` for the one wrapped

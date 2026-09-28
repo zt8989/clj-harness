@@ -10,6 +10,7 @@
             [harness.infra.logging :as logging]
             [harness.kernel.llm :as llm]
             [harness.edge.replay :as replay]
+            [harness.edge.normalized :as normalized]
             [harness.test-support :as support]
             [harness.wire :as wire]))
 
@@ -899,6 +900,26 @@
     (is (= (replay/compaction-facts records) (:compactions answer)))
     (is (= (replay/prune-facts records) (:prunes answer)))
     (is (= [] (:context answer)))))
+
+(deftest the-normalization-verdict-rides-the-same-walk
+  ;; 票 01 of `.scratch/record-normalization`: the read side asks whether these bytes may be
+  ;; written to ON THE SAME WALK that folds the conversation (`fold-sofar`'s folds), so a
+  ;; record's messages and its verdict cannot come from two states of the file.
+  (write-log! "t-normalized-walk" (one-run-lines))
+  (let [f      (log-file "t-normalized-walk")
+        answer (replay/fold-sofar f {:normalized normalized/fold})
+        verdict (normalized/finish (:normalized (:folds answer)))]
+    (is (= (:messages (replay/sofar f)) (:messages answer))
+        "the extra fold changes nothing about what the conversation reads as")
+    (is (= verdict (normalized/normalized? (replay/read-records f)))
+        "one judgment, two doors: the walk and the whole record agree")
+    (testing "and this fixture IS the shape it catches: the call's frames are here, its row is not"
+      ;; `one-run-lines` emits what `ag/outbound` makes of a run's events -- the WIRE frames.
+      ;; The `message` rows of a run are written by the kernel as it goes (`.scratch/record-stream`
+      ;; 票 02), so a fixture that writes only frames is exactly a record whose tool answer never
+      ;; landed as a row -- the root cause of 票 05, and 判据 (3) of this ticket.
+      (is (false? (:normalized? verdict)))
+      (is (re-find #"工具调用没有 message 行答复" (first (:reasons verdict)))))))
 
 (defn- reasoning-frames-of [run-id message-id text]
   "The per-token REASONING frames a run used to write (ticket 03 of `.scratch/event-persistence`),

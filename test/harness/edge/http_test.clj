@@ -4123,8 +4123,11 @@
                        :frames ["TOOL_CALL_RESULT" "RUN_ERROR"]}
                       (replay/payload closing)))
                (testing "and the frames follow it, the terminal frame last"
-                 (is (= ["session/closed-off" "event" "event" "session/rebuilt"]
-                        (mapv replay/kind (take-last 4 (records)))))
+               ;; AND THE ROW ITSELF FOLLOWS THEM (ticket 02 of `.scratch/record-normalization`): the
+               ;; repair writes the `message` the cut-off call was answered with, or the record it just
+               ;; made continuable would still read as 未重整化.
+                 (is (= ["session/closed-off" "event" "event" "message" "session/rebuilt"]
+                        (mapv replay/kind (take-last 5 (records)))))
                  (is (= ["TOOL_CALL_RESULT" "RUN_ERROR"]
                         (->> (records)
                              (filter #(= "event" (replay/kind %)))
@@ -6189,7 +6192,12 @@
          (is (nil? (:interrupts answer)))
          (is (= (:messages rebuilt) (:messages answer))
              "two readers of one settled conversation must not diverge")
-         (is (= (:context rebuilt) (:context answer))))
+         (is (= (:context rebuilt) (:context answer)))
+         (is (true? (:normalized answer))
+             "a session THIS process holds is answerable: it is the process that writes these bytes")
+         (is (nil? (:normalizationReasons answer))
+             "and it carries no reasons -- the record path is where the bytes are judged (ticket 02)"))
+
        (testing "and the window shows the conversation ONCE -- the half turn was not a copy"
          ;; THE OTHER HALF OF TICKET 04: mid-run the window answered from the RECORD, and at
          ;; settle it answers from the session table. Same entries, same ids -- so the switch
@@ -7093,3 +7101,79 @@
          (testing "and the ending pushes a listing that says it stopped"
            (is (until idle-frame? 5000)
                "no pushed frame said the run had ended")))))))
+
+;; ------------------------------------------------------- 未重整化的记录（`.scratch/record-normalization`）
+;;
+;; THE SHAPE BELOW IS A REAL ONE, copied from the walk in `.scratch/record-normalization/evidence/real-records.md`
+;; (record `http-answer.jsonl`): a run that ENDED, whose one tool call was answered by a frame
+;; (`TOOL_CALL_RESULT`) and never by a `message` row. Every reader folds that frame into a tool
+;; message, so the conversation looks whole -- and it is exactly what 判据 3 of ticket 01 calls out,
+;; because the row and the frame are supposed to say the same thing (票 05 of `.scratch/record-stream`
+;; is the bug that made the row go missing in the first place).
+
+(def ^:private unnormalized-dir (support/temp-dir "http-unnormalized"))
+
+(defn- unnormalized-record-lines []
+  ;; THE ROWS of a record that cannot be written to, one line per fact, in the file's own shape.
+  (mapv json/write-str
+        (list {:ts 1 :runId "r1" :type "message" :source "system-prompt"
+              :payload {:role "system" :content "You are a coding agent."}}
+              {:ts 1 :runId "r1" :type "message" :source "client" :id "u1"
+              :payload {:role "user" :content "read deps.edn"}}
+              {:ts 1 :runId "r1" :type "event" :payload {:type "RUN_STARTED"}}
+              {:ts 1 :runId "r1" :type "event" :payload {:type "TOOL_CALL_START" :toolCallId "c1"}}
+              {:ts 1 :runId "r1" :type "event" :payload {:type "TOOL_CALL_END" :toolCallId "c1"}}
+              ;; THE ANSWER, AND ONLY AS A FRAME: the line that is here, and the row that is not.
+              {:ts 1 :runId "r1" :type "event"
+               :payload {:type "TOOL_CALL_RESULT" :messageId "r1-t2" :toolCallId "c1" :content ":paths [\"src\"]"}}
+              {:ts 1 :runId "r1" :type "event" :payload {:type "RUN_FINISHED"}})))
+
+(deftest a-record-that-is-not-normalized-cannot-be-written-to
+  (let [tid (str "unnormalized-" (java.util.UUID/randomUUID))
+        f   (log-file tid)]
+    (with-server
+      tid
+      (fn []
+        ;; THE RECORD IS WRITTEN *AFTER* THE SESSION EXISTS: starting a session is what makes
+        ;; its row in the store (the run door refuses an id the store has never heard of), and it
+        ;; also lets the log be created fresh -- a file written before it would be gone by now.
+        (.mkdirs (.getParentFile f))
+        (spit f (str (str/join "\n" (unnormalized-record-lines)) "\n") :encoding "UTF-8")
+        (testing "a run is refused, and the sentence names the door out and what to do with it"
+          (let [resp (api-call :post "/api/agent"
+                               (json/write-str {:threadId tid
+                                                :append [{:id "u2" :role "user" :content "go on"}]}))
+                body (read-json resp)]
+            (is (= 409 (.statusCode resp)) (str "got " (.statusCode resp) ": " (.body resp)))
+            (is (= "unnormalized" (:reason body)))
+            (is (str/includes? (:error body) (str "POST /api/threads/" tid "/fork"))
+                "a refusal that does not say which door takes you out is a wall")
+            (is (= ["1 次工具调用没有 message 行答复"] (:normalizationReasons body))
+                "and it says WHY, in the criterion's own words")))
+        (testing "a resume is refused by the same door: it would write to the same record"
+          (let [resp (api-call :post "/api/agent"
+                               (json/write-str {:threadId tid
+                                                :resume [{:interruptId "i1" :status "resolved"
+                                                          :payload {:approved true}}]}))]
+            (is (= 409 (.statusCode resp)))
+            (is (= "unnormalized" (:reason (read-json resp))))))
+        (testing "and so is a compaction, which writes rows of its own"
+          (let [body (read-json (api-call :post (str "/api/threads/" tid "/compact") "{}"))]
+            (is (= "unnormalized" (:reason body)))))
+        (testing "THE READ-ONLY DOORS ARE UNTOUCHED: the conversation is readable, it is just not writable"
+          (let [resp (api-call :get (str "/api/threads/" tid "/sofar") nil)
+                body (read-json resp)]
+            (is (= 200 (.statusCode resp)))
+            (is (false? (:normalized body)) "the record path answers the judgment from the bytes")
+            (is (seq (:normalizationReasons body)))
+            (is (some #(= "read deps.edn" (:content %)) (:messages body))
+                "and the conversation READS fine -- the fold builds the tool's message out of its frame, which is exactly why the missing row is worth refusing over."))
+          (is (= 200 (.statusCode (api-call :get (str "/api/threads/" tid "/page") nil))))
+          (is (= 200 (.statusCode (api-call :get (str "/api/threads/" tid "/stats") nil)))))
+        (testing "and a refused run leaves the record alone -- not one byte of it"
+          (let [before (slurp f :encoding "UTF-8")]
+            (dotimes [_ 3]
+              (api-call :post "/api/agent"
+                        (json/write-str {:threadId tid
+                                         :append [{:id "u2" :role "user" :content "go on"}]})))
+            (is (= before (slurp f :encoding "UTF-8")))))))))
