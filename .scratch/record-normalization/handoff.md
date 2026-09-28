@@ -4,14 +4,15 @@
 
 ## 0. 你现在该做什么
 
-`.scratch/record-normalization/` 的四张票，**01 与 02 已落地并合进 main**（提交 `73c2170`）。
-剩下两张：**03（fork 变成重整化）→ 04（前端强制 fork）**。顺序别换：04 的门要靠 03 真的能修好一份记录。
+`.scratch/record-normalization/` 的四张票，**01、02、03 已落地并合进 main**（提交 `73c2170`、之后那一笔）。
+只剩**一张：04（前端强制 fork）**。
 
-- 03：`POST /api/threads/<stem>/fork` 今天「逐字复制截点之前的行 + 给被截断的 run 补终局」；
-  要升级成**重整化**：同一趟里把「只有帧、没有 `message` 行」的那些调用**补上那一行**，
-  且**幂等**（对已重整化的记录再 fork，产物逐字相同）。原会话一个字节不动。
+- **03 已落地**（`replay/missing-tool-rows` + `fork-session!` 按 run 分组补那一行；幂等靠「没缺的行就一行不写」；
+  旧格式按名字拒绝、不迁移）。落地小节在 `spec.md` 的「落地：票 03」；数字 **286/2047/0**。
 - 04：`ui/` —— 未重整化 ⇒ 禁用输入（发送/resume/compact）+ 一条说明 + 一个「重整化（fork）」按钮，
   点它走 03 的门，成功后自动开新会话；文案进 i18n（`ui-i18n` 的词表）。
+  后端**已经就绪**：记录路径答 `:normalized false` + `:normalizationReasons`（中文句子），
+  写门（run/resume/compact）答 409 + `:reason "unnormalized"` + 一条点名 fork 地址的英文句子。
 
 ## 1. 位置与状态（写这份文档时）
 
@@ -40,22 +41,22 @@
 - 走查脚本：`dev/scratch_normalized_census.clj`（只读 `~/.clj-harness`，`-J-Dstdout.encoding=UTF-8`
   跑，中文才不乱码）。
 
-## 3. 03 的落点（我量过、但没动手）
+## 3. 03 落地了（做法与它留下的一个取舍）
 
-1. **补哪一行**：判据 3 抓到的正是「答复只剩 `TOOL_CALL_RESULT` 帧」。那一行的内容就在帧里
-   （`:toolCallId` + `:content`），用 `frames/tool-message` 拼 —— 与写手同一处，别另写一份。
-2. **补在哪**：`fork-session!`（`src/harness/edge/http.clj`，约 4100 行）今天把 `keep` 的行逐行
-   `stream/push!` 进新文件，再按 `closing-frames` 补终局帧 +（02 之后）那几行答复。缺的行要在
-   **同一趟**里补：对 `folded`（或对 keep 的那些行）跑一遍判据的账，拿 `:calls` 减去
-   `:answers`/`:parked`，就得到「该补哪些调用」；内容从记录里那条 `TOOL_CALL_RESULT` 帧取。
-3. **幂等**：对一份**已重整化**的记录再 fork，产物必须逐字相同 —— 上面那个集合为空时，
-   一行都不许多写（用例：fork 两次，第二次新文件与第一次逐字相同）。
-4. **旧格式**：`replay/read-row` 对顶层 `kind` 的行**按名字拒绝**（`:old-contract`），所以
-   `fork-session!` 今天在旧格式记录上根本读不到东西。「补齐信封（新格式）」要不要真的迁移旧记录，
-   是这一票里唯一**还没定**的取舍 —— 我倾向：先按现状**明确拒绝**（一句话说清「开新会话或换旧 build
-   读它」），把「迁移旧格式」留成单独一票；动之前问主人一句。
-5. **用例**：缺行（真形状：`~/.clj-harness/projects/.unbound/http-answer.jsonl` 那种）、
-   信封不成对、缺行 + 信封同时缺，各一条；再一条「原会话字节不变」；再一条幂等。
+1. **补哪一行**：`replay/missing-tool-rows`（新增）——只有 `TOOL_CALL_RESULT` 帧、没有那一行 `message`
+   的调用，`{:run-id .. :message <行>}`，内容取自帧本身，行用 `frames/tool-message` 拼（与写手同一处）。
+2. **补在哪**：`fork-session!` 在同一趟里 `group-by :run-id` 之后 `log-messages!`（**按 run 分组**——
+   我第一版用 `partition-by` 解构 `[[run-id entries] ...]`，那是**行不通**的：`partition-by` 给的是
+   一串 seq，不是键值对；`group-by` 才是。调试现场：新记录 9 行、少的就是那一行）。
+3. **幂等**：没有缺的行时一行不写，所以对已重整化的记录再 fork，产物除了它自己的 header 与
+   `session/forked` 之外逐字相同（用例逐行比过 `rows-of`）。
+4. **靠切点丢掉的不用补**：半截的信封在最后一步的结束之后，切点根本没复制它。
+5. **还没定的一件事**：旧格式记录（顶层 `kind`）读侧按名字拒绝（`:old-contract`），fork 照直答 400。
+   要不要真的**迁移**旧记录，是这一票留给你和主人的取舍——现在**先明确拒绝**，别静默改写；
+   要动就单开一票。
+6. **坑**（我踩了）：一条**单独成行**的旧格式行会被 `rows-tolerating-a-torn-last-line` 当成
+   「写手正在写最后一行」吞掉，于是用例会以 `no-fork-point` 而不是 `old-contract` 红——旧格式的
+   判例至少要**两行**。
 
 ## 4. 04 的落点
 

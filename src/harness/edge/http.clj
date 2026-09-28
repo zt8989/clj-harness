@@ -4209,6 +4209,18 @@
           ;; un-normalized as the record it was forked from.
           (doseq [{:keys [run-id messages]} closures]
             (log-messages! new-id run-id messages)))
+        ;; AND THE ROWS A CALL'S ANSWER NEVER LANDED AS (ticket 03 of `.scratch/record-normalization`):
+        ;; a run that answered a call with a `TOOL_CALL_RESULT` frame and no `message` row is a record
+        ;; nobody may write to (判据 (3) of ticket 01, and the bug 票 05 of `.scratch/record-stream`
+        ;; fixed at the writer), so the fork writes that row -- the frame's own content, through the
+        ;; same `frames/tool-message` the run loop writes its results with.
+        ;;
+        ;; NOTHING IS ADDED WHEN THERE IS NOTHING MISSING, which is what makes the fork IDEMPOTENT:
+        ;; forking a record that already has every row copies it and stops.
+        ;; GROUPED BY RUN because a row is written under the run it belongs to: one `log-messages!`
+        ;; per run, in the record's order.
+        (doseq [[run-id entries] (group-by :run-id (replay/missing-tool-rows folded))]
+          (log-messages! new-id run-id (mapv :message entries)))
         (project/set-title! new-id
                             (str/trim (str "[fork] " (or (project/title thread-id) ""))))
         (host/ring!)

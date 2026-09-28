@@ -546,6 +546,45 @@
                                                " when the session was continued")})}))
          (open-runs records))))
 
+(defn missing-tool-rows
+  "What a record's CALLS are missing: one entry per call this record ANSWERS with a frame
+  (`TOOL_CALL_RESULT`) and never with the `message` row that answer is supposed to be too.
+  
+  {:run-id .. :message <the row>}, in the record's order, or nil when every call has its row.
+  
+  TICKET 03 OF `.scratch/record-normalization`, and the other half of 判据 (3) of ticket 01: a call
+  answered by a frame alone is a record a reader can fold but nobody may WRITE to. The run loop used
+  to drop that row on one path (票 05 of `.scratch/record-stream`), and records written before that
+  fix still carry calls like it. A FORK is where they get their row back: the content is the frame's
+  own, and the row is built by `harness.kernel.frames/tool-message` -- the SAME function the run loop
+  writes its results with -- so a row and the frame it stands for cannot say different things.
+  
+  A ROW NOBODY'S FRAME ASKS FOR IS NOT INVENTED: a call with no `TOOL_CALL_RESULT` at all has no
+  content to write (it is parked or cut off, and `closing-frames` is what answers those)."
+  [records]
+  (let [walk (reduce (fn [acc [i row]]
+                       (cond
+                         (= "message" (kind row))
+                         (if-some [id (get-in row [:payload :tool_call_id])]
+                           (update acc :answered conj id)
+                           acc)
+
+                         (= "TOOL_CALL_RESULT" (get-in row [:payload :type]))
+                         (let [p (:payload row)]
+                           (assoc-in acc [:results (:toolCallId p)]
+                                     {:run-id  (:runId row)
+                                      :seq     i
+                                      :content (:content p)}))
+
+                         :else acc))
+                     {:answered #{} :results {}}
+                     (map-indexed vector records))]
+    (seq (->> (:results walk)
+              (remove (fn [[id _]] (contains? (:answered walk) id)))
+              (sort-by (comp :seq val))
+              (mapv (fn [[id {:keys [run-id content]}]]
+                      {:run-id  run-id
+                       :message (frames/tool-message id content)}))))))
 (defn envelope-violations
   "RECORDS -> the runs that fell out of their ENVELOPE, or nil when none did.
 

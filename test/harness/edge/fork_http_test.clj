@@ -252,3 +252,120 @@
           (is (not= 409 status))
           (is (not= "torn-record" (:reason body))))
         (finally (stop))))))
+
+;; ------------------------------------------- fork 把一份记录变成可以继续写的（`.scratch/record-normalization` 票 03）
+;;
+;; 判据（票 01）说了「已重整化」是什么，票 02 的门说了未重整化的记录不许写。这一票是**那把钥匙**：
+;; fork 复制一份、把它修成合格的，原会话一个字节不动。
+
+(defn- answered-by-a-frame-only
+  "One FINISHED run whose one call was answered by a FRAME and never by a row: the shape the walk in
+  `.scratch/record-normalization/evidence/real-records.md` found in a real record (票 05 of
+  `.scratch/record-stream` is the bug that used to drop that row)."
+  [thread run-id call-id content]
+  [(frame run-id {:type "RUN_STARTED" :threadId thread :runId run-id})
+   (frame run-id {:type "TOOL_CALL_START" :toolCallId call-id})
+   (frame run-id {:type "TOOL_CALL_END" :toolCallId call-id})
+   (frame run-id {:type "TOOL_CALL_RESULT" :messageId (str run-id "-t2")
+                  :toolCallId call-id :content content})
+   (frame run-id {:type "RUN_FINISHED" :threadId thread :runId run-id})])
+
+(defn- tool-row-for
+  "The `message` row answering CALL-ID on the record THREAD-ID names, or nil."
+  [thread-id call-id]
+  (first (filter #(and (= "message" (replay/kind %))
+                       (= call-id (get-in (replay/payload %) [:tool_call_id])))
+                 (replay/read-records (log-file thread-id)))))
+
+(defn- rows-of
+  "The rows of THREAD-ID's record that are the CONVERSATION's: the file's own furniture (the header)
+  and the fork's audit line left out, so two forks of one record can be compared."
+  [thread-id]
+  (->> (replay/read-records (log-file thread-id))
+       (remove (fn [r] (contains? #{"record/header" "session/forked"} (replay/kind r))))
+       (mapv (fn [r] [(replay/kind r) (replay/payload r)]))))
+
+(deftest a-fork-writes-the-row-a-frame-alone-was-answering-with
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-row")
+        (spit-lines! (log-file "src-row")
+                     (concat [(header-line "src-row")
+                              (msg "r1" "u1" "read deps.edn")]
+                             (answered-by-a-frame-only "src-row" "r1" "c1" ":paths [\"src\"]")
+                             [(fact "step/end" {})]))
+        (let [parent  (slurp (log-file "src-row") :encoding "UTF-8")
+              before  (:body (fetch port "/api/threads/src-row/sofar"))
+              forked  (:body (post port "/api/threads/src-row/fork" {}))
+              new-id  (:threadId forked)
+              answer  (:body (fetch port (str "/api/threads/" new-id "/sofar")))
+              second  (:threadId (:body (post port (str "/api/threads/" new-id "/fork") {})))
+              again   (:body (fetch port (str "/api/threads/" second "/sofar")))]
+          (testing "THE PRECONDITION: a call answered by a frame alone is a record nobody may write to"
+            (is (false? (:normalized before)))
+            (is (= ["1 次工具调用没有 message 行答复"] (:normalizationReasons before))))
+          (testing "the fork's record IS normalized, and the row is on it saying what the frame said"
+            (is (true? (:normalized answer)))
+            (is (= [] (:normalizationReasons answer)))
+            (let [row (tool-row-for new-id "c1")]
+              (is (some? row) "the row that answer never landed as is there now")
+              (is (= ":paths [\"src\"]" (:content (replay/payload row))))))
+          (testing "the parent is untouched, byte for byte"
+            (is (= parent (slurp (log-file "src-row") :encoding "UTF-8"))))
+          (testing "and forking a record that already has every row adds nothing: the fork is idempotent"
+            (is (string? second) "the second fork landed")
+            (is (true? (:normalized again)) "and its record is normalized too")
+            (is (= (rows-of new-id) (rows-of second)) "no row was added by the second fork")))
+        (finally (stop))))))
+
+(deftest a-fork-drops-the-half-written-end-with-the-cut
+  ;; 记录断在半路（进程被杀）：切点落在**最后一步的结束**，没写完的那半截根本没进新文件；
+  ;; 而被切断那次调用的答复由修缮补上——帧和行一起（票 01/02 落的那一处写手）。
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-cut")
+        (spit-lines! (log-file "src-cut")
+                     [(header-line "src-cut")
+                      (msg "r1" "u1" "start")
+                      (frame "r1" {:type "TOOL_CALL_START" :toolCallId "c1"})
+                      (frame "r1" {:type "TOOL_CALL_END" :toolCallId "c1"})
+                      (fact "step/end" {})
+                      ;; ...and then a run that never came back, with a text envelope still open
+                      (frame "r2" {:type "RUN_STARTED" :threadId "src-cut" :runId "r2"})
+                      (frame "r2" {:type "TEXT_MESSAGE_START" :messageId "r2-m1" :role "assistant"})])
+        (let [resp   (post port "/api/threads/src-cut/fork" {})
+              new-id (:threadId (:body resp))
+              answer (:body (fetch port (str "/api/threads/" new-id "/sofar")))]
+          (is (= 200 (:status resp)))
+          (is (= 4 (:seq (:body resp))) "the cut is the last step's end, so the half-written part is not copied")
+          (is (true? (:normalized answer)) "the fork's product may be written to")
+          (is (= [] (:normalizationReasons answer)))
+          (is (some? (tool-row-for new-id "c1")) "and the call this record never answered has its row now"))
+        (finally (stop))))))
+
+(deftest an-old-contract-record-is-refused-by-name-not-migrated
+  ;; 旧格式（顶层 `kind`）在今天**读都读不到**（`replay/read-row` 按名字拒绝 :old-contract），所以
+  ;; fork 也只能照直说。要不要真的迁移旧记录，是这一票里唯一还没定的取舍——先明确拒绝，别静默改写。
+  (support/with-temp-env [_root _home]
+    (let [stop (http/start! {:port 0})
+          port (:local-port (meta stop))]
+      (try
+        (project/register-session! "src-old")
+        (spit-lines! (log-file "src-old")
+                     [(json/write-str {:ts 1 :runId "r1" :kind "input"
+                                       :payload {:threadId "src-old"}})
+                      ;; A SECOND LINE, because the reader tolerates ONE torn line at the END of a
+                      ;; file (`rows-tolerating-a-torn-last-line`) -- a single old-format line would be
+                      ;; swallowed as 'the writer was mid-flush' and this case would pass for the wrong
+                      ;; reason. EVERY OTHER LINE IS READ STRICTLY, and that is where the refusal is.
+                      (json/write-str {:ts 2 :runId "r1" :kind "event"
+                                       :payload {:type "CUSTOM" :name "model/start" :value {}}})])
+        (let [{:keys [status body]} (post port "/api/threads/src-old/fork" {})]
+          (is (= 400 status))
+          (is (= "old-contract" (:reason body)) "the reader refuses it by name, and the route says so")
+          (is (str/includes? (:error body) "old contract")))
+        (finally (stop))))))
