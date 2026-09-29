@@ -60,8 +60,13 @@ export type SubagentRun = {
   subagent: string;
   /// The project the subagent inherited from its parent, or null.
   project: string | null;
-  /// When the delegation opened its session, in epoch milliseconds.
+  /// When the delegation opened its session, in epoch milliseconds -- the START.
   delegatedAt: number | null;
+  /// WHEN IT FINISHED, in epoch milliseconds, or null. THIS SERVER PROCESS'S MEMORY OF
+  /// WATCHING IT END, exactly like `running` beside it: a delegation an earlier process left
+  /// behind has no end here, and its row draws the start and no duration rather than inventing
+  /// one (ticket 01 of `.scratch/task-pane-push`).
+  finishedAt: number | null;
   /// RUNNING NOW, which is the server's process-local table and not a column: a
   /// restart answers false for everything, exactly as it does for parked calls. A
   /// delegation that finished and one from a previous process read the same,

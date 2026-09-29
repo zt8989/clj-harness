@@ -13,6 +13,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.hooks :as cap-hooks]
+            [harness.cap.project :as project]
             [harness.cap.subagents :as subagents]
             [harness.cap.system-prompt :as system-prompt]
             [harness.cap.tools :as cap-tools]
@@ -194,6 +195,33 @@
     (is (:error answer))
     (is (str/includes? (:content answer) "cannot delegate")
         "the refusal says why, rather than leaving a model to look for a way round it")))
+
+(deftest a-run-carries-its-two-clocks
+  ;; TICKET 01 OF `.scratch/task-pane-push`: a delegation's row draws 开始时间 + 持续时间, so the
+  ;; two instants have to be on the run -- the store's `created_at` for the start, and THIS
+  ;; PROCESS's memory of watching it end for the finish (nil for one still going, and nil for one
+  ;; an earlier process left behind: both draw a start and no duration, which is the honest answer
+  ;; either way -- see `runs`'s docstring).
+  ;;
+  ;; THE TWO HALVES COME FROM THE TWO PLACES THEY REALLY COME FROM: the row is the store's
+  ;; (`project/begin-subagent!`), and 'in flight' is the live table's (`subagents/begin!`, which is
+  ;; the door `run-one` uses).
+  (let [parent "sa-clocks-parent"
+        child  "sa-clocks-child"]
+    (project/register-session! parent)
+    (project/begin-subagent! child {:parent parent :subagent "clocks"})
+    (let [end!   (subagents/begin! child {:parent parent :subagent "clocks"})
+          row-of (fn [] (first (filter #(= child (:thread-id %)) (subagents/runs))))]
+      (is (integer? (:delegated-at (row-of))) "the start, from the session row the birth wrote")
+      (is (nil? (:finished-at (row-of))) "and no finish while it is in flight")
+      (is (true? (:running (row-of))) "which is the live table's other half")
+      ;; AND THE ENDING IS STAMPED WHERE THE DELEGATION ENDS -- `begin!` answers the fn that ends
+      ;; it, so this is that door and not a second path.
+      (end!)
+      (is (integer? (:finished-at (row-of)))
+          "a delegation this process watched finish carries the clock it finished at")
+      (is (<= (:delegated-at (row-of)) (:finished-at (row-of))) "and never before it started")
+      (is (false? (:running (row-of)))))))
 
 (deftest the-range-is-what-the-model-is-handed-not-just-what-runs
   ;; Absence from the list is the half a model actually reads: a tool it can see and

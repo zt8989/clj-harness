@@ -27,8 +27,15 @@ export type JobRow = {
   command: string;
   /// `[running]` while it is not over, and the record's OWN ending line once it is.
   status: string;
-  /// When the server started it, in epoch milliseconds.
+  /// When the server started it, in epoch milliseconds. THE START, and it is the server's
+  /// clock (`start!` writes it) rather than this page's -- a pane opened onto a job that has
+  /// been running for a minute must show that minute.
   startedAt: number;
+  /// WHEN IT ENDED, in epoch milliseconds, or NULL while it is still going. Stamped where the
+  /// record gets its last line (`cap.jobs/write-last-line!`, the one place that claim is made),
+  /// so a finished row can show a DURATION rather than only how it went (ticket 01 of
+  /// `.scratch/task-pane-push`).
+  endedAt: number | null;
   /// Where its record is. This pane is a READER, which is why the path is allowed on
   /// the row where `job`/`job_kill` receipts name no path (`.scratch/job-receipt-no-path`).
   path: string;

@@ -326,14 +326,22 @@
         (is (= "echo one; exit 0" (:command row)))
         (is (= "[exit 0]" (:status row)) "its OWN ending, read off the record")
         (is (= path (:path row)) "and the path, because the pane that draws this IS a reader")
-        (is (integer? (:startedAt row)) "when it started, as a number of milliseconds"))))
+        (is (integer? (:startedAt row)) "when it started, as a number of milliseconds")
+        ;; AND WHEN IT ENDED (ticket 01 of `.scratch/task-pane-push`): the row's two clocks, so a
+        ;; pane can draw 开始时间 + 持续时间 rather than leaving the reader to guess. Stamped where
+        ;; the record got its last line, so it is the moment the job really stopped.
+        (is (integer? (:endedAt row)) "when it ended, for a job that is over")
+        (is (<= (:startedAt row) (:endedAt row)) "and never before it started"))))
   (testing "a job still going says so, and the row is the same shape"
     (let [t "jt-list-going"
           {:keys [id]} (jobs/start! t {:command "sleep 30"})]
       (let [row (first (jobs/listing t))]
         (is (= id (:id row)))
         (is (= "[running]" (:status row)))
-        (is (integer? (:startedAt row))))))
+        (is (integer? (:startedAt row)))
+        (is (nil? (:endedAt row))
+            "a job that is still going has NO ending -- nil rather than a guess, which is the
+             difference between 'not over yet' and 'we do not know'"))))
   (testing "rows come back in id order, and a printed lookalike is not an ending"
     (let [t "jt-list-order"
           a (jobs/start! t {:command "echo '[exit 0]'; sleep 30"})

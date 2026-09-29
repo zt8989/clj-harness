@@ -794,7 +794,7 @@
 
 ;; THE FACT FAMILY'S WRITER AND THE NUMBERS ITS `model/end` CARRIES (ADR 0006): both are defined
 ;; with the downlink machinery, far below the emitter that calls them.
-(declare family-send! live-numbers-slice numbers-snapshot)
+(declare family-send! live-numbers-slice numbers-snapshot task-send!)
 
 (defn speaks-for-a-person?
   "Whether MESSAGE is something A PERSON said, as the record spells it: a `user` message whose
@@ -4407,6 +4407,39 @@
          (initial-numbers base (:pressure n))
          base)))))
 
+(defn- task-body
+  "THE TASK PANE'S WHOLE ANSWER for THREAD-ID, as one payload: this session's background jobs
+  and the delegations it made -- exactly the two routes the pane reads when it opens
+  (`GET /api/threads/<stem>/jobs` and `GET /api/subagents`, narrowed to this parent).
+
+  ONE PAYLOAD FOR TWO SECTIONS, for the reason the pane itself gives: the two sections answer
+  one question ('what has this session got going on') and are read at one moment, so a push
+  that carried half of it would be a second clock for the other half."
+  [thread-id]
+  {:jobs        (vec (jobs/listing thread-id))
+   :delegations (vec (filter #(= (str thread-id) (str (:parent %))) (subagents/runs)))})
+
+(defn- task-send!
+  "PUSH the pane's answer to every connection watching THREAD-ID (ticket 01 of
+  `.scratch/task-pane-push`).
+
+  THE INCREMENTAL HALF OF THE PANE, and it is a fourth kind of frame on the session's socket
+  -- `{:type task ..}` -- beside a window's frames, a run's AG-UI events and the fact family
+  (ADR 0006). It is NOT a `fact`: a fact carries the record's own line number and can be
+  replayed by cursor, while a job's ending lives in the JOB's record and a delegation's end is
+  a memory of this process -- there is no line to number and nothing to replay, so the frame
+  is a whole payload per change, exactly like `events.host`'s.
+
+  A NO-OP WHEN NOBODY IS WATCHING THE SESSION, which is the ordinary case for a background
+  job: `mux/channels-for` answers nothing and the building of the body never happens."
+  [thread-id]
+  (let [channels (mux/channels-for thread-id)]
+    (when (seq channels)
+      (let [payload (assoc (task-body thread-id) :type "task")]
+        (doseq [ch channels]
+          (mux-send! ch (mux-frame thread-id payload)))))
+    nil))
+
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
 
@@ -5964,6 +5997,12 @@
     ;; and the meter's band is a consumer's fold and step (`harness.edge.pressure`). A process
     ;; that never starts a server registers neither.
     (sessions/install!)
+    ;; ...AND THE TASK PANE'S DOORBELL, through the two seams the capabilities expose: a job
+    ;; appearing or ending, and a delegation starting or ending, are the four moments the
+    ;; right-hand pane's rows change -- and the pane polls for none of them any more (ticket
+    ;; 01 of `.scratch/task-pane-push`, and `docs/rules/panel-data.md`).
+    (jobs/set-change-hook! task-send!)
+    (subagents/set-change-hook! task-send!)
     (pressure/install!)
     ;; AND THE CURRENT TURN'S TWO COUNTS (`harness.edge.turn`), which is what `turn/end` carries
     ;; (ADR 0006 decision 1). Read at the turn's end, reset at the start of the next one.

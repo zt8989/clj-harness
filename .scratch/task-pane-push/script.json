@@ -1,0 +1,6 @@
+{"turns": [
+  {"content": "",
+   "tool-calls": [{"id": "c1", "name": "job",
+                   "arguments": {"command": "sleep 8; echo job-done"}}]},
+  {"content": "（走查用回答：后台作业已经跑完。）"}
+]}

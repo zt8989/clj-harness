@@ -110,6 +110,10 @@
     "subagentStarted": "started {{time}}",
     "jobs": "Background jobs",
     "jobsEmpty": "This session has no background job.",
+    "jobStarted": "started {{time}}",
+    "jobTook": "took {{time}}",
+    "subagentElapsed": "{{time}} so far",
+    "subagentTook": "took {{time}}",
     "jobElapsed": "{{time}} so far",
     "jobStop": "Stop this job"
   }

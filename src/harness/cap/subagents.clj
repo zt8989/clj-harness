@@ -380,6 +380,59 @@
 
 (defonce ^:private live
   (atom {}))
+
+(defonce ^:private finished
+  ;; WHEN THE DELEGATIONS THIS PROCESS WATCHED END, keyed by the subagent's thread id.
+  ;;
+  ;; IT HAS TO BE REMEMBERED RATHER THAN DERIVED, and the reason is the same one that makes
+  ;; `:running` a memory: the store's row says a delegation HAPPENED, and nothing anywhere
+  ;; says when it stopped -- the child's record has its endings, but folding every child's
+  ;; log for a pane that draws four rows would be the walk the pane-data rule exists to
+  ;; retire (`docs/rules/panel-data.md`). So a delegation ENDING is stamped here, exactly as
+  ;; its beginning lives on the store's `created_at`.
+  ;;
+  ;; WHAT IT DOES NOT KNOW IS HONEST: a delegation left by a previous process has no entry
+  ;; here, so its row draws the start and NO duration -- the same answer the row gives for
+  ;; `:running false` (`runs`' own docstring argues that distinction).
+  ;;
+  ;; BOUNDED, because a long-lived process delegates a lot: the map keeps the most recent
+  ;; `finished-kept` endings (the store keeps the rows; this is only the clock on them).
+  (atom {}))
+
+(def ^:private finished-kept
+  "How many ending clocks this process keeps. Far more than any pane draws, far less than
+  a working day's delegations -- see the note on `finished`."
+  512)
+
+(defn- remember-finished!
+  "Stamp THREAD-ID's ending, keeping the newest `finished-kept` of them."
+  [thread-id]
+  (swap! finished (fn [m]
+                    (-> (assoc m thread-id (System/currentTimeMillis))
+                        (as-> all (into {} (take finished-kept (sort-by val > all))))))))
+
+;; ---------------------------------------------------- what to tell when a delegation moves
+
+(defonce ^:private change-hook
+  ;; A fn of the PARENT thread id -- the session whose pane draws this delegation -- or nil.
+  ;; Installed by the composition root (`harness.edge.http/start!`), for the reason
+  ;; `harness.cap.jobs/set-change-hook!` gives: a capability does not know about sockets.
+  (atom nil))
+
+(defn set-change-hook!
+  "Point the seam at F -- a fn of the PARENT thread id, called when a delegation of that
+  session STARTS or ENDS. Answers F."
+  [f]
+  (reset! change-hook f)
+  f)
+
+(defn- announce!
+  "Say that PARENT's delegations moved. A throwing hook (a closed downlink) must not reach
+  the run."
+  [parent]
+  (when (and (some? parent) (some? @change-hook))
+    (try ((deref change-hook) parent) (catch Throwable _ nil)))
+  nil)
 ;; subagent-thread-id -> {:id .. :parent .. :definition .. :table {name tool} :started-at ms}
 ;;
 ;; The id is a token, and it is what makes ENDING a delegation safe: this entry may
@@ -395,7 +448,18 @@
   (let [id (str (java.util.UUID/randomUUID))]
     (swap! live assoc thread-id {:id id :parent parent :definition definition
                                  :table table :started-at (System/currentTimeMillis)})
+    ;; A NEW DELEGATION CLEARS AN OLD ENDING ON THE SAME THREAD ID: an id can be reused
+    ;; (a retried run, a client that mints the same one twice), and a stale ending clock
+    ;; would make the new row look already finished.
+    (swap! finished dissoc thread-id)
+    (announce! parent)
     (fn end! []
+      ;; THE ENDING IS STAMPED ONLY IF THIS IS STILL THE LIVE DELEGATION (the `id` check
+      ;; below), which is the same rule the removal follows: ending the FIRST delegation must
+      ;; not stop the second one's clock.
+      (when (= id (get-in @live [thread-id :id]))
+        (remember-finished! thread-id)
+        (announce! parent))
       (swap! live (fn [m] (if (= id (get-in m [thread-id :id])) (dissoc m thread-id) m)))
       nil)))
 
@@ -419,7 +483,14 @@
   "Every delegation this home has a record of, newest first -- the other half of
   what a subagent panel draws.
 
-    {:thread-id .. :parent .. :subagent .. :project .. :delegated-at <ms> :running <bool>}
+    {:thread-id .. :parent .. :subagent .. :project .. :delegated-at <ms> :finished-at <ms|nil>
+     :running <bool>}
+
+  `:delegated-at` IS THE START AND `:finished-at` IS THE END, as two instants a row draws
+  (开始时间 + 持续时间, ticket 01 of `.scratch/task-pane-push`). The end is this PROCESS's
+  memory of watching the delegation finish (`finished`, above), so it is nil for a
+  delegation that is still going AND for one an earlier process left behind -- both draw a
+  start and no duration, which is the honest answer either way.
 
   THE RECORD IS THE STORE'S, THE RUNNING FLAG IS THIS PROCESS'S, and they are two
   different kinds of fact kept in the two places that can hold them: 'this home
@@ -447,6 +518,7 @@
                     :subagent     subagent
                     :project      (:path row)
                     :delegated-at (:created-at row)
+                    :finished-at  (get @finished (:id row))
                     :running      (contains? in-flight (:id row))})))
          (sort (fn [a b] (compare (:delegated-at b) (:delegated-at a))))
          vec)))

@@ -472,7 +472,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// -- the BUG (a payload that had only ever been pushed drew the raw key `stats.turns`) and
 /// its follow-up (the `model/start` payload: counts, zeroes, and the estimate of the request
 /// that just went out, drawn as an estimate).
-const EXPECTED_CASES = 166;
+///
+/// 166 -> 167: the `mux` suite's case for `.scratch/task-pane-push` ticket 01 -- a thread only the
+/// task pane follows is in the declared set (and out of it again when the pane stops). It is a
+/// value question about a RECONNECT: the declaration is what a replaced socket re-states, and a
+/// family missing from it is a family the server stops sending to.
+const EXPECTED_CASES = 167;
 
 let total = 0;
 for (const suite of SUITES) {
