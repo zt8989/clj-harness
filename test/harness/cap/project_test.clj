@@ -933,3 +933,57 @@
       (project/remember-numbers! unwatched {:turns 1 :numbersAt 1})
       (is (nil? (project/numbers-for unwatched)))
       (is (nil? (project/numbers-for nil)) "and the no-session slot is answered, not looked up"))))
+
+;; ------------------------------------------------------- the sensitive paths
+;;
+;; THE FENCE'S SECOND HALF, and the one part of it that is not a project's: paths THIS
+;; HOME calls sensitive (config.edn's :security :sensitive-paths) park a human even when
+;; the fence would have let the call through. What is asserted here is the QUESTION --
+;; sensitive-path? -- and the two things that part company with out-of-bounds?: it is
+;; answered for a session with no binding, and a path CONTAINING a sensitive one counts,
+;; because glob and grep walk a directory.
+
+(defn- with-config-edn
+  "TEXT as this home's config.edn for the duration of F, restoring what was there
+  afterwards -- the runner's home is shared by this namespace and by the ones after it."
+  [text f]
+  (let [file (home/config-file)
+        old  (when (.exists file) (slurp file :encoding "UTF-8"))]
+    (try
+      (spit file text :encoding "UTF-8")
+      (f)
+      (finally
+        (if old
+          (spit file old :encoding "UTF-8")
+          (io/delete-file file true))))))
+
+(deftest a-sensitive-path-parks-wherever-the-fence-would-let-it-through
+  (let [user-home (home/user-home)]
+    (testing "the built-in list is in force when this home wrote none"
+      (is (some #(str/ends-with? % "/.ssh/") (project/sensitive-paths nil))))
+    (testing "a path INSIDE a declared one is sensitive"
+      (is (true? (project/sensitive-path? nil (str user-home "/.ssh/id_rsa")))))
+    (testing "the declared directory itself is sensitive"
+      (is (true? (project/sensitive-path? nil (str user-home "/.aws")))))
+    (testing "a path that CONTAINS one is sensitive -- what grep over a directory is"
+      (is (true? (project/sensitive-path? nil user-home))))
+    (testing "and a session with no binding is held to it -- the fence's false is not this"
+      (is (true? (project/sensitive-path? "pt-sensitive-unbound" (str user-home "/.netrc")))))
+    (testing "an ordinary path in a bound project is NOT sensitive"
+      (project/bind! "pt-sensitive" root)
+      (is (false? (project/sensitive-path? "pt-sensitive" (tmp "file.txt"))))
+      (is (false? (project/sensitive-path? "pt-sensitive" (str root "/credentials/id_rsa")))))))
+
+(deftest this-home-can-write-its-own-sensitive-list
+  (testing "a written list is what is in force, and it replaces the built-in one whole"
+    (with-config-edn (str "{:security {:sensitive-paths [\"" (tmp "credentials") "/\"]}}\n")
+      (fn []
+        (is (true? (project/sensitive-path? nil (str (tmp "credentials") "/key.pem"))))
+        (is (true? (project/sensitive-path? nil (tmp "credentials"))))
+        (is (false? (project/sensitive-path? nil (str (home/user-home) "/.ssh/id_rsa")))
+            "the built-in list is replaced, not merged into"))))
+  (testing "a relative entry resolves against the bound project, like any tool path"
+    (with-config-edn "{:security {:sensitive-paths [\"credentials/\"]}}\n"
+      (fn []
+        (project/bind! "pt-sensitive-relative" root)
+        (is (true? (project/sensitive-path? "pt-sensitive-relative" "credentials/key.pem")))))))

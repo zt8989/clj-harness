@@ -78,6 +78,7 @@ import {
 import { hasKey, splitByKey } from "@/lib/provider-key";
 import { effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
+import { readSecurity, writeSecurity, type Security } from "@/lib/securitySetting";
 import { getSettings, type Settings, type Tier } from "@/lib/settings";
 import {
   listSubagents,
@@ -445,6 +446,151 @@ const LanguageRow: FC = () => {
   );
 };
 
+// ----------------------------------------------------------------- Security
+//
+// THE SENSITIVE PATHS ARE NOT A MODEL SETTING and not this browser's: config.edn's
+// `:security :sensitive-paths` names the places this HOME calls secret (the cloud CLIs, key
+// material, container and package-manager credentials), and a file tool aimed at one of
+// them parks for a human -- inside the project or not. The row below is that list, and it
+// edits the file: EVERY CHANGE WRITES THE WHOLE LIST BACK, which is the shape the route
+// takes and also what makes 'remove the last entry' and 'guard nothing' one request.
+//
+// THE LIST IS SHOWN AS WRITTEN (`~/.ssh/`, not the expanded path). What a person edits is
+// what the file holds; the expansion is the server's business, and showing it would put
+// paths on screen that nobody typed.
+const SensitivePathsRow: FC = () => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  const [security, setSecurity] = useState<Security | null>(null);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // READ ONCE PER MOUNT, like every other row: the panel is refetched when it opens, and
+  // the answer is the server's -- nothing here keeps a copy of the list.
+  useEffect(() => {
+    let live = true;
+    void readSecurity(tErrors)
+      .then((next) => {
+        if (live) setSecurity(next);
+      })
+      .catch((reason: unknown) => {
+        if (live) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => {
+      live = false;
+    };
+  }, [tErrors]);
+
+  // ONE WRITE, THE WHOLE LIST, AND THE ANSWER IS READ BACK: the row never advances its own
+  // state optimistically, so what it draws is always what the server would park on.
+  const write = useCallback(
+    (paths: readonly string[]) => {
+      setError(null);
+      setSaving(true);
+      void writeSecurity(paths, tErrors)
+        .then((next) => setSecurity(next))
+        .catch((reason: unknown) => {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        })
+        .finally(() => setSaving(false));
+    },
+    [tErrors],
+  );
+
+  const paths = security?.["sensitive-paths"] ?? [];
+  const defaults = security?.defaults ?? [];
+  const trimmed = draft.trim();
+
+  const add = useCallback(() => {
+    if (trimmed === "" || security === null) return;
+    setDraft("");
+    write([...paths, trimmed]);
+  }, [trimmed, security, paths, write]);
+
+  // The same list, in any order: order is DISPLAY, not policy -- and 'restore' is offered
+  // only when restoring would change something.
+  const showsDefaults =
+    paths.length === defaults.length && defaults.every((path) => paths.includes(path));
+
+  return (
+    <section data-slot="settings-security">
+      <SectionTitle>{t("security.title")}</SectionTitle>
+      <p className="text-muted-foreground text-xs">{t("security.hint")}</p>
+
+      {security === null && error === null && (
+        <p className="text-muted-foreground mt-2 text-xs">{t("security.loading")}</p>
+      )}
+
+      {security !== null && (
+        <>
+          <p className="text-muted-foreground mt-2 text-xs">
+            {security.source === "config" ? t("security.fromConfig") : t("security.fromDefault")}
+          </p>
+
+          {paths.length === 0 ? (
+            <p data-slot="settings-security-empty" className="mt-2 text-xs">
+              {t("security.empty")}
+            </p>
+          ) : (
+            <ul data-slot="settings-security-paths" className="mt-2 flex flex-col gap-1">
+              {paths.map((path) => (
+                <li key={path} className="flex items-center justify-between gap-2">
+                  <code className="font-mono text-xs break-all">{path}</code>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={t("security.remove", { path })}
+                    title={t("security.remove", { path })}
+                    disabled={saving}
+                    onClick={() => write(paths.filter((kept) => kept !== path))}
+                  >
+                    <TrashIcon />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-2 flex items-center gap-2">
+            <Input
+              aria-label={t("security.placeholder")}
+              placeholder={t("security.placeholder")}
+              value={draft}
+              disabled={saving}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") add();
+              }}
+            />
+            <Button variant="secondary" size="sm" disabled={saving || trimmed === ""} onClick={add}>
+              <PlusIcon /> {t("security.add")}
+            </Button>
+          </div>
+
+          {!showsDefaults && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              disabled={saving}
+              onClick={() => write(defaults)}
+            >
+              <RefreshCwIcon /> {t("security.restore")}
+            </Button>
+          )}
+        </>
+      )}
+
+      {error !== null && (
+        <p className="text-destructive mt-2 text-xs break-words" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+};
+
 const GeneralPage: FC<{
   settings: Settings | null;
   registry: Registry | null;
@@ -507,6 +653,12 @@ const GeneralPage: FC<{
           honest place for the only control in this modal that writes nothing --
           it changes this browser, not this harness. */}
       <LanguageRow />
+
+      {/* THE SENSITIVE PATHS ARE THE SECOND THING ON THIS PAGE THAT IS NOT ABOUT A MODEL,
+          and the only control here that changes what a tool call may DO rather than what a
+          run talks to. It sits with the language because that is the same kind of fact: a
+          setting of THIS HOME, not of this session. */}
+      <SensitivePathsRow />
     </div>
   );
 };

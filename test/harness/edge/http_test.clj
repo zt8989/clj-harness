@@ -7011,6 +7011,51 @@
       (finally
         (if saved (spit config saved :encoding "UTF-8") (io/delete-file config true))))))
 
+(deftest the-security-route-is-this-homes-sensitive-list
+  ;; GET and POST /api/security are where a person reads and edits the list the fence
+  ;; parks on (`:sensitive-path`). No threadId: the list belongs to the HOME.
+  (let [config (home/config-file)
+        saved  (when (.exists config) (slurp config :encoding "UTF-8"))]
+    (try
+      (spit config "{:default {:provider :alpha :model \"alpha-small\"}}\n" :encoding "UTF-8")
+      (with-server "sec-unused"
+        (fn []
+          (testing "a home that wrote no list reads the built-in one"
+            (let [body (read-json (api-call :get "/api/security" nil))]
+              (is (= "default" (:source body)))
+              (is (= (vec providers/default-sensitive-paths) (:sensitive-paths body)))
+              (is (= (:sensitive-paths body) (:defaults body)))))
+          (testing "POST writes the list and answers what is in force"
+            (let [resp (api-call :post "/api/security"
+                                 (json/write-str {:sensitive-paths ["~/.ssh/" "/srv/keys/"]}))]
+              (is (= 200 (.statusCode resp)))
+              (let [body (read-json resp)]
+                (is (= "config" (:source body)))
+                (is (= ["~/.ssh/" "/srv/keys/"] (:sensitive-paths body))))
+              (is (str/includes? (slurp config :encoding "UTF-8") ":sensitive-paths")))
+            (testing "and GET reads the same list back, with the built-in list beside it"
+              (let [body (read-json (api-call :get "/api/security" nil))]
+                (is (= ["~/.ssh/" "/srv/keys/"] (:sensitive-paths body)))
+                (is (= (vec providers/default-sensitive-paths) (:defaults body))))))
+          (testing "an empty list is a decision, not a missing field"
+            (let [resp (api-call :post "/api/security" (json/write-str {:sensitive-paths []}))]
+              (is (= 200 (.statusCode resp)))
+              (is (= [] (:sensitive-paths (read-json resp))))))
+          (testing "a value that is not a list of paths is a 400 and leaves the file alone"
+            (let [before (slurp config :encoding "UTF-8")
+                  resp   (api-call :post "/api/security"
+                                   (json/write-str {:sensitive-paths "~/.ssh/"}))]
+              (is (= 400 (.statusCode resp)))
+              (is (str/includes? (:error (read-json resp)) ":sensitive-paths")
+                  "the server's own sentence comes back")
+              (is (= before (slurp config :encoding "UTF-8")))))
+          (testing "a body that names no list at all is refused by name too"
+            (let [resp (api-call :post "/api/security" "{}")]
+              (is (= 400 (.statusCode resp)))
+              (is (str/includes? (:error (read-json resp)) "sensitive-paths"))))))
+      (finally
+        (if saved (spit config saved :encoding "UTF-8") (io/delete-file config true))))))
+
 ;; ------------------------------------ instruction updates on the record (tickets 02/03)
 
 (defn- rows-of-kind [lines]

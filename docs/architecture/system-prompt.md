@@ -45,6 +45,11 @@ A read/write/edit path that resolves outside every free path below parks for hum
   - /private/tmp -- the machine's temporary directory; scratch that is meant to be thrown away
   - /Users/zhouteng/.agents/skills -- where this session's skills live
   - /Users/zhouteng/Documents/workspace/clj-harness/.agents/skills -- where this session's skills live
+These paths are declared sensitive by this home, and a file tool aimed at one of them parks for human approval too -- inside the free paths above or not:
+  - /Users/zhouteng/.aws/
+  - /Users/zhouteng/.ssh/
+  - /Users/zhouteng/.config/gcloud/
+  ... (the whole list: config.edn's :security, or the built-in one when it says nothing)
 </project>
 
 <env>
@@ -57,7 +62,9 @@ language: Chinese (zh)
 
 上面三块是**样例**：`<project>` 的围栏清单是 gate 自己的 `harness.cap.project/fence`，项目开
 `:approval {:strict true}` 时项目目录会从里面退场（配置家、技能根与本机临时目录不退场），未绑定时
-整块换成一句「没有绑定」。样例里的路径只对写这份文件时的那场会话成立。
+整块换成一句「没有绑定」。**敏感路径那一段同样是派生的**（`harness.cap.project/sensitive-paths`），
+因为它是这条规矩的另一半：落到清单上的调用**哪怕在自由路径里也 park**，所以只报自由路径的块会说一条
+门禁并不执行的规矩。它**未绑定也照说**——清单是这一家的，不是项目的。样例里的路径只对该场会话成立。
 `<env>` 的语言那一行由 `harness.infra.language` 定：`config.edn` 的 `:ui :language` → 系统语言 →
 终端语言 → 英语；它**永远在**（模型与 `ask` 都指这一行）。
 

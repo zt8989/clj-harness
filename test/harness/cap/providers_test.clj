@@ -1955,6 +1955,73 @@
           (is (= before (slurp (home/config-file) :encoding "UTF-8"))
               "the file still holds the last good choice"))))))
 
+;; -------------------------------------------------------- the sensitive paths
+
+(deftest the-security-section-is-this-homes-sensitive-list
+  ;; :security is the fourth section and the only one that is not about a model or an
+  ;; interface at all: the paths a file tool must park a human on. WHICH calls those are
+  ;; is harness.cap.project's business -- what is tested here is the FILE.
+  (testing "a home that wrote no list gets the built-in one, and says so"
+    (with-config-text "{:default {:provider :openrouter}}\n"
+      (fn []
+        (let [cfg (providers/sensitive-paths-config)]
+          (is (= :default (:source cfg)))
+          (is (= (vec providers/default-sensitive-paths) (:paths cfg)))
+          (is (= (:paths cfg) (:defaults cfg)))))))
+  (testing "a home that wrote one gets EXACTLY that, whole"
+    (with-config-text "{:security {:sensitive-paths [\"~/.config/mine/\", \"/srv/keys/\"]}}\n"
+      (fn []
+        (let [cfg (providers/sensitive-paths-config)]
+          (is (= :config (:source cfg)))
+          (is (= ["~/.config/mine/" "/srv/keys/"] (:paths cfg)))
+          (is (not (str/includes? (pr-str (:paths cfg)) ".ssh"))
+              "the built-in list is replaced, not merged into")))))
+  (testing "an empty list is a decision: this home guards nothing"
+    (with-config-text "{:security {:sensitive-paths []}}\n"
+      (fn []
+        (is (= [] (:paths (providers/sensitive-paths-config))))
+        (is (= :config (:source (providers/sensitive-paths-config))))
+        (is (= [] (providers/sensitive-paths))))))
+  (testing "`~` means the operating system's home, not this home"
+    (with-config-text "{:security {:sensitive-paths [\"~/.ssh/\"]}}\n"
+      (fn []
+        (is (= [(str (home/user-home) "/.ssh/")] (providers/sensitive-paths)))
+        (is (not (str/includes? (first (providers/sensitive-paths)) (home/root)))
+            "relocating the configuration home does not move a person's keys"))))
+  (testing "and `~user` is left as written rather than guessed at"
+    (is (= "~someone/keys/" (providers/expand-home "~someone/keys/")))))
+
+(deftest a-security-value-that-is-not-a-list-of-paths-is-a-named-failure
+  (with-config-text "{:security {:sensitive-paths \"~/.ssh/\"}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "a lenient reader would turn this into 'no sensitive paths'")
+        (is (str/includes? (ex-message e) ":sensitive-paths")))))
+  (with-config-text "{:security {:sensative-paths []}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":sensative-paths") "the sentence names the typo")
+        (is (str/includes? (ex-message e) ":sensitive-paths") "and the key it meant")))))
+
+(deftest set-sensitive-paths-writes-the-list-and-refuses-what-is-not-one
+  (with-config-text "{:default {:provider :openrouter}}\n"
+    (fn []
+      (testing "a list of paths is written into :security and read back"
+        (providers/set-sensitive-paths! ["~/.ssh/" "/srv/keys/"])
+        (is (= ["~/.ssh/" "/srv/keys/"] (:paths (providers/sensitive-paths-config))))
+        (is (= :config (:source (providers/sensitive-paths-config)))))
+      (testing "an empty list is a legal decision, not a missing value"
+        (providers/set-sensitive-paths! [])
+        (is (= [] (:paths (providers/sensitive-paths-config)))))
+      (testing "a value that is not a list of strings is refused by name, and writes nothing"
+        (let [before (slurp (home/config-file) :encoding "UTF-8")
+              e      (try (providers/set-sensitive-paths! "~/.ssh/") nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) ":sensitive-paths"))
+          (is (= before (slurp (home/config-file) :encoding "UTF-8"))))))))
+
 ;; ---------------------------------------------------- instruction delivery bit
 
 (def ^:private iu-reg

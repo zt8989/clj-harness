@@ -525,14 +525,27 @@
       (when derive (try (derive thread-id parsed) (catch Throwable _ nil)))))
 
 (defn- fence
-  "The park rule a fence-marked tool declares: a call whose target resolves outside
-  the session's project directory and the configuration home parks for a human.
-  DERIVE names that target when the tool has no `path` argument (see fenced-path).
+  "The park rule a fence-marked tool declares: a call whose target resolves outside the
+  session's project directory and the configuration home parks for a human, and so does a
+  call whose target is one of the paths THIS HOME declares sensitive -- inside the free
+  set or not. DERIVE names that target when the tool has no `path` argument (see
+  fenced-path).
 
-  ONE SOURCE, NOT TWO. `harness.cap.project/out-of-bounds?` answers the same
-  question the `<project>` block of the system message describes -- CONTEXT.md's
-  围栏 -- so the model is told exactly the rule it is held to. An unbound session
-  answers false, which is what keeps the pre-binding behaviour byte for byte.
+  THE TWO HALVES ANSWER `:sensitive-path` AND `:out-of-bounds`, sensitive first: it is the
+  more specific fact of the two, and the one that holds even when the path would otherwise
+  be free. Both are the same kind of answer to the seam -- a reason keyword it records and
+  never interprets (see harness.kernel.tools/approval-reason) -- so whoever reads the
+  parked call learns WHY without re-deriving it, and a hook can tell them apart.
+
+  ONE SOURCE, NOT TWO. `harness.cap.project/out-of-bounds?` and
+  `harness.cap.project/sensitive-path?` answer the two questions the `<project>` block of
+  the system message describes -- CONTEXT.md's 围栏 and its 敏感路径 -- so the model is told
+  exactly the rule it is held to, both of them read fresh per call.
+
+  AN UNBOUND SESSION IS NOT OUT OF THE WOODS, and this is the one place the halves differ
+  on purpose: out-of-bounds? answers false with no binding (the pre-binding behaviour, byte
+  for byte), while the sensitive half is THIS HOME's rather than a project's and so answers
+  for every session -- a credential list a missing binding switches off is not a guard.
 
   A CALL WITH NO PATH AT ALL IS NOT A FENCE CASE. The fence is a question about a
   path, and asking it about a missing one would answer with an exception from inside
@@ -542,8 +555,10 @@
   [derive]
   (fn [thread-id parsed]
     (let [p (fenced-path derive thread-id parsed)]
-      (when (and (some? p) (project/out-of-bounds? thread-id p))
-        :out-of-bounds))))
+      (when (some? p)
+        (cond
+          (project/sensitive-path? thread-id p) :sensitive-path
+          (project/out-of-bounds? thread-id p)  :out-of-bounds)))))
 
 (register! "read"
   (assoc (tool read-plain-description

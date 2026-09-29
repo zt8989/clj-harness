@@ -789,8 +789,9 @@
   A DECLARATION THAT THROWS IS NOT A PARK. It runs before the argument checks, so a
   rule handed a malformed payload must answer nil -- nothing to judge -- rather than
   signal through an exception; the missing-arguments check reports that payload one
-  line later, with the useful message. `:out-of-bounds` is the only reason any tool
-  declares today, and 'no path at all' is deliberately not a fence case: read as
+  line later, with the useful message. The file tools declare two reasons today --
+  :out-of-bounds and :sensitive-path, both from their own fence -- and 'no path at all' is
+  deliberately not a fence case: read as
   one, it would answer with an exception from inside java.io instead of the honest
   fact that the argument is absent."
   [tool name thread-id parsed]
@@ -1051,9 +1052,10 @@
 
   WHY a call is suspended is computed once per transit (approval-reason) and
   rides the parked record: :tool-declares (the tool's own :requires-approval),
-  :session-asks (this session required it), or :out-of-bounds (a fence-marked
-  file tool whose path resolves outside the session's project directory and
-  the configuration home -- only when a project is bound). Those two switches are
+  :session-asks (this session required it), or the file tools' own fence: :sensitive-path
+  (the path is one this home declares sensitive) or :out-of-bounds (it resolves outside the
+  session's project directory and the configuration home -- only when a project is bound).
+  Those switches are
   NOT a separate mechanism from the hook engine -- they are this session's way of
   installing a suspend-type rule of its own, alongside the ones a hooks.edn gate
   installs. The verdict of a human override stands: an approved out-of-bounds call

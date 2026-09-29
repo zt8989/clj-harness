@@ -184,6 +184,28 @@
 ;; and a session may stop handing its model a fact. What the opening states are
 ;; COMMITMENTS, and those are not in a hook's hands.
 
+(defn- sensitive-sentence
+  "The sensitive half of the <project> block, or nil when this home declares none.
+
+  DERIVED, LIKE THE FREE PATHS, and for the same reason: these paths park a call the free
+  paths would have let through, so a block naming only the free paths would state a rule the
+  gate does not keep. The list comes from harness.cap.project/sensitive-paths -- the same
+  function the park rule asks -- resolved for this session exactly as it is there.
+
+  IT IS SAID IN BOTH SHAPES. A session with no binding has no fence, and the block says so;
+  it does not follow that it has no sensitive paths, because that list belongs to THIS HOME
+  and not to a project. BOUND? changes only the clause saying where the rule bites."
+  [thread-id bound?]
+  (when-let [paths (seq (project/sensitive-paths thread-id))]
+    (str "These paths are declared sensitive by this home, and a file tool aimed at one of"
+         " them parks for human approval too"
+         (if bound?
+           " -- inside the free paths above or not"
+           " -- and a session with no binding does not lift this")
+         ":\n"
+         (str/join "\n" (map (fn [p] (str "  - " p)) paths))
+         "\n")))
+
 (defn- project-block
   "The <project> block: which directory this session is bound to, and what that
   means for the paths it hands the file tools.
@@ -205,9 +227,16 @@
   Reading the gate's own list rather than re-deriving it is what keeps the two from
   drifting apart.
 
-  UNBOUND SAYS SO PLAINLY and mentions no fence at all: a session with no binding
-  has no fence, and describing one would be describing a rule that is not in
-  force."
+  THE SENSITIVE LIST IS DERIVED TOO, and it is the second reason this block is read rather
+  than written. It is not a property of the project -- it is what THIS HOME calls sensitive
+  (config.edn's :security :sensitive-paths) -- and a call aimed at one of those paths parks
+  even when it is inside the free set, so leaving it out would be the same failure in the
+  other direction.
+
+  UNBOUND SAYS SO PLAINLY and mentions no fence at all: a session with no binding has no
+  fence, and describing one would be describing a rule that is not in force. The SENSITIVE
+  paths are stated anyway, because they are neither the fence's nor the project's: they hold
+  for every session, bound or not."
   [payload]
   (let [thread-id (get payload "thread_id")
         {:keys [dir strict? free]} (project/fence thread-id)]
@@ -217,6 +246,7 @@
                  "not bound to any project directory. Relative paths in the file tools"
                  " resolve against the process's working directory, and bash runs there."
                  " Absolute paths are never redirected.\n"
+                 (sensitive-sentence thread-id false)
                  "</project>")
             (str "<project>\n"
                  "bound to: " dir "\n"
@@ -228,6 +258,7 @@
                  (when strict?
                    (str "This project sets :approval {:strict true}, so the project directory"
                         " is NOT in that set: paths inside it park too.\n"))
+                 (sensitive-sentence thread-id true)
                  "</project>"))}))
 
 (defn- env-block

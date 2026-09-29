@@ -307,6 +307,10 @@
       (is (str/includes? proj (str (first (env/temp-dirs)) " -- "))
           "the machine's temp directory, stated with its reason like every other free path")
       (is (str/includes? proj "scratch that is meant to be thrown away"))
+    (testing "and the sensitive list, which parks a human even inside those free paths"
+      (is (str/includes? proj "declared sensitive by this home"))
+      (is (str/includes? proj (str (home/user-home) "/.ssh/"))
+          "stated as this session resolves it, derived from where the gate reads it"))
     (testing "and no strict sentence, because this project is not strict"
       (is (not (str/includes? proj ":strict true"))))))
 
@@ -331,7 +335,13 @@
     (let [proj (block (:text (assemble-run "sp-proj-moves")) "project")]
       (is (str/includes? proj "not bound to any project directory"))
       (is (str/includes? proj "resolve against the process's working directory"))
-      (is (not (str/includes? proj "park")) "no fence talk: there is no fence")))
+      ;; 'free path' rather than 'park': the SENSITIVE sentence says 'parks for human
+      ;; approval too', and it IS said here -- it is the one rule that does not come from a
+      ;; project. What must not appear is the FENCE's own sentence, which describes a rule
+      ;; that is not in force.
+      (is (not (str/includes? proj "free path")) "no fence talk: there is no fence")
+      (is (str/includes? proj "declared sensitive by this home")
+          "the sensitive list is stated anyway: it is this home's, not the project's")))
   (testing "bound: the directory is named"
     (let [one (project-dir "sp-proj-moves" "one")]
       (is (str/includes? (block (:text (assemble-run "sp-proj-moves")) "project") one))))

@@ -5465,6 +5465,66 @@
       (api-response 400 {:error error})
       (api-response 200 {:language (name (language/resolved))}))))
 
+(defn- security-wire
+  "providers/sensitive-paths-config -> the shape that may leave this process: the list as
+  WRITTEN under `sensitive-paths`, where it came from under `source`, and the built-in list
+  under `defaults`.
+
+  THE WRITTEN FORM, NOT THE EXPANDED ONE, and that is the point of this route: a client
+  edits what the file would hold, so `~/.ssh/` is what it has to be shown. What the park
+  rule compares against (providers/sensitive-paths, `~` expanded) is a machine fact, and a
+  panel showing it would be showing paths nobody typed."
+  []
+  (let [{:keys [paths source defaults]} (providers/sensitive-paths-config)]
+    {:sensitive-paths paths :source (name source) :defaults defaults}))
+
+(defn- security-get
+  "GET /api/security -- the paths THIS HOME declares sensitive, as the park rule reads
+  them: the list, where it came from (:config when this home wrote one, :default when it
+  wrote none), and the built-in list beside it so a client can offer 'restore the default
+  list' without a second request.
+
+  A ROUTE OF ITS OWN, for the reason /api/language is one: this is a fact about the HOME
+  rather than about a session, so it is asked with no threadId at all and has no per-session
+  answer. What it MEANS for a call -- which tools park on which path -- is
+  harness.cap.project's business, not this route's.
+
+  READ-ONLY, and therefore leaves no trace: like GET /api/model and GET /api/settings, only
+  a route that can CHANGE something writes an audit line."
+  [_req]
+  (api-response 200 (security-wire)))
+
+(defn- security-post
+  "POST /api/security {sensitive-paths: [\"~/.ssh/\", ..]} -- write the list into
+  config.edn's :security and answer the list now in force, in the shape GET answers.
+
+  THE WHOLE LIST IS REPLACED, because that is what the request says: a list is edited by
+  adding and removing entries, and a client that sends the list it wants has said everything
+  there is to say. AN EMPTY ARRAY IS A DECISION -- 'this home guards nothing' -- while a
+  body that names no list at all is refused by name, so the two cannot look the same.
+
+  A REFUSED VALUE IS A 400 WITH THE SERVER'S SENTENCE and nothing is written, the rule
+  POST /api/language and POST /api/model keep. The answer is the list READ BACK rather than
+  the list that was sent, so a caller never has to guess what its own value meant."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (and (map? ok) (contains? ok :sensitive-paths)))
+      (api-response 400 {:error (str "missing sensitive-paths; send the whole list, [] to"
+                                      " guard nothing")})
+
+      :else
+      (let [answer (try {:ok (providers/set-sensitive-paths! (:sensitive-paths ok))}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error answer)]
+          (api-response 400 {:error error})
+          (api-response 200 (security-wire)))))))
+
 (defn- settings-get
   "GET /api/settings?threadId=.. -- the read-only settings panel's answer: what
   configuration is in force for this session, where each choice came from, where
@@ -6241,6 +6301,12 @@
     (case (:request-method req)
       :get  (language-get req)
       :post (language-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/security" (:uri req))
+    (case (:request-method req)
+      :get  (security-get req)
+      :post (security-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/settings" (:uri req))

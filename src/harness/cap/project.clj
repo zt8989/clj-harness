@@ -25,6 +25,15 @@
   about an out-of-bounds answer (park it, ask a human) is the tool seam's
   business, not this namespace's.
 
+  THE FENCE HAS A SECOND AND TIGHTER HALF, and that half is not a property of any
+  project: THIS HOME declares paths sensitive (config.edn's :security :sensitive-paths --
+  the cloud CLIs, key material and keychains, container and package-manager credentials)
+  and a file tool aimed at one of them parks a human EVEN WHEN the path is inside the
+  fence. A project bound at the operator's home directory would otherwise hand
+  ~/.ssh/id_rsa to a read with nothing asked. That half is not a project's to configure
+  and not a missing binding's to switch off, which is why it sits BESIDE the fence rather
+  than inside it -- see sensitive-paths and sensitive-path?.
+
   The allowed set is itself configurable per project: .harness/harness.edn in
   the bound project (overlaid on the configuration home's user-level
   harness.edn) can add allow paths and tighten the fence. See harness-config
@@ -54,7 +63,11 @@
             [harness.infra.env :as env]
             [harness.cap.preamble :as preamble]
             [harness.cap.jobs :as jobs]
-            [harness.cap.skills :as skills])
+            [harness.cap.skills :as skills]
+            ;; The config.edn half of the sensitive list, READ here rather than re-parsed:
+            ;; that namespace owns the file (its shape check, its built-in list, its
+            ;; writer), and this one owns what the list MEANS for a call.
+            [harness.cap.providers :as providers])
   (:import (java.io File IOException)
            (java.sql Connection)))
 
@@ -943,6 +956,58 @@
                    [(resolve-path thread-id p)
                     "declared free by the project's :approval {:allow ..}"]))})))
 
+;; ---------------------------------------------- this home's sensitive paths
+;;
+;; THE FENCE'S SECOND HALF, and the one part of it that is NOT about a project or a
+;; binding. The free paths above say where a bound session may work; this says which
+;; paths park a human ANYWAY, including paths inside the free set. The two are asked
+;; together at every fenced tool call (harness.cap.tools/fence) and they are stated
+;; together in the <project> block, which is why both live here: a rule the gate
+;; enforces and a rule the model is told have to be one rule, or the block lies.
+;;
+;; IT DOES NOT DEPEND ON A BINDING, deliberately. The fence engages only when a project
+;; is bound -- that is what keeps an unbound session on its pre-binding behavior -- but a
+;; credential list that a missing binding switches off is not a guard. These paths are
+;; THIS HOME's, so every session honours them; what is left of the binding here is only
+;; how a RELATIVE entry resolves, which is how any other configured path resolves.
+
+(defn sensitive-paths
+  "The paths this HOME declares sensitive, resolved for THREAD-ID's session: what
+  config.edn's :security :sensitive-paths names, or the built-in list when it names
+  none, with a leading `~` already expanded to the operating system's home.
+  harness.cap.providers owns that file and that expansion (and its built-in list); this
+  fn adds the one thing that needs a session: a RELATIVE entry resolves against the
+  project directory like any tool path, and passes through unchanged when nothing is
+  bound.
+
+  The list is read FRESH on every call, like the fence and like every other configured
+  value, so editing config.edn moves it on the next call rather than the next restart."
+  [thread-id]
+  (mapv (fn [p] (resolve-path thread-id p)) (providers/sensitive-paths)))
+
+(defn sensitive-path?
+  "TRUE when PATH, as THREAD-ID's session resolves it, IS one of this home's sensitive
+  paths, SITS INSIDE one, or CONTAINS one.
+
+  THE THIRD CASE IS NOT SYMMETRY FOR ITS OWN SAKE. `read` names a FILE, but glob and grep
+  name a DIRECTORY and then walk everything under it: a grep over a directory that holds
+  ~/.ssh reads the private key's bytes while the path it was handed names nothing
+  sensitive at all. 'These two paths overlap, either way round' is therefore the honest
+  question, and it is the one answered here.
+
+  THE COST IS STATED WHERE IT IS PAID: a session bound at the operator's home directory
+  parks on a directory-wide operation over it (`grep` the home, `glob` the home), which
+  is exactly the case this list exists for. Nothing else moves -- no other configuration
+  makes a path sensitive, and no project can declare one free.
+
+  WHETHER TO PARK on a true answer is the tool seam's decision (`fence` in
+  harness.cap.tools), the same division out-of-bounds? keeps."
+  [thread-id path]
+  (boolean
+   (when-let [paths (seq (sensitive-paths thread-id))]
+     (let [resolved (resolve-path thread-id path)]
+       (some (fn [p] (or (under? resolved p) (under? p resolved))) paths)))))
+
 (defn out-of-bounds?
   "TRUE when PATH, as THREAD-ID's session resolves it, lands outside every
   directory a bound session may touch. Which directories those are -- and why
@@ -951,9 +1016,11 @@
   statement from being two rules.
 
   A session with no binding has no fence, so this answers false for every path,
-  byte-for-byte the pre-binding behavior. This fn is the WHERE question as a
-  boolean -- whether to PARK an out-of-bounds call is the tool seam's decision,
-  made through the ordinary approval flow."
+  byte-for-byte the pre-binding behavior -- WHICH IS THIS FN'S ALONE TO PROMISE: the
+  sensitive list beside it (sensitive-path?) belongs to this HOME rather than to a project
+  and answers for unbound sessions too. This fn is the WHERE question as a boolean --
+  whether to PARK an out-of-bounds call is the tool seam's decision, made through the
+  ordinary approval flow."
   [thread-id path]
   (boolean
    (when-let [{:keys [free]} (fence thread-id)]
