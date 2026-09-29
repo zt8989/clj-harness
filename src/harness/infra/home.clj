@@ -88,7 +88,20 @@
   (io/file (root) "providers.edn"))
 
 (defn hooks-file     [] (io/file (root) "hooks.edn"))
-(defn mcp-file       [] (io/file (root) "mcp.edn"))
+
+(defn harness-file
+  "The RETIRED session configuration file. What it held is config.edn's :session section
+  now (.scratch/config-merge), and this accessor survives for the same two reasons
+  `providers-file` does: the migration that moves a home forward has to find the file it
+  is moving, and a test has to plant one to prove what happens to it."
+  []
+  (io/file (root) "harness.edn"))
+
+(defn mcp-file
+  "The RETIRED MCP declaration file. What it held is config.edn's :mcp section now; kept
+  for the migration for the same reason as `harness-file`."
+  []
+  (io/file (root) "mcp.edn"))
 (defn dotenv-file    [] (io/file (root) ".env"))
 
 (defn config-backup-file

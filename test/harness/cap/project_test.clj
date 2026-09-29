@@ -992,3 +992,25 @@
       (fn []
         (project/bind! "pt-sensitive-relative" root)
         (is (true? (project/sensitive-path? "pt-sensitive-relative" "credentials/key.pem")))))))
+
+(deftest a-projects-legacy-files-are-moved-aside-and-nothing-reads-them
+  ;; The project half of .scratch/config-merge's migration: a project-level harness.edn has
+  ;; nowhere to be merged (the level is gone), so it is moved to `<name>.bak` -- whole, for a
+  ;; person to lift by hand -- and the harness goes on reading config.edn alone.
+  (let [proj    (io/file root "legacy-project")
+        harness (io/file proj ".harness" "harness.edn")]
+    (.mkdirs (.getParentFile harness))
+    (spit harness "{:approval {:strict true}}\n" :encoding "UTF-8")
+    (project/bind! "pt-legacy" (str proj))
+    (let [moved (project/migrate-legacy-project-config!)]
+      (is (some #(.endsWith ^String % "harness.edn.bak") moved)
+          "the file is moved, and the boot banner is told where")
+      (is (not (.exists harness)) "the old name is gone")
+      (is (str/includes? (slurp (io/file proj ".harness" "harness.edn.bak") :encoding "UTF-8")
+                         ":strict true")
+          "and what it said is beside it"))
+    (testing "and the session's fence is what config.edn says, not what that file said"
+      (is (false? (:strict? (project/fence "pt-legacy"))))
+      (is (= {} (project/harness-config "pt-legacy"))))
+    (testing "running it again moves nothing"
+      (is (empty? (project/migrate-legacy-project-config!))))))

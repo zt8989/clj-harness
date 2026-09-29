@@ -352,6 +352,37 @@
   []
   (db/select "SELECT id, canonical_path, created_at FROM projects ORDER BY created_at, id"))
 
+(defn migrate-legacy-project-config!
+  "Move a project-level harness.edn / mcp.edn ASIDE, for every project this home knows:
+  `<name>.bak`, or `.bak.1`, `.bak.2` ... when one is already there.
+
+  NOTHING IS MERGED, because there is nowhere to merge it: the project level is gone
+  (.scratch/config-merge decision 2), so a project's file is history rather than
+  configuration -- moved so it stops looking like something the harness reads, and left
+  whole so a person can lift what they want into this home's config.edn by hand. Returns
+  the paths it moved, for the boot banner.
+
+  A HOUSEKEEPING PASS, NOT A READ, and its reach is the STORE's: no session is bound at
+  boot, so the only project directories this can find are the ones this home has opened
+  before. A project nobody has opened since the move keeps its file until somebody binds
+  it -- and nothing reads it then either, which is the property that matters. Nothing here
+  throws: this runs at boot."
+  []
+  (let [moved (atom [])]
+    (doseq [{:keys [canonical-path]} (projects)
+            name ["harness.edn" "mcp.edn"]]
+      (let [f (io/file canonical-path ".harness" name)]
+        (when (.exists f)
+          (try
+            (let [base (str (.getAbsolutePath f) ".bak")
+                  bak  (loop [i 0]
+                         (let [c (if (zero? i) (io/file base) (io/file (str base "." i)))]
+                           (if (.exists c) (recur (inc i)) c)))]
+              (when (.renameTo f bak)
+                (swap! moved conj (str canonical-path "/.harness/" (.getName bak)))))
+            (catch Throwable _ nil)))))
+    @moved))
+
 (defn- as-session
   "One `sessions` row as this namespace hands it out: {:id :project-id :path
   :archived? :created-at :parent-id :subagent}.

@@ -6648,6 +6648,25 @@
       (println (str "config.edn in " root " was in the shape from before :default and"
                     " :providers -- moved it under :default (the old file is"
                     " config.edn.bak)")))
+    ;; THE TWO FILES THAT WERE FILES ONCE. harness.edn and mcp.edn became sections of
+    ;; config.edn (.scratch/config-merge), so a home that still has one is a home that has
+    ;; not opened its configuration since: what it says is merged in (config.edn wins key
+    ;; by key) and the file itself is moved to `<name>.bak`. Neither step throws -- a home
+    ;; with an odd file still has to start -- so what happened is PRINTED here.
+    (let [{:keys [migrated? skipped problems files]} (providers/migrate-legacy-config!)]
+      (when (seq migrated?)
+        (println (str "this home's " (str/join " + " migrated?) " moved into config.edn"
+                      " (the old files are beside them as " (str/join ", " files) ")"
+                      (when (seq skipped)
+                        (str "; config.edn already had " (pr-str skipped)
+                             ", so those keys stand as config.edn has them")))))
+      (doseq [problem problems]
+        (println (str "a legacy configuration file could not be migrated: " problem))))
+    (when-let [moved (seq (project/migrate-legacy-project-config!))]
+      (println (str (count moved) " project-level harness.edn/mcp.edn file(s) moved aside:"
+                    " the project level is gone, so nothing reads them (see"
+                    " .scratch/config-merge); what they said is in the .bak files: "
+                    (str/join ", " moved))))
     (when (:created? (providers/ensure-config!))
       (println (str "no config.edn in " root " -- wrote an empty one; the settings panel"
                     " (or an editor) can fill it in")))

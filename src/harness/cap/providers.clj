@@ -66,6 +66,7 @@
   to write instead."
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.pprint :as pprint]
             [clojure.string :as str]
             [clojure.walk :as walk]
@@ -2163,6 +2164,99 @@
               (write-config! forwarded)
               {:file f :migrated? true})
             (catch Throwable _ {:file f :migrated? false})))))))
+
+;; ------------------------------- the two files this home used to be configured by
+;;
+;; .scratch/config-merge MOVED harness.edn AND mcp.edn INTO THIS FILE. A home that has one
+;; of them is a home that has not opened its configuration since: the migration below runs
+;; ONCE at boot, merges what it finds into the sections, and moves the old file aside as
+;; `<name>.bak`. Nothing else reads those names.
+
+(defn- read-legacy-file
+  "One retired file's EDN map, or a NAMED failure naming it. The caller has already
+  established that the file EXISTS: 'no such file' is not this fn's business, and a file
+  that cannot be read is a problem to REPORT rather than a reason to touch it."
+  [^java.io.File f]
+  (let [abs (.getAbsolutePath f)
+        v   (try
+              (edn/read-string (slurp f :encoding "UTF-8"))
+              (catch Exception e
+                (fail (str abs " is not valid EDN (" (ex-message e) ")")
+                      {:path abs :reason :invalid-edn})))]
+    (when-not (map? v)
+      (fail (str abs " must be an EDN map") {:path abs :reason :not-a-map}))
+    v))
+
+(defn- bak-sibling
+  "FILE's .bak name, or the first free `.bak.N` -- a home that has migrated before must not
+  lose the earlier backup to the second migration."
+  [^java.io.File f]
+  (let [base (str (.getAbsolutePath f) ".bak")]
+    (loop [i 0]
+      (let [candidate (if (zero? i) (io/file base) (io/file (str base "." i)))]
+        (if (.exists candidate) (recur (inc i)) candidate)))))
+
+(defn- move-aside!
+  "FILE renamed to its .bak sibling. Returns that file."
+  [^java.io.File f]
+  (let [bak (bak-sibling f)]
+    (when-not (.renameTo f bak)
+      (fail (str "could not move " (.getAbsolutePath f) " to " (.getAbsolutePath bak))
+            {:path (.getAbsolutePath f) :reason :rename-failed}))
+    bak))
+
+(defn migrate-legacy-config!
+  "Bring a home that still has harness.edn / mcp.edn forward -- ONCE -- and answer what
+  happened:
+
+    {:migrated? [\"harness.edn\" ..]   ; moved aside, contents merged
+     :skipped   {\"harness.edn\" [:keys ..]}  ; keys config.edn already had (it wins)
+     :problems  [\"sentence\" ..]}
+
+  THE NEW FILE WINS, KEY BY KEY. A home with both is a home somebody has been editing since
+  the move, so its :session (or :mcp) is the truth and the old file only fills in what the
+  new one does not say -- and every key that was NOT taken is named in :skipped, so a
+  person can see what did not come across instead of wondering.
+
+  THE OLD FILE IS MOVED, NOT COPIED: `<name>.bak` (or `.bak.1`, .bak.2 ... when one is
+  already there). Nothing keeps the old NAME alive, because a file that still looks like
+  configuration is a file somebody will edit.
+
+  A FILE THAT CANNOT BE READ IS LEFT EXACTLY WHERE IT IS, and its sentence goes in
+  :problems: a migration must not make a person's file disappear into its own parse error.
+  NOTHING HERE THROWS -- this runs at boot, and a home with an odd file must still start
+  (the caller prints what it found)."
+  []
+  (let [harness (home/harness-file)
+        mcp     (home/mcp-file)
+        result  (atom {:migrated? [] :skipped {} :problems []})]
+    (try
+      (let [session-block (when (.exists harness) (read-legacy-file harness))
+            mcp-block     (when (.exists mcp) (read-legacy-file mcp))]
+        (when (or session-block mcp-block)
+          (let [raw     (config)
+                skipped (cond-> {}
+                          session-block
+                          (assoc "harness.edn"
+                                 (vec (sort (filter #(contains? (:session raw) %) (keys session-block)))))
+                          mcp-block
+                          (assoc "mcp.edn"
+                                 (vec (sort (filter #(contains? (:mcp raw) %) (keys mcp-block))))))
+                next    (cond-> raw
+                          session-block (update :session #(merge session-block (or % {})))
+                          mcp-block     (update :mcp #(merge mcp-block (or % {}))))]
+            (check-config next (config-path))
+            (write-config! next)
+            (swap! result assoc
+                   :skipped (into {} (remove (comp empty? val) skipped))
+                   :migrated? (cond-> []
+                                session-block (conj "harness.edn")
+                                mcp-block     (conj "mcp.edn")))
+            (doseq [f (cond-> [] session-block (conj harness) mcp-block (conj mcp))]
+              (swap! result update :files conj (.getName (move-aside! f)))))))
+      (catch Throwable t
+        (swap! result update :problems conj (or (ex-message t) (str t)))))
+    @result))
 
 (defn- change-providers!
   "CHANGE -- a function of the parsed config map -> the config to write -- validated

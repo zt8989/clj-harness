@@ -2185,3 +2185,57 @@
       (is (= :replace
              (:instruction-updates (:provider (providers/resolve-provider "iu-hint-unused"))))
           "the rule prefills a form; it never decides a run"))))
+
+;; ------------------------------------------------- the two files that were files
+
+(deftest a-home-that-still-has-harness-edn-and-mcp-edn-is-migrated-once
+  ;; .scratch/config-merge decision 3. The home below is one that has not opened its
+  ;; configuration since the move: config.edn exists and already says something, and the
+  ;; two retired files are still beside it saying more.
+  (let [dir (io/file (support/temp-dir "legacy"))]
+    (spit (io/file dir "config.edn")
+          "{:default {:provider :alpha} :session {:llm {:idle-timeout-ms 5}}}\n" :encoding "UTF-8")
+    (spit (io/file dir "harness.edn")
+          "{:llm {:idle-timeout-ms 9 :idle-timeout-retries 2} :editing {:mode :str-replace}}\n"
+          :encoding "UTF-8")
+    (spit (io/file dir "mcp.edn") "{:servers {\"a\" {:command \"x\"}}}\n" :encoding "UTF-8")
+    (with-redefs [home/root (constantly (str dir))]
+      (let [{:keys [migrated? skipped files problems]} (providers/migrate-legacy-config!)]
+        (testing "both files are merged in and moved aside"
+          (is (= ["harness.edn" "mcp.edn"] (sort migrated?)))
+          (is (= 2 (count files)))
+          (is (empty? problems)))
+        (testing "config.edn wins key by key, and the keys it kept are named"
+          (is (= {:llm {:idle-timeout-ms 5} :editing {:mode :str-replace}}
+                 (:session (providers/config)))
+              "the legacy :editing came across; :llm was already spoken for")
+          (is (= [:llm] (get-in skipped ["harness.edn"]))
+              "so the report says which of the old keys did NOT come across"))
+        (testing "the old NAMES are gone, and what they said is beside them"
+          (is (not (.exists (io/file dir "harness.edn"))))
+          (is (str/includes? (slurp (io/file dir "harness.edn.bak") :encoding "UTF-8")
+                             ":idle-timeout-retries 2"))
+          (is (= {"a" {:command "x"}} (providers/mcp-servers))))
+        (testing "and running again does nothing at all"
+          (is (= {:migrated? [] :skipped {} :problems []}
+                 (providers/migrate-legacy-config!))))
+        (testing "an existing .bak is not eaten by a later migration"
+          (spit (io/file dir "harness.edn") "{:skills {:roots [\"~/skills\"]}}\n" :encoding "UTF-8")
+          (is (= ["harness.edn"] (:migrated? (providers/migrate-legacy-config!))))
+          (is (.exists (io/file dir "harness.edn.bak.1")) "the second backup is numbered")
+          (is (str/includes? (slurp (io/file dir "harness.edn.bak") :encoding "UTF-8")
+                             ":idle-timeout-retries 2")
+              "and the first one still holds what it held"))))))
+
+(deftest a-legacy-file-that-cannot-be-read-is-left-exactly-where-it-is
+  (let [dir (io/file (support/temp-dir "legacy-broken"))]
+    (spit (io/file dir "config.edn") "{}\n" :encoding "UTF-8")
+    (spit (io/file dir "harness.edn") "{:llm " :encoding "UTF-8")
+    (with-redefs [home/root (constantly (str dir))]
+      (let [{:keys [migrated? problems]} (providers/migrate-legacy-config!)]
+        (is (empty? migrated?) "nothing was moved")
+        (is (= 1 (count problems)))
+        (is (str/includes? (first problems) "harness.edn")
+            "the sentence names the file, which is what makes it fixable")
+        (is (= "{:llm " (slurp (io/file dir "harness.edn") :encoding "UTF-8"))
+            "not a byte of it moved -- a migration must not lose a file to its own parse error")))))
