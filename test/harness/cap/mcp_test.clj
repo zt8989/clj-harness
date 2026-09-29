@@ -37,17 +37,13 @@
   directory the moment a test binds a session somewhere."
   (.getAbsolutePath (io/file "test/harness/cap/fake_mcp_server.js")))
 
-(defn- mcp-file []
-  (io/file (home/root) "mcp.edn"))
-
 (defn- write-servers!
-  "Declare SERVERS (a map of name -> declaration) at the user level."
+  "Declare SERVERS (a map of name -> declaration) in this home's config.edn :mcp section."
   [servers]
-  (spit (mcp-file) (pr-str {:servers servers}) :encoding "UTF-8"))
+  (support/write-sections! {:mcp {:servers servers}}))
 
 (defn- wipe! []
-  (let [f (mcp-file)]
-    (when (.exists f) (io/delete-file f true))))
+  (support/wipe-section! :mcp))
 
 (defn- fake-decl
   "A declaration that runs the fake server. EXTRA is merged in, so a test can add
@@ -81,7 +77,7 @@
 
 (use-fixtures :each
   (fn [f]
-    ;; The user-level mcp.edn is read for EVERY thread and `states`/`events` are
+    ;; The :mcp section is read for EVERY thread and `states`/`events` are
     ;; process-wide, so a test that leaves either behind makes the next one see a
     ;; server it never declared. Same discipline as hooks.edn.
     (wipe!)
@@ -92,31 +88,39 @@
 ;; ------------------------------------------------------------------ the config
 
 (deftest no-declarations-is-the-empty-configuration
-  (testing "a fresh install has no mcp.edn, and that is not an error"
+  (testing "a home whose config.edn has no :mcp section, and that is not an error"
     (is (= {} (mcp/config nil)))
     (is (= {} (mcp/tools-for nil)))
     (is (= [] (mcp/status nil)))))
 
 (deftest a-broken-file-fails-by-name
   (testing "each way of being wrong names the file it is in"
-    (let [cases {"not EDN at all {{{"                 :invalid-edn
-                 "[1 2 3]"                            :not-a-map
-                 "{:servers {} :extra 1}"             :unknown-key
-                 "{:servers {\"a\" {:command \"x\" :nope 1}}}" :unknown-server-key
-                 "{:servers {\"a\" {}}}"              :no-transport
-                 "{:servers {\"a\" {:command \"x\" :url \"http://y\"}}}" :two-transports}]
-      (doseq [[text _] cases]
-        (spit (mcp-file) text :encoding "UTF-8")
-        (let [e (try (mcp/config nil) nil (catch Exception e e))]
-          (is (some? e) (str "expected a failure for " text))
-          (is (str/includes? (ex-message e) (.getAbsolutePath (mcp-file)))
-              (str "the failure must name the file: " (ex-message e)))))
-      (wipe!))))
+    ;; THE SECTION IS SHAPE-CHECKED BY harness.cap.providers (the file's owner) and the
+    ;; DECLARATIONS by this namespace -- so 'not EDN' and 'not a map' are the provider
+    ;; reader's sentences, and the rest are this namespace's. All of them name the path.
+    (let [f   (home/config-file)
+          old (when (.exists f) (slurp f :encoding "UTF-8"))
+          cases {"not EDN at all {{{"                                   :invalid-edn
+                 "[1 2 3]"                                              :not-a-map
+                 "{:mcp {:servers {} :extra 1}}"                        :unknown-key
+                 "{:mcp {:servers {\"a\" {:command \"x\" :nope 1}}}}"   :unknown-server-key
+                 "{:mcp {:servers {\"a\" {}}}}"                         :no-transport
+                 "{:mcp {:servers {\"a\" {:command \"x\" :url \"http://y\"}}}}"
+                 :two-transports}]
+      (try
+        (doseq [[text _] cases]
+          (spit f text :encoding "UTF-8")
+          (let [e (try (mcp/config nil) nil (catch Exception e e))]
+            (is (some? e) (str "expected a failure for " text))
+            (is (str/includes? (ex-message e) (.getAbsolutePath f))
+                (str "the failure must name the file: " (ex-message e)))))
+        (finally
+          (if old (spit f old :encoding "UTF-8") (io/delete-file f true)))))))
 
 (deftest a-server-name-must-be-invertible
   (testing "a name that could collide with another server's tools is refused"
     (doseq [bad ["a__b" "has space" "has.dot" "" "工具"]]
-      (spit (mcp-file) (pr-str {:servers {bad {:command "x"}}}) :encoding "UTF-8")
+      (support/write-sections! {:mcp {:servers {bad {:command "x"}}}})
       (let [e (try (mcp/config nil) nil (catch Exception e e))]
         (is (some? e) (str "expected " (pr-str bad) " to be refused"))
         (is (str/includes? (ex-message e) (pr-str bad))))
@@ -125,21 +129,11 @@
       (write-servers! {"github-1" (fake-decl)})
       (is (= ["github-1"] (keys (mcp/config nil)))))))
 
-(deftest the-project-level-set-replaces-the-users
-  (tmp-dir "replace"
-           (fn [d]
-             (write-servers! {"user-level" (fake-decl)})
-             (let [proj (io/file d "proj")
-                   har  (io/file proj ".harness")]
-               (.mkdirs har)
-               (spit (io/file har "mcp.edn") (pr-str {:servers {"project-level" (fake-decl)}})
-                     :encoding "UTF-8")
-               (let [thread (str "mcp-replace-" (System/currentTimeMillis))]
-                 (project/bind! thread (.getAbsolutePath proj))
-                 (testing "a bound session sees only the project's servers"
-                   (is (= ["project-level"] (keys (mcp/config thread)))))
-                 (testing "an unbound session sees the user's"
-                   (is (= ["user-level"] (keys (mcp/config nil))))))))))
+;; `the-project-level-set-replaces-the-users` USED TO LIVE HERE and is deleted rather than
+;; rewritten: with one level (.scratch/config-merge decision 2) there is no user level and
+;; project level to replace one another, so the property it pinned does not exist. What is
+;; left of it is the case below: the DECLARATION is this home's, and the bound project is
+;; what decides the directory a server runs in.
 
 ;; ------------------------------------------------------------------- the tools
 
@@ -194,11 +188,9 @@
 (deftest the-server-runs-in-the-sessions-project-directory
   (tmp-dir "cwd"
            (fn [d]
-             (let [proj (io/file d "proj")
-                   har  (io/file proj ".harness")]
-               (.mkdirs har)
-               (spit (io/file har "mcp.edn") (pr-str {:servers {"fake" (fake-decl)}})
-                     :encoding "UTF-8")
+             (let [proj (io/file d "proj")]
+               (.mkdirs proj)
+               (write-servers! {"fake" (fake-decl)})
                (let [thread (str "mcp-cwd-" (System/currentTimeMillis))]
                  (project/bind! thread (.getAbsolutePath proj))
                  (let [{:keys [content]} (call! thread "mcp__fake__where" {})]
@@ -299,7 +291,7 @@
       (mcp/tools-for thread)
       (is (= [] (mcp/take-events!))))))
 
-(deftest editing-mcp-edn-takes-effect-without-a-restart
+(deftest editing-the-mcp-section-takes-effect-without-a-restart
   (write-servers! {"first" (fake-decl)})
   (let [thread (str "mcp-edit-" (System/currentTimeMillis))]
     (is (contains? (mcp/tools-for thread) "mcp__first__echo"))

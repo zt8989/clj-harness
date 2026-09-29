@@ -16,8 +16,9 @@
   edge can decide what a line's runId is.
 
   CONNECTIONS ARE PER (PROJECT, SERVER), NOT PER SESSION. A server is declared in
-  a project's `.harness/mcp.edn`, so every session of that project would ask for
-  the same server with the same command in the same directory; starting one
+  this home's config.edn (the :mcp :servers section), and every session bound to a
+  project would ask for that server with the same command in the same directory --
+  so starting one
   process per conversation would be paying N times for one answer. The key is the
   project's IDENTITY (its canonical path) rather than the spelling a session was
   bound with, so two spellings of one directory share one server -- the same
@@ -35,6 +36,9 @@
             [harness.infra.home :as home]
             [harness.kernel.hooks.dispatch :as hook]
             [harness.cap.project :as project]
+            ;; The :mcp section of the one config file: read and shape-checked there, so this
+            ;; namespace never opens mcp.edn (it does not exist any more).
+            [harness.cap.providers :as providers]
             [harness.kernel.tools :as tools]
             [harness.infra.shell :as shell])
   (:import [java.net URI]
@@ -186,66 +190,40 @@
           {:path abs :server server :reason :separator-in-name}))
   server)
 
-(defn- read-mcp-edn
-  "One mcp.edn FILE's servers, or NIL when the file does not exist -- nil rather
-  than {} because the two levels are told apart by EXISTENCE, and 'this project
-  declared no servers' has to be distinguishable from 'this project declared
-  nothing at all'. A file that EXISTS but is broken -- not valid EDN, not a map,
-  an unknown top-level key, a declaration that does not validate -- is a hard,
-  NAMED failure with the absolute path. An ignored mcp.edn is indistinguishable
-  from one that says nothing, and the difference is the whole meaning of the file."
-  [file]
-  (let [f (io/file file)]
-    (if-not (.exists f)
-      nil
-      (let [abs (.getAbsolutePath f)
-            raw (try (edn/read-string (slurp f :encoding "UTF-8"))
-                     (catch Exception e
-                       (fail (str abs " is not valid EDN (" (ex-message e) ")")
-                             {:path abs :reason :invalid-edn})))]
-        (when-not (map? raw)
-          (fail (str abs " must be an EDN map of {:servers {name declaration}}")
-                {:path abs :reason :not-a-map}))
-        (let [unknown (sort (remove #{:servers} (keys raw)))]
-          (when (seq unknown)
-            (fail (str abs " has unknown key(s) " (pr-str (vec unknown))
-                       "; mcp.edn carries exactly one: :servers")
-                  {:path abs :unknown (vec unknown)})))
-        (let [servers (:servers raw)]
-          (when-not (or (nil? servers) (map? servers))
-            (fail (str abs " :servers must be a map of name -> declaration, not "
-                       (pr-str (type servers)))
-                  {:path abs :reason :not-a-map}))
-          (into {}
-                (map (fn [[name decl]]
-                       [(check-server-name abs name)
-                        (check-server abs name decl)]))
-                (or servers {})))))))
-
 (defn config
-  "The server declarations for THREAD-ID, ON DISK: the configuration home's
-  mcp.edn (the USER level), unless the bound project has a `.harness/mcp.edn` of
-  its own -- in which case THAT is the configuration.
+  "The server declarations for THREAD-ID, ON DISK: the :mcp :servers section of this home's
+  config.edn.
 
-  PROJECT WINS BY REPLACING, not by merging, and `:servers` being the file's only
-  key is what makes those the same sentence: the rule is 'a shallow merge of
-  top-level keys, project wins', and the one top-level key is :servers. So a
-  project that declares servers declares its own set, and a project that declares
-  none (`{}`, a file that exists) declares none at all. Same rule as hooks.edn
-  (per point) and harness.edn (per key), and for the same reason: 'what will
-  actually run' should be readable in one file, not inferred from how two files
-  nest. The cost is the accepted one -- a project wanting one server from the user
-  level and one of its own writes both.
+  ONE LEVEL (.scratch/config-merge decision 2). This used to be mcp.edn with a project level
+  that REPLACED the whole :servers map; the file is gone and so is the project level, so
+  'what will actually run' is one section of the one file a person already edits.
 
-  An unbound session sees the user level alone. Every call re-reads (the
-  config.edn discipline), so an edit takes effect at the next use of the table,
-  not at the next restart."
+  NIL MEANS 'SAID NOTHING' AND {} MEANS 'DECLARED NONE', which is the distinction mcp.edn
+  was built on: a home with no :mcp section declares no server, while {:servers {}} is a
+  DECISION. Both end as {} here -- the difference is made by harness.cap.providers, which is
+  where the file is read -- but the declarations themselves are checked HERE, by name, with
+  the path a failure has to name.
+
+  Every call re-reads (the config.edn discipline), so an edit takes effect at the next use
+  of the table, not at the next restart."
   ([] (config nil))
-  ([thread-id]
-   (or (when-let [dir (project/binding-for thread-id)]
-         (read-mcp-edn (io/file dir ".harness" "mcp.edn")))
-       (read-mcp-edn (home/mcp-file))
-       {})))
+  ([_thread-id]
+   (let [abs     (.getAbsolutePath (home/config-file))
+         servers (providers/mcp-servers)]
+     (cond
+       (nil? servers) {}
+
+       (not (map? servers))
+       (fail (str abs "'s :mcp :servers must be a map of name -> declaration, not "
+                  (pr-str (type servers)))
+             {:path abs :reason :not-a-map})
+
+       :else
+       (into {}
+             (map (fn [[name decl]]
+                    [(check-server-name abs name)
+                     (check-server abs name decl)]))
+             servers)))))
 
 ;; ----------------------------------------------------------------- the client
 ;;

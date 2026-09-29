@@ -43,16 +43,16 @@
 
 (def ^:dynamic *port* nil)
 
-(defn- mcp-file [] (io/file (home/root) "mcp.edn"))
+
 
 (defn- write-servers! [servers]
-  (spit (mcp-file) (pr-str {:servers servers}) :encoding "UTF-8"))
+  (support/write-sections! {:mcp {:servers servers}}))
 
 (defn- wipe! []
-  (io/delete-file (mcp-file) true)
+  (support/wipe-section! :mcp)
   (mcp/shutdown!))
 
-;; mcp.edn is read for EVERY thread and the connection/state/outbox are
+;; The :mcp section is read for EVERY thread and the connection/state/outbox are
 ;; process-wide, so a test that leaves any of it behind makes the next one see a
 ;; server it never declared. Same discipline hooks.edn gets in
 ;; harness.test-support, and the same reason.

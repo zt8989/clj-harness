@@ -85,6 +85,28 @@
    (str "{:default "   (or default-edn "{}")
         "\n :providers " (or providers-edn "{}") "}\n")))
 
+(defn write-sections!
+  "M -- a map of SECTIONS -- MERGED into this home's config.edn.
+
+  MERGING RATHER THAN WRITING matters now that many things share the file: the tests that
+  set an :editing mode or an MCP declaration would otherwise clobber the :default section a
+  provider fixture wrote, and fail for a reason that has nothing to do with what they are
+  about. ONE SECTION at a time is REPLACED WHOLE (that is `merge`'s rule for the value), so
+  a fixture that says {:mcp {:servers {...}}} sets the whole declaration map."
+  [m]
+  (let [f (home/config-file)
+        current (if (.exists f) (edn/read-string (slurp f :encoding "UTF-8")) {})]
+    (spit f (pr-str (merge current m)) :encoding "UTF-8")
+    f))
+
+(defn wipe-section!
+  "Take SECTION out of this home's config.edn, leaving every other section as it was."
+  [section]
+  (let [f (home/config-file)]
+    (when (.exists f)
+      (let [current (edn/read-string (slurp f :encoding "UTF-8"))]
+        (spit f (pr-str (dissoc current section)) :encoding "UTF-8")))))
+
 (defn write-session!
   "M -- a map, or the EDN text of one -- MERGED into this home's config.edn :session.
 
@@ -97,21 +119,14 @@
   :str-replace}}') and making every one of them read as a map would be churn that hides the
   change that matters."
   [m]
-  (let [f (home/config-file)
-        session (if (string? m) (edn/read-string m) m)
-        current (if (.exists f) (edn/read-string (slurp f :encoding "UTF-8")) {})]
-    (spit f (pr-str (update current :session merge session)) :encoding "UTF-8")
-    f))
+  (write-sections! {:session (if (string? m) (edn/read-string m) m)}))
 
 (defn wipe-session!
   "Take the :session section out of this home's config.edn, leaving every other section as
   it was. The counterpart to `write-session!` for a fixture's before-and-after: the file
   belongs to the whole test run."
   []
-  (let [f (home/config-file)]
-    (when (.exists f)
-      (let [current (edn/read-string (slurp f :encoding "UTF-8"))]
-        (spit f (pr-str (dissoc current :session)) :encoding "UTF-8")))))
+  (wipe-section! :session))
 (defn hooks-file
   "The user-level hooks.edn: the file a declaration is written into."
   []
