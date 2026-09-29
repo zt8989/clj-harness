@@ -2022,6 +2022,60 @@
           (is (str/includes? (ex-message e) ":sensitive-paths"))
           (is (= before (slurp (home/config-file) :encoding "UTF-8"))))))))
 
+;; ------------------------------- the two sections that were files of their own
+
+(deftest the-session-and-mcp-sections-are-read-from-the-one-config-file
+  ;; ticket 01 of .scratch/config-merge: harness.edn and mcp.edn used to be files of their
+  ;; own. Their keys are two more sections of config.edn now -- same names, same shapes,
+  ;; same freshness -- and these two readers are the whole of the read side.
+  (testing "a home that says nothing has an empty session and NO servers"
+    (with-config-text "{:default {:provider :openrouter}}\n"
+      (fn []
+        (is (= {} (providers/session-config)))
+        (is (nil? (providers/mcp-servers))
+            "nil, not {}: 'said nothing' and 'declares none' are different answers"))))
+  (testing "the two sections are read, whole and unchanged"
+    (with-config-text (str "{:session {:llm {:idle-timeout-ms 5} :editing {:mode :str-replace}}\n"
+                           " :mcp {:servers {\"a\" {:command \"x\"}}}}\n")
+      (fn []
+        (is (= {:llm {:idle-timeout-ms 5} :editing {:mode :str-replace}}
+               (providers/session-config)))
+        (is (= {"a" {:command "x"}} (providers/mcp-servers))))))
+  (testing "an empty :servers map is a decision, and not the same answer as nothing"
+    (with-config-text "{:mcp {:servers {}}}\n"
+      (fn [] (is (= {} (providers/mcp-servers))))))
+  (testing "a section is read FRESH, like the rest of the file"
+    (with-config-text "{:session {:llm {:idle-timeout-ms 1}}}\n"
+      (fn []
+        (is (= {:llm {:idle-timeout-ms 1}} (providers/session-config)))
+        (spit (home/config-file) "{:session {:llm {:idle-timeout-ms 2}}}\n" :encoding "UTF-8")
+        (is (= {:llm {:idle-timeout-ms 2}} (providers/session-config))
+            "editing the file moves it on the next call, not the next restart")))))
+
+(deftest an-unknown-key-in-the-new-sections-is-a-named-failure
+  (with-config-text "{:session {:editingg {}}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "a typo in a key that decides how a session runs must not be silent")
+        (is (str/includes? (ex-message e) ":editingg") "the sentence names the typo")
+        (is (str/includes? (ex-message e) ":editing") "and the key it meant"))))
+  (with-config-text "{:mcp {:server {}}}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":server") "the sentence names the typo")
+        (is (str/includes? (ex-message e) ":servers") "and the key it meant")))))
+
+(deftest the-top-level-sentence-names-the-two-new-sections-too
+  (with-config-text "{:oops 1}\n"
+    (fn []
+      (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e))
+        (is (str/includes? (ex-message e) ":session")
+            "the closed-top-level sentence says where a session's keys go")
+        (is (str/includes? (ex-message e) ":mcp")
+            "and where the MCP servers go")))))
+
 ;; ---------------------------------------------------- instruction delivery bit
 
 (def ^:private iu-reg

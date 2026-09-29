@@ -438,6 +438,9 @@
     :providers  the vendor catalog, {name entry}, laid over the built-in table
     :ui         the interface's own settings (today just :language)
     :security   the paths this home declares sensitive -- a file tool parks on them
+    :session    how a session runs: :editing / :compaction / :llm / :approval /
+                :skills / :instructions / :subagents (what harness.edn held)
+    :mcp        the outside programs whose tools join this session: {:servers {..}}
 
   ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
   starts on, and which language it speaks are all facts about THIS home, so a person
@@ -456,13 +459,25 @@
   same home's configuration, and because the settings panel ALREADY writes this file: a list
   the panel cannot write is not a list a person keeps up to date. Which calls it affects is
   harness.cap.project's business, not this one's."
-  #{:default :providers :ui :security})
+  #{:default :providers :ui :security :session :mcp})
 
 (def ^:private security-keys
   "The keys config.edn's :security section may carry. One today, and a NAMED SET rather
   than a bare check for the reason :ui's keys are one: a typo in a safety list must fail
   by name rather than sit there guarding nothing."
   #{:sensitive-paths})
+
+(def ^:private session-keys
+  "The keys config.edn's :session section may carry -- the seven harness.edn used to hold,
+  unchanged, because that move was a change of address rather than of meaning. A NAMED SET
+  for the reason the other sections' are: a typo in a key that decides how a session runs
+  must fail by name rather than leave the session behaving as if nothing had been written."
+  #{:editing :compaction :llm :approval :skills :instructions :subagents})
+
+(def ^:private mcp-keys
+  "The keys config.edn's :mcp section may carry. One: :servers, the {name declaration}
+  map mcp.edn used to hold."
+  #{:servers})
 
 (defn- check-config
   "A parsed config.edn -> the same map, or a named failure about its SHAPE.
@@ -472,7 +487,8 @@
   so the answer cannot differ between the two."
   [raw path]
   (when-not (map? raw)
-    (fail (str path " must be a map of the sections (:default, :providers, :ui and :security), not "
+    (fail (str path " must be a map of the sections (:default, :providers, :ui, :security,"
+               " :session and :mcp), not "
                (pr-str (type raw)))
           {:path path}))
   (let [unknown (sortable (remove config-sections (keys raw)))]
@@ -481,8 +497,10 @@
                  " sections -- :default (the three knobs a session starts from:"
                  " :provider / :model / :reasoning-effort), :providers (the vendors,"
                  " {name entry}), :ui (the interface's own settings, today just"
-                 " :language) and :security (the paths this home declares sensitive, which"
-                 " park a human). The knobs used to sit at the top level themselves:"
+                 " :language), :security (the paths this home declares sensitive, which"
+                 " park a human), :session (how a session runs) and :mcp (the outside"
+                 " programs whose tools it is handed). The knobs used to sit at the top"
+                 " level themselves:"
                  " start the server once and it moves them under :default for you,"
                  " or move them yourself.")
             {:path path :unknown unknown})))
@@ -521,6 +539,19 @@
                    ", not a list of paths; write :sensitive-paths [\"~/.ssh/\" ..], or"
                    " leave the key out to use the built-in list")
               {:path path :value paths}))))
+  ;; :session AND :mcp -- UNKNOWN KEYS FAIL BY NAME, and that is the whole of the check
+  ;; here: what each key MEANS belongs to its consumer, which says so one call later with a
+  ;; sentence naming the file and the key (harness.cap.editing on :editing,
+  ;; harness.edge.compaction on the ratios). It is here because a typo in a key that decides
+  ;; how a session runs is INVISIBLE otherwise: the session simply behaves as if nothing
+  ;; had been written, which is the failure the closed top level exists to prevent.
+  (doseq [[section keys-of] {:session session-keys :mcp mcp-keys}]
+    (when-let [m (get raw section)]
+      (let [unknown-keys (sortable (remove keys-of (keys m)))]
+        (when (seq unknown-keys)
+          (fail (str path "'s " (pr-str section) " carries " (pr-str unknown-keys)
+                     "; it is made of " (str/join " / " (sort (map str keys-of))))
+                {:path path :section section :unknown unknown-keys})))))
   raw)
 
 (defn config
@@ -552,6 +583,34 @@
   []
   (check-config (or (edn/read-string (home/config)) {})
                 (.getAbsolutePath (home/config-file))))
+
+;; ------------------------- the two sections that used to be files of their own
+;;
+;; THE READERS FOR WHAT harness.edn AND mcp.edn HELD. One line each, and that is the
+;; point: both sections come out of the file `config` already reads, with the same
+;; freshness and the same shape check, so there is no second reader to keep in step.
+
+(defn session-config
+  "What this home's :session section says -- how a session runs: the seven keys
+  harness.edn used to hold, with their names and their shapes unchanged.
+
+  ABSENT IS THE EMPTY MAP, which is what every reader wants ('says nothing') and is the
+  rule `config` applies to a missing file too. WHAT A KEY MEANS IS NOT THIS NAMESPACE'S
+  BUSINESS: harness.cap.editing refuses an :editing block it cannot use and
+  harness.edge.compaction refuses ratios that are not fractions, each with a sentence
+  naming the key -- see check-config for why an unknown KEY is still refused here."
+  []
+  (or (:session (config)) {}))
+
+(defn mcp-servers
+  "The :servers map this home's :mcp section declares, or nil when it declares none.
+
+  NIL RATHER THAN {}, and that is a distinction mcp.edn was built on and this section
+  keeps: a home that says NOTHING about MCP servers has declared none, while
+  {:servers {}} is a DECISION -- 'this home has none'. harness.cap.mcp is what tells
+  those two apart at the call site, which is where it matters."
+  []
+  (get-in (config) [:mcp :servers]))
 
 ;; --------------------------------------------- this home's sensitive paths
 ;;
@@ -1997,11 +2056,14 @@
   moment they open this file is which sections exist and that leaving them empty is a
   working state. A write from the settings form replaces these comments with its own
   header, which the file then says out loud."
-  (str ";; The four sections of this file, all of which the settings panel writes:\n"
+  (str ";; The six sections of this file, all of which the settings panel writes:\n"
        ";;   :default    the three knobs a session starts from\n"
        ";;   :providers  the vendors, {name entry}\n"
        ";;   :ui         the interface's own settings (today just :language)\n"
        ";;   :security   the paths this home declares sensitive -- a file tool parks on them\n"
+       ";;   :session    how a session runs: editing / compaction / llm / approval /\n"
+       ";;               skills / instructions / subagents\n"
+       ";;   :mcp        the outside programs whose tools join this session\n"
        ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
        ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
        "\n{}\n"))
