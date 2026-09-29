@@ -5,6 +5,7 @@
   the project directory and the configuration home -- same park, same
   interrupt, same resume, only the reason differs."
   (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -416,6 +417,51 @@
         (is (str/includes? (:content result) "vetoed by human"))
         (is (str/includes? (:content result) "stays inside the project")))
       (is (= :run/end (:type (last (:seen no))))))))
+
+(deftest an-out-of-bounds-call-an-earlier-process-parked-is-asked-again
+  ;; THE RESTART, over the fence. The call is still in the history with its path; the
+  ;; park is not, because a park lives in the process that made it; and the fence rule
+  ;; is a function of the arguments -- so the call is parked afresh and the same
+  ;; question is asked again instead of the conversation being refused
+  ;; (`harness.kernel.tools/repark!`). THE HISTORY IS WRITTEN BY HAND on purpose: a run
+  ;; that produced this call would also be holding its park, and what is being tested is
+  ;; what a restart leaves behind.
+  (let [thr     "thr-fence-reask"
+        pdir    (str dir "/fence-reask-project")
+        outside (str dir "/fence-reask-outside.txt")
+        _       (rm-r! pdir)
+        _       (.mkdirs (io/file pdir))
+        _       (project/bind! thr pdir)
+        _       (io/delete-file outside true)
+        history [{:role "user" :content "go"}
+                 {:role "assistant" :content ""
+                  :tool_calls [{:id "c1" :type "function"
+                                :function {:name "write"
+                                           :arguments (json/write-str
+                                                       {:path outside
+                                                        :content "placed!"})}}]}]
+        park    (run (fake/scripted [{:content "never asked"}]) history thr)
+        term    (last (:seen park))
+        int     (first (:interrupts term))]
+    (testing "the run stops on the fence again rather than refusing the history"
+      (is (= :run/interrupt (:type term)))
+      (is (= "c1" (:tool-call-id int)))
+      (is (= "write" (:name int))))
+
+    (testing "the record is the ordinary fence one, stamped with the rule's own reason"
+      (let [rec (tools/parked (:id int))]
+        (is (= :out-of-bounds (:reason rec)))
+        (is (= thr (:thread-id rec)))
+        (is (str/includes? (:args rec) "fence-reask-outside"))))
+
+    (testing "and nothing ran to find that out"
+      (is (not (.exists (io/file outside)))))
+
+    (testing "the re-asked question answers like any other: the approval runs the call"
+      (let [yes (run (fake/scripted [{:content "done"}]) history thr
+                     {:resume [{:interrupt-id (:id int) :verdict :approved}]})]
+        (is (= :run/end (:type (last (:seen yes)))))
+        (is (= "placed!" (slurp outside :encoding "UTF-8")))))))
 
 (deftest the-fence-never-engages-on-an-unbound-session
   ;; The regression guarantee, end to end: no binding, no fence. The same

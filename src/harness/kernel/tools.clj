@@ -600,6 +600,10 @@
 ;; themselves. Both are PROCESS-LOCAL and per-thread -- a restart loses every
 ;; pending decision, and a resume naming an interrupt this process never parked
 ;; is refused by name rather than guessed at. Nothing here is persisted.
+;;
+;; LOSING A PARK IS NOT ALWAYS LOSING THE QUESTION, though: a call whose park is a
+;; function of its own arguments can be parked again from the history alone -- see
+;; `repark!`, below the seam's refusals, for what a restart can and cannot repair.
 
 (defonce ^:private session-approvals
   (atom {}))
@@ -831,6 +835,125 @@
   [{:keys [payload]}]
   (str "vetoed by human: the call was not executed."
        (when (some? payload) (str " reason: " (json/write-str payload)))))
+
+;; --------------------------------------------- a park this process never made
+;;
+;; THE THIRD LOOK AT A PARK, after `park-approval!` (the seam makes one) and
+;; `parked-interrupts` (the run reads one back). A park is PROCESS-LOCAL by design -- a
+;; restart loses every pending decision -- so a run handed a conversation from before a
+;; restart finds a call nothing answers. Refusing it by name is right when the question
+;; cannot be reconstructed; it is wrong when it can, because the ARGUMENTS are still in
+;; the history and whether a call parks is a function of the tool's declaration and
+;; those arguments. `repark!` derives the park the seam would have made and parks it
+;; again, so the same question gets asked a second time -- and TWO DOORS LEAD HERE,
+;; because a restart strands a question in two places:
+;;
+;;   * THE RUN, handed a history with the call still unanswered: it would be refused
+;;     before the vendor saw it (`harness.kernel.loop`), so the park is rebuilt and
+;;     the run ends on the question instead -- minted under a fresh id, since nothing
+;;     in the request says what the old one was.
+;;   * THE CONVERSATION A CLIENT READS (a page opened after the restart): it names the
+;;     interrupt its own card was drawn from -- id and call both, on the same message
+;;     -- so the park is rebuilt UNDER THAT ID (`harness.edge.sessions/revive-parks!`)
+;;     and the card the person is looking at keeps working: its fetch answers, its
+;;     answers land, and the resume it sends is accepted.
+
+(defn- question-from-call
+  "The question a call parks on, derived from the call's ARGUMENTS alone -- the twin of
+  `:park-reason`, for the tools that stop to ASK rather than to be approved (`ask`).
+
+  A DECLARATION THAT THROWS IS NOT A PARK, the same best effort `approval-reason`
+  makes: `ask` refuses a form nobody could answer, and that refusal is a fact about
+  the call rather than something for this reader to signal."
+  [tool thread-id parsed]
+  (when-let [declare-question (:park-question tool)]
+    (try (declare-question thread-id parsed) (catch Throwable _ nil))))
+
+(defn- call-park-record
+  "The parked record THIS CALL would be given if the seam reached its park branch, or
+  nil when nothing about the call answers the question any more -- see `repark!`.
+
+  NOTHING IS EXECUTED to find out, and that is the whole reason this is not `run!`: a
+  tool whose park is not a function of its arguments (an MCP server's elicitation, a
+  body that calls `suspend!` on something it read) cannot be rebuilt from the call,
+  and re-running it to reach the question would execute a call nobody decided."
+  [thread-id {:keys [id function]}]
+  (try
+    (let [{:keys [name arguments]} function
+          tool (get (effective-tools thread-id) name)]
+      (when (and tool
+                 (not (session-disabled? thread-id name))
+                 (not (base-disabled-by name))
+                 (served? thread-id name))
+        (let [parsed (json/read-str (if (str/blank? arguments) "{}" arguments)
+                                    :key-fn keyword)]
+          (when (empty? (missing-args tool parsed))
+            (let [reason   (approval-reason tool name thread-id parsed)
+                  question (when (nil? reason) (question-from-call tool thread-id parsed))]
+              (cond
+                ;; THE UNATTENDED POLICY IS ASKED HERE TOO, so the same thread that
+                ;; would have been told rather than parked is told rather than parked
+                ;; -- and the call stays in `dead` where the loop refuses it by name.
+                reason
+                (when-not (unattended-reason thread-id name reason)
+                  {:thread-id thread-id :tool-call-id id :name name
+                   :args arguments :reason reason})
+
+                ;; THE QUESTION'S KEYS GO IN FLAT, because that is what `suspend!`
+                ;; parks and what `GET /api/elicitation` reads; `:question` is the
+                ;; same map again under the key the interrupt carries.
+                question
+                (merge {:thread-id thread-id :tool-call-id id :name name :args arguments}
+                       question
+                       {:reason :elicitation :question question})))))))
+    (catch Throwable _ nil)))
+
+(defn repark!
+  "Park the calls a run finds UNANSWERED with no record of them in this process, and
+  answer the interrupts it can now end on -- the repair a restart needs.
+
+  A PARK LIVES IN THE PROCESS THAT MADE IT (`park-approval!` says why), so a restart
+  leaves the question in the history with nothing to answer it, and a conversation
+  handed that way cannot be sent to a vendor at all. Two declarations make a call
+  rebuildable, and they are the two ways a call parks:
+
+    * `:park-reason`   -- the call parks for a human's approval (a fence catch). The
+      record needs `:reason`, which is exactly what the declaration answers.
+    * `:park-question` -- a tool that stops to ASK, whose question is a function of
+      its arguments (`ask`). The record gets the `:question` `suspend!` would have
+      been handed, plus its keys flat.
+
+  CALLS is the OpenAI-shaped `tool_calls` entries the history names -- the same maps
+  `run!` reads -- and each one is put through the checks the seam would have made
+  first (disabled, unserved, missing arguments), so a call that could not run is never
+  parked. AN ENTRY MAY CARRY `:interrupt-id`: the id some other reading of the same
+  conversation named for that call, used verbatim instead of a fresh one
+  (`harness.edge.sessions/revive-parks!`), so the card drawn from that reading goes on
+  being the same question. THE ANSWER IS THE INTERRUPTS: [{:interrupt-id .. :id ..
+  :name .. :args .. :reason? .. :question? ..} ..] in the order CALLS was given -- the
+  shape `parked-interrupts` answers, which is the point: a client cannot tell a question
+  rebuilt after a restart from one asked a moment ago.
+  An id whose park could not be rebuilt is simply ABSENT, and that absence is what
+  keeps `harness.kernel.loop`'s refusal for it.
+
+  A RULE IS NOT ASKED AGAIN. PermissionRequest fires inside the seam on the way to a
+  person, and a call left unanswered by a restart is one no rule had decided -- had a
+  rule approved it before, the call would have RUN, and its answer would be in the
+  history. A rebuilt park therefore goes to the human, whose answer is the thing that
+  was lost."
+  [thread-id calls]
+  (doseq [call calls
+          :let [rec (call-park-record thread-id call)]
+          :when rec]
+    ;; THE ID IS THE CALLER'S WHEN IT HAS ONE, and that is the whole point of the second
+    ;; door in: a rebuilt conversation names the interrupt its own card was drawn from
+    ;; (`harness.edge.sessions/revive-parks!`), and a person answering THAT card must be
+    ;; answered -- a fresh id here would be the same question under a name nobody holds.
+    ;; With no id named, one is minted: the client's old id was minted for a park this
+    ;; process never made, and nothing may be answered under it (`take-decision!` would
+    ;; find no record and the resume would be refused exactly as before).
+    (park-approval! (str (or (:interrupt-id call) (java.util.UUID/randomUUID))) rec))
+  (parked-interrupts thread-id (mapv :id calls)))
 
 (defn- disabled-message
   "What the model is told when it calls a tool that is switched off. Like a veto,

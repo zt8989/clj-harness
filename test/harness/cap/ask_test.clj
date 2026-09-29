@@ -20,13 +20,16 @@
   process; the two read the same reasons, the same endpoint and the same card, and
   the ASKER is what separates them."
   (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [harness.cap.editing :as editing]
             [harness.cap.providers :as providers]
             [harness.cap.tools :as cap-tools]
             [harness.edge.http :as http]
+            [harness.edge.replay :as replay]
             [harness.fake :as fake]
+            [harness.infra.home :as home]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]
             [harness.wire :as wire])
@@ -529,3 +532,58 @@
                            "the language the <env> block names")
             "and its description says which language to write the question in"))
       (finally (td)))))
+
+;; ------------------------------------------- a card read back after a restart
+
+(defn- restarted-copy
+  "READER's record as a THREAD THAT NEVER PARKED ANYTHING: AUTHOR's log, copied, with the
+  interrupt id rewritten to one nothing holds.
+
+  THE RESTART IS MADE RATHER THAN THE PARK REMOVED. A park is process-local and no door
+  withdraws one (that is the design), so the state a fresh process wakes up in cannot be
+  produced by deleting anything here. It CAN be copied into being: the bytes a real run
+  wrote, naming a park nobody holds -- which is exactly what `RUN_FINISHED` leaves behind
+  when the process that wrote it goes away (session 9fbc5c8c, 2026-09-29)."
+  [author reader parked-id dead-id]
+  (let [src  (replay/find-log (home/projects-dir) author)
+        dest (io/file (.getParentFile src) (str (home/sanitize reader) ".jsonl"))]
+    (spit dest (str/replace (slurp src :encoding "UTF-8") parked-id dead-id)
+          :encoding "UTF-8")
+    dest))
+
+(deftest a-card-read-back-after-a-restart-is-still-answerable
+  (let [author "reask-author"
+        reader "reask-reader"
+        qs     [{:key "port" :question "Which port should it listen on?"}]
+        question "Which port should it listen on?"]
+    (with-server author (ask-script (ask-args qs))
+      (fn []
+        (let [{parked-id :id} (park-and-read author)
+              dead      (str (java.util.UUID/randomUUID))
+              _         (support/start-session! reader)
+              _         (restarted-copy author reader parked-id dead)
+              _         (providers/use-provider! reader (fake/scripted [{:content "done"}]))]
+          (testing "the reader's conversation is that record, under an id nobody holds"
+            (is (nil? (tools/parked dead)) "no park is behind it, and that is the premise"))
+
+          (testing "a card read straight off the endpoint is the 404 the person was stuck on"
+            (is (= 404 (:status (api-get (str "api/elicitation?interruptId=" dead))))))
+
+          (testing "but READING the conversation rebuilds the park, under the id it names"
+            (let [page (api-get (str "api/threads/" reader "/page"))]
+              (is (= 200 (:status page)))
+              (is (str/includes? (:body page) dead)
+                  "the page still names the id the card holds -- the ids do not move")
+              (is (some? (tools/parked dead)) "and that id is parked again")))
+
+          (testing "so the question comes back: the same schema, the same asker"
+            (let [res (api-get (str "api/elicitation?interruptId=" dead))
+                  ask (json/read-str (:body res))]
+              (is (= 200 (:status res)))
+              (is (= "model" (get ask "askedBy")))
+              (is (= question (get-in ask ["schema" "properties" "port" "description"])))))
+
+          (testing "and the answer the person types lands as that call's result"
+            (let [content (result-of (resume-with reader dead {"port" "8080"}))]
+              (is (some? content) "the resumed run reported a result rather than parking again")
+              (is (= (str "- " question " -> 8080") (result-line (or content "") question))))))))))

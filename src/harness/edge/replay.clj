@@ -725,12 +725,57 @@
       (update :entries into (map (fn [m] {:seq seq-n :message m}) msgs))
       (update :messages into msgs)))
 
+(defn- parked-interrupts
+  "The interrupts a frame ends a RUN on, or nil -- the parked terminal's own fact, for the
+  one reader that needs it apart from the group it arrives in (`entries-step`, where the
+  call's message is still in reach)."
+  [frame]
+  (when (and (= "RUN_FINISHED" (:type frame))
+             (= "interrupt" (get-in frame [:outcome :type])))
+    (seq (get-in frame [:outcome :interrupts]))))
+
+(defn- park-on-call
+  "Attach a parked run's INTERRUPTS to the entry that CARRIES the call they name -- the
+  assistant message the run was building when it stopped, which is where the live path puts
+  them and where the client reads them back (`findRequiresActionAssistant`).
+
+  WHY IT IS NOT LEFT TO `frames/apply-frames`, WHICH ALREADY DOES THIS: that fold sees ONE
+  group, and a run's frames are flushed as MORE THAN ONE when one of its own `message` rows
+  lands between them (`entries-step` closes the group at every message row). Measured on a
+  record the CURRENT writer leaves (2026-09-29, session 24b97ff5): the model's row lands
+  right after the tool-call frames, the terminal follows in a group of its own -- so the
+  fold's own attach found no assistant message to put the interrupts on, the card was
+  written out of the conversation, and a page refreshed on a parked session drew no card
+  at all.
+
+  THE CALL NAMES ITS OWN MESSAGE, so nothing is guessed and nothing is scanned for: the
+  interrupts carry the `toolCallId` they parked, and the entry holding that call is the
+  message the card belongs to. A message still PENDING -- the whole run in one group, which
+  is the ordinary record -- is not in `:entries` yet: the group's own `apply-frames`
+  attaches it there, and this finds nothing to do (`nil` interrupts likewise)."
+  [acc interrupts]
+  (if (empty? interrupts)
+    acc
+    (let [calls (into #{} (keep :toolCallId) interrupts)
+          es    (:entries acc)
+          at    (last (keep-indexed (fn [i e]
+                                     (when (some #(contains? calls (:id %))
+                                                 (:toolCalls (:message e)))
+                                       i))
+                                   es))]
+      (if (nil? at)
+        acc
+        (assoc-in acc [:entries at :message :metadata :custom
+                       frames/park-namespace :interrupts]
+                  (vec interrupts))))))
+
 (defn- flush-group
   "Close ACC's open FRAME GROUP at FALLBACK's line (or `:after`'s, when a terminal gave
   the group one): the frames become messages, numbered together."
   [acc fallback]
-  (let [new (frames/apply-frames (:pending acc))
-        at  (or (:after acc) fallback)]
+  (let [pending (:pending acc)
+        new     (frames/apply-frames pending)
+        at      (or (:after acc) fallback)]
     (-> (if (seq new) (add-entries acc at new) acc)
         ;; WHICH MESSAGES THIS GROUP BUILT, so the run's own `message` rows can be paired with
         ;; them in order (`entries-step`), and whether the FRAMES already carried the reasoning
@@ -755,6 +800,9 @@
                                                   new)))
                :reasoned? (boolean (or (:reasoned? acc)
                                        (some #(= "reasoning" (:role %)) new)))))))
+;; A PARKED TERMINAL'S INTERRUPTS ARE NOT ATTACHED HERE: they belong to the assistant message
+;; that carried the call, which may be a group BEHIND this one -- the terminal row itself is
+;; where that is known, see `entries-step`.
 
 (defn- entries-init []
   "The conversation's own fold. `:messages` IS THE SAME MESSAGES WITHOUT THEIR NUMBERS -- kept so
@@ -929,7 +977,17 @@
                             (= "RUN_STARTED" (:type value))
                             (assoc :model-ids [] :model-next 0 :reasoned? false :reasoned-n 0
                                    :unpaired-said? false :run-from (count (:entries acc))))]
-                  (if (frames/terminal? value) (assoc acc :after i) acc)))
+                  (if (frames/terminal? value)
+                    ;; ...AND A PARKED TERMINAL SAYS WHERE ITS CARD GOES, HERE, WHILE THE CALL'S
+                    ;; OWN MESSAGE IS STILL IN REACH: the run's frames may have been flushed in
+                    ;; an EARLIER group (`park-on-call` tells why), and the interrupts name the
+                    ;; call whose entry is the one they belong on. Frames still pending are not
+                    ;; in `:entries` yet -- the group's own `apply-frames` attaches those (see
+                    ;; `frames/park-on-last-assistant`), which is the ordinary record.
+                    (-> acc
+                        (assoc :after i)
+                        (park-on-call (parked-interrupts value)))
+                    acc)))
       acc)))
 
 (defn- entries-answer

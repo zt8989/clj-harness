@@ -79,6 +79,18 @@
                            i))
                        history)))
 
+(defn- tool-calls-named
+  "The `tool_calls` entries in HISTORY naming CALL-IDS, in the order CALL-IDS are given.
+  The call as the model made it, for a caller that has only the ids.
+
+  THE ORDER IS THE CALLER'S, because it is the order the run reports its interrupts in
+  and that is the order the calls appear in the assistant message the vendor reads.
+  Read the same way `call-position` reads it -- same rule, one lookup instead of one
+  answer."
+  [history call-ids]
+  (let [wanted (set call-ids)]
+    (into [] (comp (mapcat :tool_calls) (filter #(wanted (:id %)))) history)))
+
 (defn- answer-position
   "Where in HISTORY an answer to the call named by the assistant message at INDEX goes:
   directly behind that message, and behind the answers already sitting there.
@@ -256,6 +268,12 @@
   is the one thing a human can act on: a park lives in the process that made it, so
   after a restart nothing can answer these, and the conversation cannot be continued as
   it stands.
+  
+  WHAT REACHES HERE IS ONLY WHAT COULD NOT BE REBUILT. `tools/repark!` reads the
+  question back out of a call whose park is a function of its arguments and asks it
+  again; these ids are the ones whose park nothing in the history describes (a server's
+  elicitation, a tool this session no longer serves), and inventing one for them is the
+  failure this refusal exists to prevent.
   
   A REFUSAL RATHER THAN A REPAIR. Answering the call here would be inventing a result
   the model never saw and that no tool produced; the honest repair for a call whose run
@@ -775,20 +793,33 @@
             ;; as an opaque 400 on a conversation that then stayed bricked: the client's
             ;; history is the client's, so every later message re-sent the same block.
             ;;
-            ;; TWO ANSWERS, and the difference is whether anyone can still answer:
+            ;; THREE ANSWERS, and the difference is whether anyone can still answer:
             ;;
             ;;   * STILL PARKED HERE. The human has not decided yet and a decision can
             ;;     still arrive, so the run ASKS AGAIN -- it ends on the same interrupt
             ;;     it ended on before, and the client gets its card back instead of a
             ;;     request nobody can serve. Nothing is invented and nothing is
             ;;     pre-empted: the same question, asked a second time.
-            ;;   * NOBODY HOLDS IT. A park lives in the process that made it, so after a
-            ;;     restart this call can never be answered. Sending it is what produced
-            ;;     the 400; guessing a result for it would be inventing one. The run is
+            ;;   * A PARK THIS PROCESS NEVER MADE, AND A CALL THAT STILL DESCRIBES IT. A
+            ;;     park lives in the process that made it, so a restart leaves the
+            ;;     question in the history with nothing to answer it -- and for a call
+            ;;     whose park is a function of its own arguments (a fence catch, an
+            ;;     `ask`) the question can simply be ASKED AGAIN: `tools/repark!`
+            ;;     derives it without executing anything and parks it under a new
+            ;;     interrupt, which is the same second asking as the bullet above.
+            ;;   * NOBODY HOLDS IT AND IT CANNOT BE REBUILT. A server's elicitation is
+            ;;     the server's question and is not in the history; a call this session
+            ;;     no longer serves, or a tool that no longer declares a park, must not
+            ;;     be invented into one. Sending it is what produced the 400, and
+            ;;     guessing a result for it would be inventing one, so the run is
             ;;     refused BY NAME instead -- see `unanswerable-call-message`.
             stalled  (vec (llm/unanswered-tool-calls @history))
-            still    (when (seq stalled) (tools/parked-interrupts thread-id stalled))
-            dead     (vec (remove (set (map :id still)) stalled))
+            still    (vec (when (seq stalled) (tools/parked-interrupts thread-id stalled)))
+            lost     (vec (remove (set (map :id still)) stalled))
+            rebuilt  (vec (when (seq lost)
+                            (tools/repark! thread-id (tool-calls-named @history lost))))
+            waiting  (into still rebuilt)
+            dead     (vec (remove (set (map :id waiting)) stalled))
             refusal  (when (seq dead) (unanswerable-call-message dead))
             _        (when refusal (throw (ex-info refusal {:unanswered dead})))
             parked
@@ -796,9 +827,10 @@
               ;; A replayed call that had to park again: the turn is still
               ;; unanswered, so there is no provider call to make.
               (seq replayed) replayed
-              ;; A call parked LAST turn, still undecided: ask the same question
+              ;; A call parked LAST turn, still undecided -- or one whose park an
+              ;; EARLIER PROCESS made and `tools/repark!` rebuilt: ask the same question
               ;; again rather than send a history the vendor refuses.
-              (seq still)    still
+              (seq waiting)  waiting
               :else          (loop []
                 (let [_         (with-skills)
                       ;; A STOP THAT ARRIVED BETWEEN STEPS IS HONOURED HERE, before anything

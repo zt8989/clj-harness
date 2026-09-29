@@ -4672,7 +4672,7 @@
               :state (name (:state (replay/record-state records)))})
            (catch Throwable t {:error (ex-message t) :status 400})))))
 
-(defn- read-entries
+(defn- read-entries-raw
   "The entries a WINDOW route answers with: the live session's when this process holds
   it -- EXCEPT while a run of it is in flight, when the record is further along -- else
   the record's. Read-only, and never a birth.
@@ -4717,6 +4717,24 @@
             {:ok (:entries e) :live true :state (live-state stem)})))
     (record-entries stem false)))
 
+(defn- read-entries
+  "`read-entries-raw` (above, which says everything about WHERE an answer comes from), with
+  one step in front of the answer: the parks this conversation is waiting on are rebuilt
+  (`harness.edge.sessions/revive-parks!`).
+
+  THE REPAIR IS PART OF HANDING A CONVERSATION OUT, not a second reading of it. What a
+  reader is about to draw are the cards the conversation names -- and after a restart those
+  names are the only thing left of the parks behind them: the card's question would 404 and
+  its answers would go nowhere, which is the state a person sees as 'the page is stuck' (the
+  2026-09-29 session 9fbc5c8c). `revive-parks!` rebuilds them out of the conversation's own
+  words, under the same ids -- so the card goes on being answerable, and a READ still writes
+  nothing but that: no record byte, no claim, no birth, and never twice for one park."
+  [stem]
+  (let [read (read-entries-raw stem)]
+    (if-some [es (:ok read)]
+      (assoc read :ok (sessions/revive-parks! stem es))
+      read)))
+
 (defn- window-page
   "A LIVE conversation's window: {:entries [..] :baseSeq N :hasMore bool} for the tail page
   (`since` nil) or for what arrived after `since`.
@@ -4731,16 +4749,23 @@
   with nothing to say about which half; the PAGE route is where a broken record is reported
   BY NAME (`read-entries`)."
   [stem since]
-  (let [from-record (when (running? stem) (:ok (record-entries stem true)))]
-    (cond
-      (nil? from-record)
-      (if (nil? since)
-        (sessions/tail stem)
-        {:entries (sessions/since stem since) :baseSeq since :hasMore false})
+  (let [from-record (when (running? stem) (:ok (record-entries stem true)))
+        page (cond
+               (nil? from-record)
+               (if (nil? since)
+                 (sessions/tail stem)
+                 {:entries (sessions/since stem since) :baseSeq since :hasMore false})
 
-      (nil? since) (sessions/tail-of from-record)
+               (nil? since) (sessions/tail-of from-record)
 
-      :else {:entries (sessions/since-of from-record since) :baseSeq since :hasMore false})))
+               :else {:entries (sessions/since-of from-record since) :baseSeq since :hasMore false})]
+    ;; THE SAME REPAIR THE PAGE ROUTE MAKES, at the streaming door (`read-entries`): a window is
+    ;; a conversation a client draws cards from, and the tail window is where the card of a run
+    ;; that just stopped comes from. A session this process does not hold answers nil from
+    ;; `sessions/tail`, and a nil window has nothing to repair.
+    (if-some [es (:entries page)]
+      (assoc page :entries (sessions/revive-parks! stem es))
+      page)))
 
 (defn- number-param
   "A query parameter that is meant to be a record offset, or nil when it is absent.
@@ -4761,6 +4786,8 @@
   being held here: it reads memory if this process serves the session and the record if
   it does not. NOTHING IS WRITTEN and no claim is taken -- a reader paging through a
   conversation another process is serving is exactly the case the record is still for.
+  (WHAT IS REPAIRED HERE, and it is not the record: `read-entries` rebuilds the in-memory
+  parks the conversation names, so the cards it is about to be drawn from can be answered.)
 
   `beforeSeq` IS THE OLDEST OFFSET THE CLIENT HOLDS, not the newest: the entries it is
   missing are all in front of that one, and the page ends where the client's own window

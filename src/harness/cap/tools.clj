@@ -1535,6 +1535,21 @@
   [questions]
   (str/join " / " (map :question questions)))
 
+(defn- ask-suspension
+  "The question this call parks on, as `suspend!` wants it: who is asking, the line the
+  interrupt carries, and the schema the client draws.
+
+  ONE FUNCTION, TWO READERS, and the second one is what survives a restart. `t-ask` asks
+  it from inside the body; the `:park-question` declaration in the table below is the
+  same answer derived from the call's arguments ALONE, which is how a park an earlier
+  process made gets asked again instead of leaving the conversation unanswerable
+  (harness.kernel.tools/repark!). A second copy of these three lines would be a second
+  answer to 'what was I asked', and the two would drift."
+  [questions]
+  {:asked-by :model
+   :prompt   (ask-prompt questions)
+   :schema   (ask-schema questions)})
+
 (defn- answer-for
   "The value this question came back with, or nil.
 
@@ -1629,59 +1644,64 @@
       :approved (answer-lines questions (:payload decision))
       :vetoed   "The person declined to answer."
       (kernel-tools/suspend! kernel-tools/*thread-id* kernel-tools/*tool-call-id*
-                             {:asked-by :model
-                              :prompt   (ask-prompt questions)
-                              :schema   (ask-schema questions)}))))
+                             (ask-suspension questions)))))
 
 (register! "ask"
-  (tool ask-description
-        {"questions" {:type "array" :minItems 1
-                      :description (str "The questions to put to the person, in the order"
-                                        " they should read them.")
-                      :items {:type "object"
-                              :properties {"key" {:type "string"
-                                                  :description (str "A short, stable name"
-                                                                    " for this answer. The"
-                                                                    " same question asked"
-                                                                    " again carries the"
-                                                                    " same key.")}
-                                           "question" {:type "string"
-                                                       :description (str "The sentence the"
-                                                                         " person reads: one"
-                                                                         " question, asked"
-                                                                         " plainly.")}
-                                           "options" {:type "array"
-                                                      :items {:type "string"}
-                                                      :description (str "The answers to choose"
-                                                                        " from, when the answer"
-                                                                        " is one of a known set."
-                                                                        " Without it the question"
-                                                                        " is a box they type"
-                                                                        " into. Leave the list"
-                                                                        " out rather than"
-                                                                        " guessing at it, and"
-                                                                        " give each candidate"
-                                                                        " exactly as the answer"
-                                                                        " should come back.")}
-                                           "multiple" {:type "boolean"
-                                                       :description (str "True when they may pick"
-                                                                         " more than one of"
-                                                                         " `options`. Needs"
-                                                                         " `options`.")}
-                                           "allow_other" {:type "boolean"
-                                                          :description (str "True when they may"
-                                                                            " answer in their own"
-                                                                            " words instead of"
-                                                                            " picking, for a"
-                                                                            " candidate the list"
-                                                                            " does not have. Needs"
-                                                                            " `options` -- an"
-                                                                            " answer they type is"
-                                                                            " already what a"
-                                                                            " question without"
-                                                                            " them is.")}}
-                              :required ["key" "question"]}}}
-        [:questions] t-ask))
+  (assoc
+   (tool ask-description
+         {"questions" {:type "array" :minItems 1
+                       :description (str "The questions to put to the person, in the order"
+                                         " they should read them.")
+                       :items {:type "object"
+                               :properties {"key" {:type "string"
+                                                   :description (str "A short, stable name"
+                                                                     " for this answer. The"
+                                                                     " same question asked"
+                                                                     " again carries the"
+                                                                     " same key.")}
+                                            "question" {:type "string"
+                                                        :description (str "The sentence the"
+                                                                          " person reads: one"
+                                                                          " question, asked"
+                                                                          " plainly.")}
+                                            "options" {:type "array"
+                                                       :items {:type "string"}
+                                                       :description (str "The answers to choose"
+                                                                         " from, when the answer"
+                                                                         " is one of a known set."
+                                                                         " Without it the question"
+                                                                         " is a box they type"
+                                                                         " into. Leave the list"
+                                                                         " out rather than"
+                                                                         " guessing at it, and"
+                                                                         " give each candidate"
+                                                                         " exactly as the answer"
+                                                                         " should come back.")}
+                                            "multiple" {:type "boolean"
+                                                        :description (str "True when they may pick"
+                                                                          " more than one of"
+                                                                          " `options`. Needs"
+                                                                          " `options`.")}
+                                            "allow_other" {:type "boolean"
+                                                           :description (str "True when they may"
+                                                                             " answer in their own"
+                                                                             " words instead of"
+                                                                             " picking, for a"
+                                                                             " candidate the list"
+                                                                             " does not have. Needs"
+                                                                             " `options` -- an"
+                                                                             " answer they type is"
+                                                                             " already what a"
+                                                                             " question without"
+                                                                             " them is.")}}
+                               :required ["key" "question"]}}}
+         [:questions] t-ask)
+   ;; THE QUESTION WITHOUT RUNNING THE TOOL: the same `ask-suspension` the body
+   ;; suspends on, derived from the arguments alone -- so a park this process
+   ;; never made can be rebuilt and asked again (harness.kernel.tools/repark!).
+   ;; A tool that stops to ask is the second of the two things a park can be
+   ;; rebuilt from; the other is the fence's `:park-reason`.
+   :park-question (fn [_thread-id args] (ask-suspension (ask-questions args)))))
 
 ;; ------------------------------------------------------------------ installing
 

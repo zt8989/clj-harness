@@ -66,7 +66,7 @@
 **已知弱点与未覆盖**：
 
 - verify 脚本的合规性依赖真模型：弱模型会把"调用某工具"的轮次答成纯 reasoning（无文本、无工具调用）。脚本对每个合规依赖轮做最多 3 次重试并如实打印 note —— 本次第 4 步就用到了重试。park 之后的全部断言与模型无关，那半段才是这份脚本真正证明的东西。
-- 未覆盖：真机上多 interrupt 同时 park 的 UI 表现（离线有覆盖）；过期（非目标）；跨进程重启后 resume（非目标，且被 `resume-decisions` 明确拒绝）。
+- 未覆盖：真机上多 interrupt 同时 park 的 UI 表现（离线有覆盖）；过期（非目标）；跨进程重启后 resume（非目标，且被 `resume-decisions` 明确拒绝）。**2026-09-29 起这条非目标松了一半**：拿一个本进程没 park 过的 interruptId 来 resume 仍然被拒，但**还留在历史里的调用**若其 park 是参数的函数（围栏审批、`ask`）会被重新 park、同一个问题再问一遍——见 `.scratch/park-revival/spec.md`。
 - 环境注记：本机沙箱会把服务进程对 workspace 之外的写入重定向，`~/.lisp-harness/logs/*.jsonl` 在宿主机不可见。真机验证因此只走 wire、不读 jsonl；jsonl 的审批行（`tools/pre-execute` 的 `needs-approval`、`approval/decided`）由 `http_test` 在进程内覆盖。
 
 ## code-review 偏差记录（2026-09-13，固定点 b3a4da4，两轴）

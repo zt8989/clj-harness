@@ -280,6 +280,24 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 不多一条、不跳一下。读的是 `replay/read-records`——**最后一行可能是半行**（写的人在追加），丢掉它才
 是「已经到达的」的诚实答案；其余行仍严格读。本进程不持有这场会话、或它没有 run 在跑时，照旧读表。
 
+**一张卡的名字要能在新进程里兑现。** park 只活在造它的进程里（kernel.md 的审批一节），而重建出来的
+对话仍带着那个 interrupt id——于是换进程之后的卡片**两样都没了**：题面问不到（`GET /api/elicitation`
+404，表都画不出来）、答案无处可去（resume 按未知名拒绝），人对着一个填不动的表单（每次重启都要新开
+会话）。所以**两条读路在把对话交出去之前把 park 造回来**（`harness.edge.sessions/revive-parks!`，
+`read-entries` 与 `window-page` 各一次）：id 取**对话自己写下的那个**、调用取同一条消息上的
+`toolCallId`，park 的内容由 `harness.kernel.tools/repark!` 从调用的参数现推——推不出来的（服务器的
+elicitation、这场会话已经不服务的工具）照旧没有，也就照旧被拒。**这一笔只写注册表**：记录一个字不动、
+不取 claim、不建会话，id 已经 park 着的一律跳过（翻页因此不会把人在答到一半的问题重新 park，也不会
+盖掉已经落下的决定）。
+
+**而这件事的前提是那条消息上真写着 id。** `RUN_FINISHED` 的 interrupt 由 `apply-frames` 折到最后一条
+assistant 的 `metadata.custom.agui.interrupts` 上，**但它只看得到自己那一个帧组**：一轮的帧会被它自己的
+`message` 行切成两组（`entries-step` 在每条 message 行之前收组），而新一轮的写法正是**模型那条
+`kernel-message` 行夹在工具调用帧与终帧之间**（2026-09-29 实测：会话 24b97ff5 的两个 park 都是这个
+形状）——终帧那一组里一条 assistant 都没有，卡于是**整张从重建出来的对话里消失**，刷新之后连 404 都
+没有。`replay/flush-group` 因此照**这一轮最后那条 assistant**（`:model-ids`，与它给模型行配对用的是
+同一份读数）补挂一次：帧没被切开的记录写进去的还是原来那个值，被切开的那个补回来。
+
 **五种帧，说的是「读者手里是什么」而不是「哪条路答的」**：`window`（feed 的开场：尾页）、
 `append`（读者游标之后的条目——feed 的后续帧，或带 `since` 连上时的开场）、`page`（读者最老那条
 之前的一页）、`tail`（没有游标的读者要的最新一页，`GET …/page`）、`end`（窗口结束：会话被放掉或
