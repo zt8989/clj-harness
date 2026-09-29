@@ -55,7 +55,6 @@
   config reader, the binding, and both of their (deliberately pure, deliberately
   project-free) consumers."
   (:require [clojure.data.json :as json]
-            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.infra.db :as db]
@@ -758,91 +757,37 @@
                    (str/starts-with? cp (if (.endsWith cd sep) cd (str cd sep))))))
     (catch Exception _ false)))
 
-(defn- read-harness-edn
-  "One harness.edn FILE, or {} when it does not exist -- a missing file is the
-  empty configuration, never an error: most projects have no .harness/ at all.
-  A file that EXISTS but is broken -- not valid EDN, or not a map -- is a hard,
-  NAMED failure carrying the absolute path. A silently ignored config would be
-  indistinguishable from a config that says nothing, and the fence's whole
-  meaning depends on that distinction never blurring."
-  [file]
-  (let [f (io/file file)]
-    (if-not (.exists f)
-      {}
-      (let [abs (.getAbsolutePath f)
-            v   (try
-                  (edn/read-string (slurp f :encoding "UTF-8"))
-                  (catch Exception e
-                    (throw (ex-info (str "harness.edn is not valid EDN: " abs
-                                         " (" (ex-message e) ")")
-                                    {:path abs :reason :invalid-edn}))))]
-        (when-not (map? v)
-          (throw (ex-info (str "harness.edn must be an EDN map: " abs)
-                          {:path abs :reason :not-a-map})))
-        v))))
-
-(defn harness-edn-levels
-  "The two harness.edn maps THREAD-ID's session is configured by, UNMERGED, with
-  the file each came from:
-
-    {:user    {...}                       ; the config home
-     :project {...}                       ; the bound project, {} when unbound
-     :files   {:user <abs> :project <abs>|nil}}
-
-  harness-config is this pair shallow-merged, and answers the question most
-  consumers are asking. This fn exists for the ones whose overlay is FINER than a
-  top-level key -- the editing mode is the first, composing its block key by key
-  so a project can turn one knob off without restating the block (see
-  harness.cap.editing). It is handed out rather than re-read by that consumer so the
-  reading discipline above stays ONE rule with ONE implementation: 'absent is the
-  empty configuration, broken is a named failure' is exactly the distinction the
-  fence depends on, and a second copy of it would be a second chance to blur it.
-
-  The paths ride along because a broken block has to be actionable, and ':editing
-  is the wrong shape' only becomes actionable once the reader knows which of the
-  two files to open."
-  [thread-id]
-  (let [dir (binding-for thread-id)]
-    {:user    (read-harness-edn (io/file (home/root) "harness.edn"))
-     :project (if dir (read-harness-edn (io/file dir ".harness" "harness.edn")) {})
-     :files   {:user    (.getAbsolutePath (io/file (home/root) "harness.edn"))
-               :project (when dir
-                          (.getAbsolutePath (io/file dir ".harness" "harness.edn")))}}))
-
 (defn harness-config
-  "The .harness/harness.edn configuration for THREAD-ID, merged from two
-  levels: the configuration home's harness.edn (the USER level), overlaid by
-  the bound project's .harness/harness.edn (the PROJECT level).
+  "The session configuration in force for THREAD-ID: the :session section of this home's
+  config.edn -- how a session runs, the seven keys harness.edn used to hold, with their
+  names and their shapes unchanged.
 
-  The merge is a SHALLOW merge of top-level keys, project wins -- a project
-  :approval replaces the user's whole :approval, it does not merge into it.
-  That is deliberate, and now written down: a deep merge would make 'what
-  will the fence actually do' a function of how two files nest, when the
-  point of a project-level override is to be legible in one file.
+  ONE LEVEL, AND THAT IS THE WHOLE READ. There used to be two: the configuration home's
+  harness.edn, overlaid by the bound project's .harness/harness.edn. THE PROJECT LEVEL IS
+  GONE (.scratch/config-merge/spec.md decision 2) -- it is a shape we may bring back one
+  day, and the shape to bring back is 'the same section in two files, shallow, project
+  wins', not a second file name. So this answer no longer depends on the binding at all,
+  and .harness/harness.edn is a file nothing reads.
 
-  Each level is read fresh on every call (the config.edn discipline), so
-  editing harness.edn moves the fence without a restart. A missing level is
-  the empty map. The first consumer is the approval boundary:
-  :approval {:allow [..]} adds paths to the fence's allowed set,
-  :approval {:strict true} removes the project directory from it. The
-  skills/mcp/hooks subdirectories of .harness/ are RESERVED for their own
-  consumers -- this reader only ever opens harness.edn.
+  THREAD-ID IS STILL THE ARGUMENT because every caller has a session, and because the
+  answer becomes per-session again the day a project level comes back: carrying it now
+  keeps the seam the shape of the thing that will sit behind it.
 
-  NOTE THE MIXED SOURCE, which is the home's boundary rather than an accident
-  (.scratch/project-sidebar/spec.md decision 2): the BINDING comes from the
-  store, the CONFIGURATION from files. State is rewritten, config is edited by
-  hand -- so editing harness.edn still needs no restart, and no part of this
-  call writes to the store.
-
-  The shallow merge is THIS key's shape and not a house rule: a key whose
-  consumers want a finer overlay composes the pair itself, from
-  harness-edn-levels above. Whichever way a key is composed, this fn is
-  unchanged -- a caller that wants the fence's answer still gets it the same
-  way it always did."
+  THE READ IS FRESH (harness.cap.providers re-reads the file on every call, the config.edn
+  discipline), so editing config.edn moves the fence with no restart. A missing section is
+  the empty map; a section that EXISTS and is broken is a NAMED failure out of
+  providers/check-config -- and that distinction is the one the fence depends on."
   ([] (harness-config nil))
-  ([thread-id]
-   (let [{:keys [user project]} (harness-edn-levels thread-id)]
-     (merge user project))))
+  ([_thread-id]
+   (providers/session-config)))
+
+(defn harness-config-path
+  "The absolute path of the file harness-config reads: what a failure sentence names when
+  it has to be actionable, since 'the block is the wrong shape' only helps once a reader
+  knows which file to open. It is config.edn, and it is the SAME file for every session
+  now that there is no project level."
+  []
+  (.getAbsolutePath (home/config-file)))
 
 ;; ------------------------------------------- what a session opens with
 ;;
@@ -852,9 +797,9 @@
 ;; (configured value, project directory), because the namespaces answering them
 ;; must not require this one (see harness.cap.skills, whose roots the fence needs).
 ;; Somebody has to pair the config with the binding, and that somebody needs to
-;; see harness.edn, the binding, and both readers: only this namespace can.
+;; see config.edn, the binding, and both readers: only this namespace can.
 ;;
-;; It is also the right home by subject matter -- harness.edn is where these keys
+;; It is also the right home by subject matter -- config.edn's :session is where these
 ;; come from, and this is the namespace that reads it.
 
 (defn skill-layers

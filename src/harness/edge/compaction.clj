@@ -206,16 +206,13 @@ not invent anything. Be concise.")
   merged)
 
 (defn- block
-  "harness.edn's `:compaction` block for THREAD-ID, the PROJECT level over the USER level,
-  as it was written -- nothing merged with the defaults and nothing validated. The one reader,
-  so `config` and `overflow-retries` cannot fold the same file two different ways."
+  "config.edn's :session :compaction block for THREAD-ID, as it was written -- nothing merged
+  with the defaults and nothing validated. The one reader, so `config` and
+  `overflow-retries` cannot fold the same file two different ways. ONE LEVEL: the project
+  level this key used to compose against is gone (.scratch/config-merge/spec.md decision 2)."
   [thread-id]
-  (let [{:keys [user project]} (project/harness-edn-levels thread-id)]
-    (reduce (fn [m level]
-              (let [b (:compaction (get {:user user :project project} level))]
-                (if (map? b) (merge m b) m)))
-            {}
-            [:user :project])))
+  (let [b (:compaction (project/harness-config thread-id))]
+    (if (map? b) b {})))
 
 (defn config
   "The compaction proportions THIS SESSION is configured with, from harness.edn's

@@ -39,23 +39,20 @@
   3)
 
 (defn- block
-  "harness.edn's `:llm` block for THREAD-ID, the PROJECT level over the USER level, as
-  written -- nothing merged with the defaults and nothing validated. The one reader, so
-  the two knobs below cannot fold the same file two different ways."
+  "config.edn's :session :llm block for THREAD-ID, as written -- nothing merged with the
+  defaults and nothing validated. The one reader, so the two knobs below cannot fold the
+  same file two different ways. ONE LEVEL: the project level this key used to compose
+  against is gone (.scratch/config-merge/spec.md decision 2)."
   [thread-id]
-  (let [{:keys [user project]} (project/harness-edn-levels thread-id)]
-    (reduce (fn [m level]
-              (let [b (:llm (get {:user user :project project} level))]
-                (if (map? b) (merge m b) m)))
-            {}
-            [:user :project])))
+  (let [b (:llm (project/harness-config thread-id))]
+    (if (map? b) b {})))
 
 (defn- whole-number!
   "N as a count of KEY, or a refusal naming the value, the key and where it came from.
   See the namespace docstring for why nothing here rounds."
   [n key]
   (when-not (and (integer? n) (not (neg? n)))
-    (throw (ex-info (str "harness.edn :llm " (name key) " must be a whole number"
+    (throw (ex-info (str "config.edn's :session :llm " (name key) " must be a whole number"
                          " (0 turns it off), but it is " (pr-str n))
                     {:key key :value n :reason :bad-llm-timeout-value})))
   n)
