@@ -107,3 +107,52 @@ node scripts/dev.mjs --scripted        # 隔离家、OS 分配端口，页面由
 4. 拦住 `POST /api/threads/**/rebuild`（playwright `page.route` 里 sleep），再点侧栏里**另一场** ⇒ 加载中。
 
 第 4 步之前不用拦也看得见（本机 rebuild 很快，只是"闪"），拦是为了把那一瞬钉住好量。
+
+## 落地（2026-09-29）
+
+一张票落地（票文件按约定删除，决定与验证记在这里）。判据搬了家，两处读同一个函数：
+
+- `ui/src/lib/thread-view.ts`（新）：`isNewChatView` 从抄来的 `thread.aui.tsx` 搬过来，
+  连它上面那段「启动占位当新会话」的解释一起搬；文件头记下这个问题的**两个**读者。
+- `ui/src/components/assistant-ui/elements/thread.aui.tsx`：本地那个 `const isNewChatView` 删掉，
+  改成一行 import（抄来的文件只多这一行，带 LOCAL 标记）。`isHistoryLoadingView` 留在原处。
+- `ui/src/components/composer-chrome.tsx`：`started` 由 `s.thread.messages.length > 0` 改成
+  `!isNewChatView(s)`；`data-started` 与 `{!started && <ComposerContextBar/>}` 两处一行未动。
+- `ui/src/styles.css`：**一条 CSS 都没改**。只改了那段注释里对 `data-started` 的描述
+  （原先写的是「会话有消息时」，现在是「不是新建的 composer 时」）。
+- 套件：新增 `ui/test/suites/composer-state.ts`（2 条）——判据那张表逐行钉住（含加载中那一行），
+  另一半读源码：frame 问的是同一个函数、这问题在整棵树里只有一处定义。`EXPECTED_CASES` 183 → 185。
+
+**做到的不变量**：布局按 `isNewChatView` 决定居中还是贴底，composer 的 chrome 现在按同一个函数决定
+要不要画那条条子——两者**不可能**再各说各话。这不是「把加载中修好看了」，是让第三种形态在构造上不存在。
+
+### 验证
+
+- `npm run typecheck` 绿；`npm run build` 绿（`node scripts/dev.mjs --scripted` 自己那次构建）。
+- `npx vitest run -t composer`：**11 条绿**（`composer-state` 2 条 + `composer-todos` 8 条 + 1 条），
+  收集总数 185 与 `EXPECTED_CASES` 对上。
+- **真 Chromium 走查**（`node scripts/dev.mjs --scripted`；两场会话 + 刷新 + `page.route` 把
+  `POST /api/threads/**/rebuild` 拖 5 秒），四态各量一次：
+
+| 量什么 | 会话中 | 新建 | **加载中** | 加载完 |
+|---|---|---|---|---|
+| `data-started` | 有 | 无 | **有** | 有 |
+| `[data-slot="composer-context"]`（项目/分支条） | 不在 | 在 | **不在** | 不在 |
+| footer 计算 `padding-bottom` | `0px` | `24px` | **`0px`** | `0px` |
+| composer frame 底边 / 窗口底边 | 720 / 720 | 334–466（居中） | **720 / 720** | 720 / 720 |
+| 网格 `justify-content` | normal | **center** | normal | normal |
+| 历史骨架屏 | 无 | 无 | **有** | 无 |
+
+改前「加载中」那一行是：`data-started` **无**、条子**在**、`padding-bottom: 24px`、frame 底边 **696**（差 24px）。
+改后四条全变——正是主人报的那个「第三种情况」。
+
+任务横条那一格没有实测：隔离家的回放脚本里没有 `todo_write`，造不出任务列表。它的判据一行未动
+（`todos !== null && todos.length > 0` 才画），而它原来唯一的同伴——项目/分支条——现在不在那一态里了，
+所以「独占那一格」是它没改过的代码加上这里量到的那条结论。
+
+### 机器差异（不是本改动的红）
+
+`npm test` 全量在本机是红的，且与本次改动无关——三次连跑，**未改动的 `main` 红 15 条**，
+本分支两次红 9 条与 11 条，红的是同一批套件（`turn` / `approval` / `client` / `context` / `elicitation` /
+`stats` / `mux`），大多是 120s 超时与它们的连带（`mux > a-page-following-nothing-declares-nothing`
+断言的是模块级状态在加载时为空，被前面超时的套件污染）。`composer-state` 与 `composer-todos` 一次次都不在红里。
