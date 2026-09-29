@@ -111,12 +111,15 @@ run / resume / compact **都拒**；只读的门不受影响；被拒的 run **�
   审计行之外逐字相同（用例逐行比过）。
 - **靠切点丢掉的东西不用补**：半截的信封（`TEXT_MESSAGE_START` 没有 END）在最后一步的结束**之后**，
   切点根本没复制它；而被切断那次调用的答复由修缮补上（帧 + 行，票 01/02 那一处写手）。
-- **旧格式不迁移**：顶层 `kind` 的行被读侧按名字拒绝（`:old-contract`），fork 照直答 400 + 那个理由。
-  要不要真的迁移旧记录，是这一票里唯一没定的取舍——**留成单独一票，先问主人**。
+- ~~**旧格式不迁移**：顶层 `kind` 的行被读侧按名字拒绝（`:old-contract`），fork 照直答 400 + 那个理由。~~
+  **主人 2026-09-28 改了这条口径**（原话：「旧格式拒绝回答，要求 Fork」）：旧格式要**读得动**，
+  **写得不得**，出路是 fork——读侧改宽读、写门仍拒、fork 把翻译写出去。整条见文末
+  「落地：旧格式迁移（2026-09-28）」。
 
 **判据数字**：`normalized` + `replay` + `fork` + `fork-http` + `sessions` + `trajectory` + `loop` +
 `stats` + `context` + `http` = **286 / 2047 / 0**（http 一套 189.7s）。新用例三条：缺行的那一份 fork 后
-**已重整化**且行在、被切的记录 fork 后**已重整化**、旧格式**按名字拒绝**；再一条幂等与一条「原会话字节不变」
+**已重整化**且行在、被切的记录 fork 后**已重整化**、旧格式**按名字拒绝**（这一条 2026-09-28 换成了
+「宽读 + 写门」，见文末）；再一条幂等与一条「原会话字节不变」
 在第一条用例里一起钉住。
 
 ## 落地：票 04（2026-09-28）
@@ -150,3 +153,53 @@ stash 掉本票的改动后在 HEAD 上同样红，所以不是这一票的账�
    「1 次工具调用没有 message 行答复」都画出来、Send 不在；
 3. 按「重整化（fork）」⇒ 页面切到 `[fork]`，会话回来、输入区可用；新记录里那一行在
    （`source "tool"`、`producer "kernel-message"`），原记录一个内容字节没动。
+
+## 落地：旧格式迁移（2026-09-28，主人拍定）
+
+**主人的那句话**：「旧格式拒绝回答，要求 Fork」。自洽的读法只有一种：**读侧宽读**（不宽读，fork 无
+从下手——fork 得先读得动它要重建的东西）、**写门一律拒**、**fork 是那把钥匙**（它读旧行、翻译、写出
+一份新格式的记录，原文件一个字节不动）。
+
+**为什么必须翻译**：`.scratch/jsonl-two-kinds` 的拍定 3 定的是「旧行不读、不迁移、不"顺带兼容"」，
+它成立的前提是「旧记录没有出路」。主人把出路指出来了（fork），而那条出路必须先读，所以
+`replay/read-line-rows` 见到顶层 `kind` **不再抛 `:old-contract`**，改走 `legacy-rows`：
+
+- **`input` 行拆开**：它本来就是**整个请求数组**，每条 message 各自成一行（`:id` 移到信封上，`:source`
+  由 role 推——那张对应表就是旧读者当时的行为，不是猜）；
+- 这一行剩下的东西（`:tools` / `:context` / `:state` …）原样留成一条 CUSTOM 帧、名字仍是旧的 `kind`，
+  **一个字都没丢**；
+- 其余 `kind` 行一条一行，包成 CUSTOM 帧。
+
+**每行带 `:old-contract <行号>`**。记号是读者的账、不是文件的内容：fork 写出翻译时 `dissoc` 掉它。
+带**行号**而不是 `true`，因为**一行会变成好几行**，而判据 (1) 那句「N 行还是旧格式」说的是**文件**的行
+数——`normalized/step` 收的是行号的**集合**，`count` 出来就是文件的数（`an-old-format` 那条夹具三行、
+五行，句子里说的仍是 3）。
+
+**一处既有的 bug 是这一票撞出来的**：`fork-session!` 里那句
+`(if (some? (replay/header? (first records))) 1 0)`——`header?` 答的是**布尔**，`some?` 对 `false` 也为
+真，于是**每一份没有 header 的记录 fork 时都被切掉第一行**（`lines` 那条分支同样中招）。以前每个 fork
+判例的夹具都带 header，所以它从没露面；旧格式记录正是没有 header 的那一类。现在只问一次 `skip`，
+两条分支共用。
+
+**没有做的事，如实写在这里**：
+
+- **`rebuild` 那道门没动**（与票 02 同一条：它是修缮门，修完交给门）。它在旧记录上仍然只写它一贯写的
+  东西——`session/rebuilt` 审计行，以及记录断在半路时的收尾帧；它**不翻译**，判据读出来仍是「旧格式」，
+  所以一份旧记录不会因为「在侧栏点开过一次」就被悄悄迁移。
+- **前端一行没改**：票 04 的提示与 fork 按钮吃的就是 `:normalizationReasons` 那几句话，旧记录只是多
+  一种理由，`ui` 的数字因此仍是票 04 那一轮。
+- **真机上的旧会话没有挨个打开过**：这一票的现场探针是 `dev/scratch_legacy_fold.clj`（临时目录里手搓
+  一份三行的旧记录，走 `fork-session!` 全路，印出翻译后的行与新记录的 sofar），加上套件里的夹具；
+  `~/.clj-harness` 里那 5 条旧记录一条都没被 fork 过。那一次的输出原样抄在
+  `evidence/legacy-migration.txt`（读数三件事都写在文件末尾）。
+
+**判据数字**：`normalized` + `replay` + `fork-http` = **54 / 291 / 0**；`http` = **117 / 1269 / 0**；
+后端全量 **1351 / 14165**，**5 条红**——4 条是 `HEAD` 上本来就红的（`hooks_test` 的 `PreCompact` 多带一个
+`:stdout`、`mcp_wired_test` 的 `mcp/connection` 行没落盘：`git stash` 掉这一笔改动后逐字同样红，已复现），
+1 条是 `http_test/an-overflow-refusal-compacts-aggressively-and-retries-in-one-turn` 的负载抖动（单独跑绿，
+这一笔没碰压缩）。跑完那句 `ISOLATION NOTE` 是本机那个活着的会话写的开发者家，不是失败。
+换了的那条判例：`http_test/an-old-record-reads-but-may-not-be-written-to`（`/sofar` 答 200 +
+「未重整化」+ 会话读得出来；`/api/agent` 答 409 `:reason "unnormalized"` 并点名 fork；文件一个字节不动），
+`fork_http_test/a-fork-normalizes-a-record-written-in-the-old-contract`（fork 的产物是新格式、读得动、
+原文件逐字不变），`replay_test/the-record-has-two-kinds-of-row-and-anything-else-is-refused-by-name`
+里那一节改成「旧行被**翻译**，不是被拒」。

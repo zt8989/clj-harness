@@ -74,10 +74,22 @@
   "一份记录的一行 -> 账本的下一步。`ctx` 用不上：这份账只看行自己的信封，不看位置。
 
   形状与 `harness.edge.replay` 的 folds 一致：`(fn [acc ctx [line-index row]] acc)`。"
-  [acc _ctx [_i row]]
-  (let [acc (if (and (contains? row :type) (contains? row :payload))
-              acc
-              (update acc :old inc))]
+  [acc _ctx [i row]]
+  (let [current? (and (contains? row :type) (contains? row :payload))
+        marked   (:old-contract row)
+        ;; A ROW THE READER TRANSLATED OUT OF THE OLD CONTRACT COUNTS HERE AS WHAT IT IS:
+        ;; `harness.edge.replay/legacy-rows` marks every row it made out of an old line, so 判据 (1)
+        ;; can still say 旧格式 about a record the reader was able to READ -- which is what tells the
+        ;; client to fork instead of writing.
+        ;;
+        ;; IT IS A SET OF FILE LINE NUMBERS, NOT A COUNTER. One old LINE becomes SEVERAL rows (an
+        ;; old `input` row was a whole request array), and the sentence this feeds names the number
+        ;; the FILE has -- every row of one line carries the same number, so `distinct` is that
+        ;; number. A row with neither an envelope nor a mark was built by hand (the reader always
+        ;; marks what it translates) and can only be counted as itself, by its row index.
+        acc      (if (and current? (nil? marked))
+                   acc
+                   (update acc :old (fnil conj #{}) (or marked [:row i])))]
     (if (= "message" (row-kind row))
       (if-some [call (answered-call row)]
         (update acc :answers conj call)
@@ -104,7 +116,7 @@
 
   注意 `:init` 是**一个 thunk**：`harness.edge.replay/folds-init` 调的是 `((:init fold))`——
   少一层就是 `ClassCastException: fn cannot be cast to Associative`。"
-  {:init (fn [] {:old 0 :opened #{} :closed #{} :calls #{} :answers #{} :parked #{}})
+  {:init (fn [] {:old #{} :opened #{} :closed #{} :calls #{} :answers #{} :parked #{}})
    :step step})
 
 (defn finish
@@ -119,7 +131,7 @@
         unanswered (remove answered calls)
         unclaimed  (remove calls answered)
         reasons    (cond-> []
-                     (pos? (long (or old 0))) (conj (str old " 行还是旧格式（没有 type/payload 信封）"))
+                     (seq old)        (conj (str (count old) " 行还是旧格式（没有 type/payload 信封）"))
                      (seq unclosed)   (conj (str (count unclosed) " 组 START 没有它的 END（信封没收尾）"))
                      (seq dangled)    (conj (str (count dangled) " 组 END 没有它的 START"))
                      (seq unanswered) (conj (str (count unanswered) " 次工具调用没有 message 行答复"))

@@ -153,21 +153,78 @@
        (= "CUSTOM" (:type frame))
        (not (contains? wire-custom-names (:name frame)))))
 
-(defn- read-row
-  "ONE LINE OF THE RECORD -> the row itself, validated: `{:type :payload :ts :runId ..}`.
+(defn- legacy-source
+  "The `:source` the OLD contract implied for one of its message maps, read off its role.
+  
+  IT IS A TRANSLATION AND NOT A GUESS: that contract wrote ONE array per action (the `input` row's
+  `:messages`) -- what the client sent PLUS what the conversation's birth wrote -- and its own reader
+  called every `user` message in it the CLIENT's. `opening` and `injection` did not exist as sources
+  then, so a birth block reads as the client's words; that is what the old build itself did with
+  these bytes (`.scratch/jsonl-two-kinds` 票 02 is the ticket that introduced the sources)."
+  [role]
+  (case role
+    "system"    "system-prompt"
+    "assistant" "model"
+    "tool"      "tool"
+    "client"))
 
-  NOTHING IS REWRITTEN ON THE WAY IN (2026-09-21, `.scratch/jsonl-two-kinds` 票 02). Until
-  this ticket the reader turned each line into `{:kind .. :payload ..}` on the way -- a
-  second shape every reader then spoke, which is exactly what ticket 01's comment called
-  the seam. What a reader holds now is what the file says, so an `:id` the writer put on a
-  row is visible to the reader that needs it (票 02's messages carry their own identity),
-  and there is one shape to reason about instead of two. The vocabulary for asking what a
-  row IS -- `kind`, `payload`, `message?`, `frame?` -- is derived in ONE place, below.
+(defn- legacy-message-row
+  "ONE message map of the old contract -> the `message` row it is today: the identity moves out of
+  the payload onto the envelope, exactly where the new writer puts it. N is the line this message
+  came out of, carried on the row itself (see `legacy-rows`)."
+  [row m n]
+  (cond-> (assoc (select-keys row [:ts :runId])
+                 :type "message"
+                 :source (legacy-source (:role m))
+                 :payload (dissoc m :id)
+                 :old-contract n)
+    (:id m) (assoc :id (:id m))))
 
-  THE READER IS STRICT, BY 拍定. A line that is not one of the two rows is a HARD failure that
-  names the line and the reason -- including a line from the OLD contract (`:kind` at the top
-  level), which is refused by name rather than read leniently: an old record is a record this
-  build cannot honestly fold (`.scratch/jsonl-two-kinds` 决定 3: 报错并提示开新会话)."
+(defn- legacy-rows
+  "ONE ROW OF THE OLD CONTRACT -> the rows it is today, IN ORDER. An `input` row splits into one row
+  per element of its `:messages` array (that row WAS the whole request array: 票 02 of
+  `.scratch/jsonl-two-kinds` gave every element its own line), and what is left of the row -- its
+  tools, its context, its state -- is kept as a fact under the old `:kind`, so nothing the line
+  carried is dropped.
+  
+  EVERY ROW IS MARKED `:old-contract N` -- N BEING THE 1-BASED LINE OF THE OLD FILE THIS ROW CAME
+  OUT OF, numbered the way the reader's own refusals number lines. Every row one line became carries
+  the SAME number, so the mark says two things at once: where a row came from, and -- counted as
+  DISTINCT values -- how many old LINES there were. 判据 (1) of `.scratch/record-normalization`
+  counts exactly that, which is why its sentence can name the FILE's number instead of the rows the
+  translation inflated it into: a record written that way READS (that is what makes a fork possible)
+  but is not one this build may WRITE to any further."
+  [row n]
+  (let [k    (:kind row)
+        p    (:payload row)
+        head (select-keys row [:ts :runId])]
+    (case k
+      "message" [(legacy-message-row row p n)]
+      "input"   (conj (mapv #(legacy-message-row row % n) (:messages p))
+                      (assoc head :type "event" :old-contract n
+                             :payload {:type "CUSTOM" :name "input"
+                                       :value (dissoc p :messages)}))
+      "event"   [(assoc head :type "event" :payload p :old-contract n)]
+      [(assoc head :type "event" :old-contract n
+              :payload {:type "CUSTOM" :name k :value p})])))
+
+(defn- read-line-rows
+  "ONE LINE OF THE RECORD -> the ROWS it is, as a VECTOR: usually one, more when the line is an old
+  `input` row (see `legacy-rows`).
+  
+  A CURRENT ROW IS NOT REWRITTEN ON THE WAY IN (2026-09-21, `.scratch/jsonl-two-kinds` 票 02). Until
+  that ticket the reader turned each line into a kind/payload pair on the way -- a second shape
+  every reader then spoke. What a reader holds now is what the file says, so an `:id` the writer put
+  on a row is visible to the reader that needs it, and the vocabulary for asking what a row IS
+  (`kind`, `payload`, `message?`, `frame?`) is derived in ONE place, below.
+  
+  THE OLD CONTRACT IS TRANSLATED, NOT REFUSED (owner, 2026-09-28). It used to be a hard failure by
+  name (`:old-contract`), on the reasoning that an old record is one this build cannot honestly
+  fold -- which is still true of WRITING to it. But the door out is the FORK, and a fork has to READ
+  the thing it rebuilds: so the reader translates (`legacy-rows`) and marks, the criterion counts the
+  marks, the write doors refuse BY THAT NAME and point at the fork, and the fork writes the
+  translation out. A line that is not JSON, is not an object, has no `payload`, or is of no known
+  row type is STILL a hard failure that names the line."
   [idx line]
   (let [n (inc idx)
         fail (fn [reason sentence]
@@ -181,19 +238,16 @@
         (fail :not-an-object "is not a JSON object")
 
         (contains? row :kind)
-        (fail :old-contract (str "is written in the old contract (`kind` at the top level);"
-                                 " this build reads only `event` and `message` rows --"
-                                 " start a new conversation, or read it with the build that"
-                                 " wrote it"))
+        (legacy-rows row n)
 
         (not (contains? row :payload))
         (fail :missing-payload "has no `payload`")
 
         (not (contains? row-types (:type row)))
         (fail :unknown-type (str "has type " (pr-str (:type row)) ", and a record row is"
-                                 " either \"event\" or \"message\""))
+                                 " either an event or a message"))
 
-        :else row))))
+        :else [row]))))
 
 (defn kind
   "WHAT A ROW IS, in the one word or name every reader of this file asks for:
@@ -260,19 +314,20 @@
   "Parse a log's lines into ROWS -- the file's own shape, validated. A line that will not
   parse -- or is not one of the record's two rows -- is a hard failure that names the line:
   a log killed mid-write must not be mistaken for a shorter conversation, and an
-  old-contract record must not be mistaken for an unreadable one (see `read-row`).
+  old-contract record is TRANSLATED rather than mistaken for an unreadable one -- and it may yield
+  MORE ROWS THAN LINES, because an old `input` row was a whole request array (see `read-line-rows`).
  
   LAZY (ticket 06): nothing is read until something is asked for, and a caller that folds
   the rows never holds them all. STRICT ON EVERY LINE, INCLUDING THE LAST -- the tolerance
   for a half-written final line is `read-records`' / `fold-records`' rule, not this one's,
   and a caller that only PROBES must force the seq itself."
   [lines]
-  (map-indexed read-row lines))
+  (mapcat read-line-rows (range) lines))
 
 (defn- rows-tolerating-a-torn-last-line
   "LINES -> the file's records, with the LAST line's parse TOLERATED: a half-written final
   line (the writer was mid-flush) is dropped, and EVERY OTHER LINE IS READ STRICTLY -- a
-  torn line in the middle is corruption and is refused by `read-row`.
+  torn line in the middle is corruption and is refused by `read-line-rows`.
  
   STREAMED BY HOLDING ONE LINE BACK, which is what makes 'drop the last line' work
   without `butlast` (recursive, a stack overflow on a 362k-line lazy seq) or `drop-last`
@@ -282,9 +337,9 @@
   (letfn [(step [idx held more]
             (lazy-seq
              (if-some [s (seq more)]
-               (cons (read-row idx held) (step (inc idx) (first s) (rest s)))
-               (when-some [row (try (read-row idx held) (catch Throwable _ nil))]
-                 (list row)))))]
+               (concat (read-line-rows idx held) (step (inc idx) (first s) (rest s)))
+               (when-some [rows (try (read-line-rows idx held) (catch Throwable _ nil))]
+                 rows))))]
     (when-some [s (seq lines)]
       (step 0 (first s) (rest s)))))
 

@@ -406,9 +406,7 @@
       (is (replay/header? r))
       (is (= {:format 2 :thread "t-1" :created 7} (replay/header-of r)))))
   (testing "and every other row is refused, naming the line and the reason"
-    (doseq [[line reason] [["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"
-                            :old-contract]
-                           ["{\"type\":\"input\",\"payload\":{}}" :unknown-type]
+    (doseq [[line reason] [["{\"type\":\"input\",\"payload\":{}}" :unknown-type]
                            ["{\"type\":\"event\"}" :missing-payload]
                            ["[1,2,3]" :not-an-object]
                            ["{\"type\":" :not-json]]]
@@ -421,14 +419,25 @@
         (is (= 2 (:line (ex-data e))) "the line that is wrong, not the first one")
         (is (= reason (:reason (ex-data e))))
         (is (re-find #"line 2" (ex-message e)) "and the sentence says which line"))))
-  (testing "an old record says what to do about it, in one sentence"
-    (let [e (try (doall (replay/lines->records
-                  ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{}}"]))
-                 nil
-                 (catch Exception e e))]
-      (is (re-find #"old contract" (ex-message e)))
-      (is (re-find #"start a new conversation" (ex-message e))
-          "a refusal a person can act on -- 决定 3 of the spec"))))
+  (testing "and an old-contract line is TRANSLATED, not refused (owner, 2026-09-28)"
+    ;; 主人那句话：旧格式**拒绝回答，要求 Fork**。读侧宽读（判据 1 才说得出「旧格式」），写门拒并指向
+    ;; fork，fork 把翻译写出去 —— 所以旧行在读者手里是**新信封 + 一个记号**。
+    (let [rows (replay/lines->records
+                ["{\"ts\":1,\"runId\":\"r1\",\"kind\":\"input\",\"payload\":{\"threadId\":\"t\",\"tools\":[],\"messages\":[{\"id\":\"u1\",\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"system\",\"content\":\"S\"}]}}"
+                 "{\"ts\":2,\"runId\":\"r1\",\"kind\":\"event\",\"payload\":{\"type\":\"RUN_FINISHED\"}}"
+                 "{\"ts\":3,\"runId\":null,\"kind\":\"provider/init\",\"payload\":{\"model\":\"m\"}}"])]
+      (testing "the input row SPLITS: one row per message, then what is left of it by name"
+        (is (= ["message" "message" "input" "event" "provider/init"]
+               (mapv replay/kind rows))))
+      (testing "and every row says where it came from"
+        (is (every? :old-contract rows))
+        (is (= "u1" (:id (first rows))) "the identity moved onto the envelope")
+        (is (= "client" (:source (first rows))) "and the role says whose words they are")
+        (is (= "system-prompt" (:source (second rows)))))
+      (testing "so the conversation reads -- and the record still may not be written to"
+        (is (= ["hi"] (mapv :content (replay/records->messages (vec rows)))))
+        (is (false? (:normalized? (normalized/normalized? rows))))
+        (is (= ["3 行还是旧格式（没有 type/payload 信封）"] (:reasons (normalized/normalized? rows))))))))
 
 (deftest a-header-is-not-part-of-the-conversation-and-a-fold-never-sees-it
   ;; THE CONTRACT THAT MAKES THE HEADER SAFE TO WRITE (ticket 06): a record that OPENS with the

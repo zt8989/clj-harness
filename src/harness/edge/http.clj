@@ -4151,7 +4151,11 @@
 
   THE CUT IS THE RECORD'S (`harness.edge.replay/fork-cut`), not this function's: the lines
   before it are what the new file holds, byte for byte, so the fork is the conversation as it
-  stood there rather than a re-rendering of it. CUT is {:step-seq n} -- a `step/end` line from
+  stood there rather than a re-rendering of it. THE ONE EXCEPTION IS A RECORD IN THE OLD CONTRACT
+  (owner, 2026-09-28): its rows are TRANSLATED on the way in (the reader did it, `replay/legacy-
+  rows`) and written out in the current format, because a fork is the only door that may rewrite
+  a record -- so it is also the door that turns an old one into one this build can continue.
+  CUT is {:step-seq n} -- a `step/end` line from
   `GET /api/threads/<stem>/fork-points`, which the fork KEEPS -- or nil for the last step there
   is. A line that is not a `step/end` is refused rather than rounded to the nearest one.
 
@@ -4178,9 +4182,29 @@
                            (str "no `step/end` in " thread-id
                                 ", so there is no line to fork after"))
                         {:reason :no-fork-point :thread-id thread-id :cut cut})))
-      (let [lines  (vec (replay/read-lines source))
-            keep   (subvec lines (if (some? (replay/header? (first records))) 1 0)
-                           (:cut where))
+      (let [
+            ;; THE LINES THE FORK COPIES ARE THE FILE'S OWN, BYTE FOR BYTE -- with ONE exception:
+            ;; a record written in the OLD CONTRACT (`.scratch/record-normalization`, owner
+            ;; 2026-09-28). The reader TRANSLATED those lines already (`replay/legacy-rows`, and each
+            ;; translated row carries `:old-contract`), so what is copied is the translation: the new
+            ;; file is in the current format from its first line, which is what makes the door out of an
+            ;; old record a fork at all. The two cases cannot share one `subvec` either: for such a
+            ;; record a row and a line are not one-to-one (an old `input` line becomes several rows),
+            ;; so `:cut` -- a RECORD index -- is what both branches slice by.
+            ;; WHETHER THE FILE OPENS WITH A HEADER -- asked ONCE, and about the RECORD (rows, not
+            ;; lines: a header is one of each, so one answer serves both slices).
+            ;;
+            ;; `header?` ANSWERS A BOOLEAN, and `some?` AROUND IT IS TRUE FOR EVERY ROW THERE IS: that
+            ;; wrapper is what used to drop the first line of a record whose first row is an
+            ;; ordinary one -- every record written before the header existed, which is exactly the
+            ;; old-contract records this branch was added for.
+            skip   (if (replay/header? (first records)) 1 0)
+            kept   (subvec records skip (:cut where))
+            legacy? (boolean (some :old-contract kept))
+            lines  (when-not legacy?
+                     (subvec (vec (replay/read-lines source))
+                             skip
+                             (:cut where)))
             folded (subvec records 0 (:cut where))
             new-id (str (java.util.UUID/randomUUID))
             dir    (project/binding-for thread-id)
@@ -4192,8 +4216,14 @@
         ;; that it did, so the new conversation opens with its own first line while every
         ;; line after it is the parent's.
         (when-some [h (header-line! dest)] (stream/push! new-id dest h))
-        (doseq [line keep]
-          (stream/push! new-id dest (str line "\n")))
+        (if legacy?
+          ;; THE TRANSLATION, WRITTEN OUT: `json/write-str` of the row the reader made of each old
+          ;; line (the marker itself is this process's bookkeeping and is not written -- the new file
+          ;; says what it IS, in the format that is current now).
+          (doseq [row kept]
+            (stream/push! new-id dest (str (json/write-str (dissoc row :old-contract)) "\n")))
+          (doseq [line lines]
+            (stream/push! new-id dest (str line "\n"))))
         (log! new-id nil "session/forked"
              {:from thread-id
               :seq  (:at where)})

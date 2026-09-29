@@ -6052,35 +6052,52 @@
        (is (= 200 (.statusCode (post-run "crash-gate")))
            "the session was locked out by a run that crashed")))))
 
-(deftest an-old-record-is-refused-by-name-over-http
-  ;; 拍定 3 OF `.scratch/jsonl-two-kinds`: an old-contract record is NOT migrated, not read
-  ;; leniently, and not quietly made to work -- the sentence a person meets sends them to a
-  ;; new conversation. The READER's refusal is pinned in `replay_test`; what is pinned HERE is
-  ;; that a client meets it as an ANSWER (`400` and a reason) rather than as a 500, an empty
-  ;; conversation, or a repair that rewrites a file this build cannot honestly fold.
+(deftest an-old-record-reads-but-may-not-be-written-to
+  ;; 主人 2026-09-28：「旧格式拒绝回答，要求 Fork」。读侧**宽读**（`replay/legacy-rows` 把 `kind` 那套翻成
+  ;; 新信封，每一行带一个 `:old-contract` 记号），所以只读的门答得出这场会话；**写门**一律拒并指向
+  ;; fork。旧记录本来被读侧按名字拒绝（`:old-contract`），那条决定在 `.scratch/jsonl-two-kinds` 决定 3
+  ;; 里 —— 这一条把它改成：能看，不能写，fork 是那把钥匙。
   (let [tid  (str "old-contract-" (java.util.UUID/randomUUID))
         f    (log-file tid)
-        body (str (json/write-str {:ts 1 :runId "r1" :kind "input"
-                                   :payload {:threadId tid
-                                             :append [{:id "u1" :role "user" :content "hi"}]}})
+        ;; THE SHAPE A REAL OLD RECORD HAS: an `input` row carrying the request's messages, the frame
+        ;; that ended its run, and the step a fork point hangs off. THREE LINES AND NOT ONE, for two
+        ;; reasons -- `read-records` tolerates a torn LAST line (a single-line record is swallowed as
+        ;; 'the writer was mid-flush', the trap 票 03 names), and a record that never reached a
+        ;; terminal frame is refused by `sofar` for a different reason entirely (`:unfinished`), which
+        ;; is not what this case is about.
+        body (str (str/join "\n" [(json/write-str {:ts 1 :runId "r1" :kind "input"
+                                                   :payload {:threadId tid
+                                                             :messages [{:id "u1" :role "user" :content "hi"}]}})
+                                 (json/write-str {:ts 2 :runId "r1" :kind "event"
+                                                  :payload {:type "RUN_FINISHED" :threadId tid :runId "r1"}})
+                                 (json/write-str {:ts 3 :runId nil :kind "step/end" :payload {}})])
                   "\n")]
     (.mkdirs (.getParentFile f))
     (spit f body :encoding "UTF-8")
+    ;; AND IT IS IN THE STORE, which is how a person meets an old conversation at all: the sidebar
+    ;; lists sessions, and a run continues one. Without this row the run door answers 404 'no session
+    ;; exists in this home' before it ever reaches the criterion -- the case would pass for the wrong
+    ;; reason, or (as it did) fail for one.
+    (project/register-session! tid)
     (with-server
      "old-contract-read"
      (fn []
-       (testing "reading it is a 400 that names the contract and says what to do"
-         (let [resp (api-call :get (str "/api/threads/" tid "/page") nil)
+       (testing "the read doors answer: the conversation is there, and the record is 未重整化"
+         (let [resp  (api-call :get (str "/api/threads/" tid "/sofar") nil)
                reply (read-json resp)]
-           (is (= 400 (.statusCode resp)))
-           (is (str/includes? (str (:error reply)) "old contract"))
-           (is (str/includes? (str (:error reply)) "start a new conversation"))))
-       (testing "and the rebuild door refuses the same file for the same reason"
-         (let [resp (api-call :post (str "/api/threads/" tid "/rebuild") nil)
+           (is (= 200 (.statusCode resp)))
+           (is (false? (:normalized reply)) "the criterion says 旧格式")
+           (is (some #(re-find #"旧格式" %) (:normalizationReasons reply)))
+           (is (= ["hi"] (mapv :content (:messages reply))) "and the conversation reads")))
+       (testing "and a run is refused, pointing at the fork"
+         (let [resp (api-call :post "/api/agent"
+                              (json/write-str {:threadId tid
+                                               :append [{:id "u2" :role "user" :content "go on"}]}))
                reply (read-json resp)]
-           (is (= 400 (.statusCode resp)))
-           (is (str/includes? (str (:error reply)) "old contract"))))
-       (testing "and the file is left EXACTLY as it was: unread, unmoved, unmigrated"
+           (is (= 409 (.statusCode resp)))
+           (is (= "unnormalized" (:reason reply)))
+           (is (str/includes? (:error reply) (str "/api/threads/" tid "/fork")))))
+       (testing "and the file is left EXACTLY as it was: unmoved, unmigrated, not repaired"
          (is (= body (slurp f :encoding "UTF-8"))))))))
 
 (defn- write-truncated-log!

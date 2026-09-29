@@ -1,0 +1,28 @@
+# 走查：旧格式记录，读得动 / 写得不得 / fork 是那把钥匙（2026-09-28）
+
+命令（本机，只读真家；夹具与产物全在临时目录里，跑完即删）：
+
+```
+clojure -J-Dstdout.encoding=UTF-8 -M:dev -m scratch-legacy-fold
+```
+
+一份**三行**的旧记录（顶层 `kind`：一条 `input` 带两条 message、一条 `RUN_FINISHED`、一条
+`step/end`），两半各印一次。下面是原样抄下来的输出：
+
+ROWS [["message" "client" 1 "user" "hi"] ["message" "system-prompt" 1 "system" "S"] ["input" nil 1 nil nil] ["event" nil 2 nil nil] ["step/end" nil 3 nil nil]]
+MESSAGES ["hi"]
+FORK-CUT {:cut 5, :at 4, :step-seq 4}
+FORKED f8bb47d7-2417-4ee4-a0d7-cda680723c18
+NEW RAW ("{\"ts\":1790642255058,\"runId\":null,\"producer\":\"record\",\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"record\\/header\",\"value\":{\"format\":2,\"thread\":\"f8bb47d7-2417-4ee4-a0d7-cda680723c18\",\"created\":1790642255058}}}" "{\"ts\":1,\"runId\":\"r1\",\"type\":\"message\",\"source\":\"client\",\"payload\":{\"role\":\"user\",\"content\":\"hi\"},\"id\":\"u1\"}" "{\"ts\":1,\"runId\":\"r1\",\"type\":\"message\",\"source\":\"system-prompt\",\"payload\":{\"role\":\"system\",\"content\":\"S\"}}" "{\"ts\":1,\"runId\":\"r1\",\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"input\",\"value\":{\"threadId\":\"src-legacy\"}}}" "{\"ts\":2,\"runId\":\"r1\",\"type\":\"event\",\"payload\":{\"type\":\"RUN_FINISHED\",\"threadId\":\"src-legacy\",\"runId\":\"r1\"}}" "{\"ts\":3,\"runId\":null,\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"step\\/end\",\"value\":{}}}" "{\"ts\":1790642255087,\"runId\":null,\"producer\":\"kernel-event\",\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"session\\/forked\",\"value\":{\"from\":\"src-legacy\",\"seq\":4}}}")
+NEW ROWS [["record/header" nil nil nil nil] ["message" "client" nil "user" "hi"] ["message" "system-prompt" nil "system" "S"] ["input" nil nil nil nil] ["event" nil nil nil nil] ["step/end" nil nil nil nil] ["session/forked" nil nil nil nil]]
+NEW SOFAR MESSAGES ["hi"]
+
+读数三件事：
+
+1. `ROWS` 里每行都带 `:old-contract <旧文件的行号>`：前三条都是 1（那条 `input` 拆成了 3 行），
+   后两条是 2、3 —— 所以判据那句「3 行还是旧格式」说的是**文件**的行数，不是翻译出来的 5 行；
+2. `FORK-CUT {:cut 5 :at 4}`：切点是最后那条 `step/end`，切在它**之后**（`cut` 是它 +1）；
+3. `NEW RAW` / `NEW ROWS` / `NEW SOFAR MESSAGES`：新记录第一条是**它自己的 header**，接着是翻译出来的
+   5 行（第一行 `hi` 在——那正是 `some?`+`header?` 那个 bug 切掉的那一行），**一个 `:old-contract` 都没有**，
+   折出来的消息是 `["hi"]`；原文件没在这段输出里，但用例 `a-fork-normalizes-a-record-written-in-the-old-contract`
+   逐字比过它。

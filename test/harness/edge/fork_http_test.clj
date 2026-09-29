@@ -347,9 +347,10 @@
           (is (some? (tool-row-for new-id "c1")) "and the call this record never answered has its row now"))
         (finally (stop))))))
 
-(deftest an-old-contract-record-is-refused-by-name-not-migrated
-  ;; 旧格式（顶层 `kind`）在今天**读都读不到**（`replay/read-row` 按名字拒绝 :old-contract），所以
-  ;; fork 也只能照直说。要不要真的迁移旧记录，是这一票里唯一还没定的取舍——先明确拒绝，别静默改写。
+(deftest a-fork-normalizes-a-record-written-in-the-old-contract
+  ;; 主人 2026-09-28：「旧格式拒绝回答，要求 Fork」—— 所以 fork 必须读得动它。读者把 `kind` 那套翻成新
+  ;; 信封（`input` 的每条 message 各成一行、其余事实按旧 `kind` 记名，每行带 `:old-contract` 记号），
+  ;; fork 再把翻译写出去：产物是新格式，读得动、续得上；原文件一个字节不动。
   (support/with-temp-env [_root _home]
     (let [stop (http/start! {:port 0})
           port (:local-port (meta stop))]
@@ -357,15 +358,22 @@
         (project/register-session! "src-old")
         (spit-lines! (log-file "src-old")
                      [(json/write-str {:ts 1 :runId "r1" :kind "input"
-                                       :payload {:threadId "src-old"}})
-                      ;; A SECOND LINE, because the reader tolerates ONE torn line at the END of a
-                      ;; file (`rows-tolerating-a-torn-last-line`) -- a single old-format line would be
-                      ;; swallowed as 'the writer was mid-flush' and this case would pass for the wrong
-                      ;; reason. EVERY OTHER LINE IS READ STRICTLY, and that is where the refusal is.
+                                       :payload {:threadId "src-old"
+                                                 :messages [{:id "u1" :role "user" :content "老会话里的一句话"}
+                                                            {:role "system" :content "S"}]}})
                       (json/write-str {:ts 2 :runId "r1" :kind "event"
-                                       :payload {:type "CUSTOM" :name "model/start" :value {}}})])
-        (let [{:keys [status body]} (post port "/api/threads/src-old/fork" {})]
-          (is (= 400 status))
-          (is (= "old-contract" (:reason body)) "the reader refuses it by name, and the route says so")
-          (is (str/includes? (:error body) "old contract")))
+                                       :payload {:type "RUN_FINISHED" :threadId "src-old" :runId "r1"}})
+                      (json/write-str {:ts 3 :runId nil :kind "step/end" :payload {}})])
+        (let [parent (slurp (log-file "src-old") :encoding "UTF-8")
+              {:keys [status body]} (post port "/api/threads/src-old/fork" {})
+              new-id (:threadId body)]
+          (is (= 200 status))
+          (testing "the fork's record is in the CURRENT format, and reads"
+            (let [answer (fetch port (str "/api/threads/" new-id "/sofar"))]
+              (is (true? (get-in answer [:body :normalized])))
+              (is (= ["老会话里的一句话"] (mapv :content (get-in answer [:body :messages]))))))
+          (testing "and nothing on it says 旧格式 any more"
+            (is (not-any? :old-contract (replay/read-records (log-file new-id)))))
+          (testing "the parent is untouched, byte for byte"
+            (is (= parent (slurp (log-file "src-old") :encoding "UTF-8")))))
         (finally (stop))))))

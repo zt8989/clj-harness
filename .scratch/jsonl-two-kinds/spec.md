@@ -21,6 +21,12 @@
   `event` 的 payload 就是那一帧）。可选的顶层 `source`，注入用 `"injection"`。
 - **严格读者**：缺 `type`、缺 `payload`、或 `type` 不是这两个之一 —— **一律抛异常**。破坏兼容是
   拍定的一部分：旧行不读、不迁移、不"顺带兼容"。
+
+> **2026-09-28：主人改了这条口径**（原话：「旧格式拒绝回答，要求 Fork」）。旧行现在**读得动、写得不得**
+> ——读侧把它翻成新信封（每一行带一个 `:old-contract` 记号，判据照旧说得出「旧格式」），写门一律拒并
+> 指向 fork，fork 把翻译写出去。换掉的只是「旧行不读」那半句；这份拍定的其余部分（只有两种行、判据是
+> 「AG-UI 的帧流能从 jsonl 重建出来」）一个字没动。落地记在
+> `.scratch/record-normalization/spec.md` 文末「落地：旧格式迁移（2026-09-28）」。
 - `type` 之外的一切键都是信封的事，**不进 payload**，所以 `id` / `source` / `ts` / `runId` 一个字节
   都不会漏给厂商——这是「payload 逐字」与「记录自带身份」能同时成立的原因。
 
@@ -81,6 +87,8 @@
   CUSTOM 帧，名字 = 原来的 kind）；`carry-audit!` 也走同一条路。
 - 读侧：`replay/row->record` **严格**——旧契约行（顶层 `kind`）按名字拒绝、缺 `payload`、
   非法 `type`、非对象、半行 JSON 各有 `:reason`，并带上 `:line`。
+  （**2026-09-28 起 `kind` 那一条不再是拒绝**：读者翻译它、每行盖 `:old-contract` 记号，判据与写门照旧
+  说得出「旧格式」——见本页顶上那条批注。）
 - ~~**`{:kind ..}` 仍然是内存里的 record 形状**，由 `row->record` 从信封**推导**~~ **（票 02 已拆掉这一层：
   内存里的 record 就是行本身，`row->record` 这个名字不存在了，问"这行是什么"改用 `replay/kind` / `payload`。
   下面这一段保留，是因为它是那道接缝的原始记录）**（`message` → `"message"`；
@@ -237,6 +245,9 @@ reasoning 与工具往返），拿 SSE 上收到的帧序列与记录里 `frame?
 - **老记录按名字拒绝**：`replay/read-row` 见到顶层 `kind` 抛 `:reason :old-contract`，句子里写明
   "这份记录是旧契约，请开一场新的会话"；`replay_test` 钉住这句话与理由，路由把它变成 400。
   现场的 `e538601f-…` 与其他旧会话都属于这一类——**不迁移、不顺带兼容**（拍定 3）。
+  **（2026-09-28 主人改口，这一条已被换掉：宽读 + 写门 + fork 翻译，见本页顶上那条批注。下面这两条用例
+  也随之改成 `http_test/an-old-record-reads-but-may-not-be-written-to` 与
+  `fork_http_test/a-fork-normalizes-a-record-written-in-the-old-contract`。）**
   用例：`http_test/an-old-record-is-refused-by-name-over-http`——一条手写的旧契约记录，`page` 与 `rebuild`
   两个门都答 **400**、句子里有 "old contract" 与 "start a new conversation"，而且**文件一个字节没动**
   （既不迁移也不修复）。
