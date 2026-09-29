@@ -42,18 +42,28 @@
   writer is only the door (it resolves the file and shapes the row's envelope).
 
   IT WAITS FOR THE DRAIN FIRST (`drained!`), because the row belongs AFTER the frames of the thing
-  it describes."
-  [barrier write! history added message]
-  (added! history added message)
-  ;; THE BARRIER IS THE RUN'S OWN CHANNEL, NOT THIS CALL'S GATED EMIT: the gate above stops
-  ;; forwarding a call's FRAMES once its attempt is over, and a control event that asked the
-  ;; consumer a question would be dropped there -- the kernel would wait out its whole deadline for
-  ;; an answer nobody was ever asked for.
-  ;;
-  ;; It IS reached through the CALL'S OWN gate when it can be (a live attempt), and the run's
-  ;; channel is what makes the answer ordered.
-  (barrier)
-  (write! message))
+  it describes.
+
+  AND IT IS DROPPED WHOLE WHEN THE ATTEMPT IS NO LONGER LISTENED TO (2026-09-29): the answer is
+  added and written only if this attempt WINS THE GATE from the guard that is waiting on it, and
+  the guard gives up by writing that same atom. A call that has been given up on KEEPS RUNNING --
+  a vendor has no process to kill, so what it says arrives late rather than never -- and an answer
+  that lands after the deadline would otherwise poison the run: it appends an assistant message
+  the frames never carried (the fold answers `replay/unpaired-model-row` about it) and, when that
+  message carries `tool_calls`, it leaves the NEXT attempt sending a request the vendor refuses --
+  an HTTP 400 the harness inflicts on itself, with no tool message answering the call."
+  [barrier write! history added message gate]
+  (when (compare-and-set! gate :open :announcing)
+    (added! history added message)
+    ;; THE BARRIER IS THE RUN'S OWN CHANNEL, NOT THIS CALL'S GATED EMIT: the gate above stops
+    ;; forwarding a call's FRAMES once its attempt is over, and a control event that asked the
+    ;; consumer a question would be dropped there -- the kernel would wait out its whole deadline for
+    ;; an answer nobody was ever asked for.
+    ;;
+    ;; It IS reached through the CALL'S OWN gate when it can be (a live attempt), and the run's
+    ;; channel is what makes the answer ordered.
+    (barrier)
+    (write! message)))
 
 (defn- call-position
   "The index in HISTORY of the assistant message that NAMED CALL-ID, or nil when no
@@ -189,7 +199,7 @@
   attempts (0 disables it); `:halted?` is asked first, so a run somebody stopped is not
   prolonged by a retry. A refusal this layer does not RECOGNISE, or a recovery that shortened
   nothing, is rethrown UNTOUCHED: the vendor's own words are what the run reports."
-  [provider history added emit write! barrier thread-id {:keys [on-overflow recoveries halted? tool-signature
+  [provider history added emit announce! thread-id {:keys [on-overflow recoveries halted? tool-signature
                                           idle-timeout-ms]
                                     :or {recoveries 1}
                                     :as _opts}]
@@ -217,7 +227,7 @@
                       ;; pair (`:model/start` .. `:model/end`): the edge writes that row before the
                       ;; `model/end` line lands, so a reader meets the request, the answer and the
                       ;; call's end IN THE ORDER THE RUN HAPPENED IN.
-                      (announced! barrier write! history added message)
+                      (announce! message)
                       (emit (ev/model-end telemetry))
                       {:message message})
                     (catch Throwable t
@@ -458,6 +468,11 @@
   answer is already on the client's screen (`timeout-sentence`); an ordinary failure is
   rethrown untouched; and a stop still wins over all of it.
 
+  AND AN ATTEMPT THAT IS GIVEN UP ON IS DROPPED, not merely unheard: the gate below is claimed
+  by the answer (`announced!`), so what a call says after its deadline reaches neither the
+  history, nor the run's account, nor the record. An answer that arrives late is an answer nobody
+  is waiting for, and adding it anyway would poison the NEXT attempt's request.
+
   OPTS carries the overflow recovery through to the call -- `:on-overflow` and the retry
   ceiling -- plus this guard's two knobs (`:idle-timeout-ms` and `:idle-timeout-retries`),
   neither of which the kernel reads from anywhere: the edge resolves them from harness.edn,
@@ -474,11 +489,13 @@
             last-at   (atom nil)
             seen?     (atom false)
             end-seen? (atom false)
-            ;; :open UNTIL THIS ATTEMPT IS OVER -- see the docstring. A closed gate keeps
-            ;; the LAST-AT it was handed, which nothing reads again.
+            ;; THE ATTEMPT'S OWN STATE OF BEING LISTENED TO (`announced!` reads it): `:open`
+            ;; while the vendor may still speak, `:announcing` once this attempt has claimed its
+            ;; answer, `:dropped` when the deadline below gave up on it. ONLY `:dropped` stops
+            ;; the frames -- an answer that has been claimed still owes its `model/end`.
             gate      (atom :open)
             call-emit (fn [e]
-                        (when (and (= :open @gate) (not (stop/rung? cancel)))
+                        (when (and (not= :dropped @gate) (not (stop/rung? cancel)))
                           (when (contains? alive (:type e))
                             (reset! last-at (System/currentTimeMillis)))
                           ;; WHAT COUNTS AS 'SAID SOMETHING' IS WHAT THE VENDOR SAID, not
@@ -490,8 +507,20 @@
                           (when (contains? arrived (:type e)) (reset! seen? true))
                           (when (= :model/end (:type e)) (reset! end-seen? true))
                           (emit e)))
+            ;; THE ONE WAY AN ANSWER REACHES THE HISTORY, THE ACCOUNT AND THE RECORD, handed to
+            ;; the call rather than reached from it because the gate above is the only thing that
+            ;; decides whether this attempt is still being listened to (`announced!`).
+            announce! (fn [message] (announced! barrier write! history added message gate))
+            ;; WHAT AN ATTEMPT THAT WON THAT GATE IS ANSWERED WITH when the deadline was firing in
+            ;; the same instant: its message is already in the history and on the record, so there
+            ;; is no retry to make and nothing to throw away -- the run continues with the answer.
+            late      (fn []
+                        (let [reply (await-call [ch] cancel nil)]
+                          (when (:stopped? reply) (stopped!))
+                          (let [v (:value reply)]
+                            (if (instance? Throwable v) (throw v) v))))
             _         (async/thread
-                        (async/>!! ch (try (model-call! provider history added call-emit write! barrier thread-id
+                        (async/>!! ch (try (model-call! provider history added call-emit announce! thread-id
                                                         (assoc opts :halted? #(stop/rung? cancel)))
                                            (catch Throwable t t))))
             answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
@@ -503,20 +532,29 @@
             ;; NOTHING WAS SAID AND THERE IS BUDGET LEFT: cut the attempt off and try
             ;; again. Its end is written here because its thread is still running.
             (and timed? (not emitted?) (< attempt (+ 1 limit)))
-            (do (reset! gate :closed)
-                (cut-off-call! end-seen? emit)
-                (emit (ev/model-timeout idle-ms attempt limit true false))
-                (recur (inc attempt)))
+            ;; DROPPING IT IS A CLAIM ON THE SAME GATE `announced!` CLAIMS, and the old value
+            ;; says which way the race went: `:announcing` means the attempt answered while the
+            ;; deadline was firing, so its message is already in the history and on the record --
+            ;; put the gate back (its `model/end` still follows that row) and take the answer
+            ;; instead of retrying into a history it has already poisoned.
+            (if (= :announcing (reset! gate :dropped))
+              (do (reset! gate :announcing) (late))
+              (do (cut-off-call! end-seen? emit)
+                  (emit (ev/model-timeout idle-ms attempt limit true false))
+                  (recur (inc attempt))))
 
             ;; EITHER the budget is spent or the answer had already begun: the run is over,
-            ;; and the frame says which of the two it was before the terminal does.
+            ;; and the frame says which of the two it was before the terminal does. THE SAME
+            ;; RACE IS SETTLED THE SAME WAY -- an answer that arrived in this instant is the
+            ;; answer, not a failure.
             timed?
-            (do (reset! gate :closed)
-                (cut-off-call! end-seen? emit)
-                (emit (ev/model-timeout idle-ms attempt limit false emitted?))
-                (throw (ex-info (timeout-sentence idle-ms attempt limit emitted?)
-                                {:llm/idle-timeout true :idle-ms idle-ms
-                                 :attempt attempt :limit limit :emitted emitted?})))
+            (if (= :announcing (reset! gate :dropped))
+              (do (reset! gate :announcing) (late))
+              (do (cut-off-call! end-seen? emit)
+                  (emit (ev/model-timeout idle-ms attempt limit false emitted?))
+                  (throw (ex-info (timeout-sentence idle-ms attempt limit emitted?)
+                                  {:llm/idle-timeout true :idle-ms idle-ms
+                                   :attempt attempt :limit limit :emitted emitted?}))))
 
             (instance? Throwable value) (throw value)
 

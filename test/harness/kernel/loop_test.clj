@@ -694,6 +694,53 @@
         (deliver released nil) ;; let the abandoned call finish, so the test leaves nothing behind
         (is (= 2 @calls) "and its late frames changed nothing")))))
 
+(deftest a-late-answer-is-dropped-whole-not-just-unheard
+  ;; THE OTHER SIDE OF THE SAME DEADLINE, and the one that used to hurt: an abandoned attempt's
+  ;; thread KEEPS RUNNING (a vendor has no process to kill), so its answer arrives LATE rather
+  ;; than never. It must reach NOTHING -- not the history, not the run's account, not the record.
+  ;; Left in anyway it is an assistant message carrying `tool_calls` with no tool message behind
+  ;; it, which is the request every OpenAI-shaped vendor refuses (`HTTP 400 ... insufficient tool
+  ;; messages following tool_calls message`), plus a `message` row no frame ever carried (the
+  ;; fold's `replay/unpaired-model-row`).
+  ;;
+  ;; THE LATE ANSWER LANDS WHILE THE SECOND ATTEMPT IS STILL IN FLIGHT, deliberately: the
+  ;; abandoned attempt's barrier is answered in this window (the consumer is still draining), so
+  ;; what the fix stops is over in milliseconds. Delivered after the run it would instead wait
+  ;; out `drained!`'s five-second deadline, and a case that only looks after the run would pass
+  ;; with the defect present.
+  (let [calls    (atom 0)
+        released (promise)
+        wrote    (atom [])
+        late     {:role "assistant" :content "too late"
+                  :tool_calls [{:id "call_late" :type "function"
+                                :function {:name "bash" :arguments "{}"}}]}]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                (if (= 1 (swap! calls inc))
+                                  (do @released {:message late :telemetry {}})
+                                  (do (deliver released nil)
+                                      ;; THE WINDOW: bounded, so this returns instead of hanging,
+                                      ;; and long enough that an answer that IS added would be
+                                      ;; added inside it.
+                                      (support/holds-within? #(seq @wrote) 300)
+                                      {:message {:role "assistant" :content "second"}
+                                       :telemetry {}})))]
+      (let [{:keys [history added seen]} (drive {} [] {:thread-id "t-idle-drop"
+                                                       ;; THE DEADLINE IS LONGER THAN THE WINDOW
+                                                       ;; BELOW: the second attempt must survive its
+                                                       ;; own wait and answer (see the stub).
+                                                       :idle-timeout-ms 1500
+                                                       :idle-timeout-retries 3
+                                                       :write! (fn [m] (swap! wrote conj m))})]
+        (is (= 2 @calls))
+        (is (= ["second"] (mapv :content @wrote))
+            "only the attempt that is still being listened to wrote a row")
+        (is (= ["second"] (mapv :content added))
+            "and only it reached the run's account")
+        (is (= ["second"] (mapv :content history)) "and the history")
+        ;; THE DEADLINE'S OWN SHAPE IS UNCHANGED: a start/end pair per attempt, and one card.
+        (is (= 1 (count (timeouts seen))))
+        (is (= 2 (count (ends seen))))))))
+
 (deftest a-run-handed-no-knobs-is-not-guarded
   ;; 'NOBODY SAID' IS NOT 'ZERO MILLISECONDS': a run handed no idle knobs has no retry
   ;; budget, and the provider's own failure is what ends it. The frame is still emitted --

@@ -16,7 +16,7 @@
   use -- and read FRESH on every call (harness.edn's own discipline: edit the file and the
   next run obeys it, no restart). A block that says nothing takes the defaults:
 
-      {:llm {:idle-timeout-ms     500     ; 0 turns the guard off
+      {:llm {:idle-timeout-ms     30000   ; 0 turns the guard off
              :idle-timeout-retries 3}}     ; retries AFTER the first attempt
 
   A VALUE THAT IS NOT A WHOLE NUMBER OF MILLISECONDS -- or of retries -- IS REFUSED BY
@@ -63,7 +63,7 @@
 (defn idle-timeout-ms
   "How long THREAD-ID's model calls may go without a line before the guard cuts them off,
   in milliseconds: harness.edn's `:llm :idle-timeout-ms`, defaulting to
-  `harness.kernel.llm/default-idle-timeout-ms` (500).
+  `harness.kernel.llm/default-idle-timeout-ms` (30000).
 
   THE DEFAULT LIVES IN THE KERNEL, not here: this is the knob's reader, and the one
   sentence about what the number MEANS belongs beside the code that enforces it."

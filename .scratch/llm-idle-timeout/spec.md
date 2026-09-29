@@ -127,3 +127,19 @@ kernel 的那个 deadline。
 「不落盘」的另一面，不是 bug。实测采样（同一场 run，每 100ms 看一次 DOM）：卡片**随着每次超时
 一张张加上去**（1 张 → 2 张 → …），run 一结束、窗口把那一轮换成记录里的版本，就一起消失，
 只剩 terminal 那句话里的同一件事。要让卡片活过刷新，只能让它进记录，而主人明确说了不落盘。
+
+## 修订（2026-09-29）——默认 500ms → 30000ms，且被放弃的尝试整条丢掉
+
+主人 2026-09-29 定的两件事：
+
+1. **默认空闲超时改成 30 秒**（`harness.kernel.llm/default-idle-timeout-ms`，`harness.edn.example`、
+   `docs/architecture/kernel.md` 与读取层 `harness.edge.llm-timeout` 同步改到为真）。500ms 量的是 harness
+   的耐心而不是厂商的健康：一次真实会话里，一条 500ms 被放弃的调用其实 ~550ms 就答了。
+2. **超时即整条丢弃**：被放弃的尝试此后说什么都不进 `history`、不进 run 的账、不落记录（`announced!` 与
+   放弃共用同一个 gate，谁先写谁说了算）。没有这一条，迟到的回答会把一条 `tool_calls` 没人回答的 assistant
+   消息留在历史末尾，下一次尝试就带着它去请求——2026-09-29 的一台真实机器上，这正是 `HTTP 400`,
+   `insufficient tool messages following tool_calls message` 的来路，也是 `replay/unpaired-model-row` 那行
+   告警（一个 run 被折一次就报一次）的来路。
+
+**代价（照实记）**：一个真死了的调用现在要 30 秒才被放弃，4 次尝试的最坏情形从 ~2 秒变成 ~2 分钟——
+这正是主人要的取舍（宁可等一个慢厂商，也不要一次自伤的 400）。这一帧仍然只上屏、不落盘。

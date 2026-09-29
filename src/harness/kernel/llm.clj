@@ -453,14 +453,20 @@
 
 (def default-idle-timeout-ms
   "How long a model call may go WITHOUT A SINGLE LINE of the vendor's stream before this
-  layer treats the connection as DEAD, in milliseconds: 500.
+  layer treats the connection as DEAD, in milliseconds: 30000.
 
-  A KNOB, AND DELIBERATELY TIGHT. Half a second of silence is the shape a vendor's
-  stream takes when it is not coming back, and the whole point of the guard is to stop
-  waiting for it rather than to be generous. `.scratch/llm-idle-timeout/spec.md` is the
-  decision; a session that finds it too tight raises it in harness.edn --
-  `:llm :idle-timeout-ms`, read by `harness.edge.llm-timeout`, which is also the reader
-  of the retry budget that goes with it -- and `0` turns the guard off entirely.
+  IT IS GENEROUS ON PURPOSE, and it was 500 ms until 2026-09-29. Half a second measures the
+  harness's patience rather than the vendor's health: a relay's first byte and a model's
+  prefill can easily take longer than that, and a deadline that fires inside that window
+  abandons a call that was about to answer -- measured on a real session that day: a vendor
+  that answered ~550 ms after the request was given up on at 500 ms, whose answer then
+  poisoned the next attempt's request (`harness.kernel.loop/announced!` says how). What the
+  guard is FOR is a call that says nothing AT ALL, and half a minute is still a scale at which
+  a person calls the connection dead. `.scratch/llm-idle-timeout/spec.md` is the decision and
+  carries the amendment; a session that wants a tighter deadline (a scripted provider, a
+  walk-through with a known pace) sets `:llm :idle-timeout-ms` in harness.edn, read by
+  `harness.edge.llm-timeout`, which is also the reader of the retry budget that goes with it --
+  and `0` turns the guard off entirely.
 
   THE NUMBER IS WRITTEN ONCE, HERE, and the edge's config reader takes its default from
   this var: two spellings would be two chances for 'the default' to mean two things.
@@ -469,7 +475,7 @@
   the honest reading of a missing key: nobody said, which is not the same as zero. The
   edge always hands one down (`harness.edge.http/run-agent!`), so production is always
   guarded; an offline run or a test's stub that says nothing waits as long as it likes."
-  500)
+  30000)
 
 (defn idle-timeout?
   "Is T the idle guard's own failure -- a call that produced no data for its IDLE-MS and

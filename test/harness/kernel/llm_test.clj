@@ -523,3 +523,12 @@
   (is (false? (llm/idle-timeout? (ex-info "something else" {}))))
   (is (false? (llm/idle-timeout? nil)))
   (is (true? (llm/idle-timeout? (ex-info "quiet" {:llm/idle-timeout true :idle-ms 500})))))
+
+(deftest the-default-deadline-is-half-a-minute
+  ;; THE NUMBER IS A DECISION AND NOT AN INCIDENTAL (2026-09-29: 500 ms -> 30 s). Half a second
+  ;; measured the harness's patience rather than the vendor's health -- a relay whose answer took
+  ;; ~550 ms was given up on, and what arrived afterwards poisoned the next attempt's request. The
+  ;; knob is harness.edn's (`harness.edge.llm-timeout`); THIS is the fallback a run handed no `:llm`
+  ;; block gets, and it is spelled in exactly one place so that 'the default' cannot mean two
+  ;; things.
+  (is (= 30000 llm/default-idle-timeout-ms)))
