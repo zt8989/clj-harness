@@ -15,6 +15,8 @@
             [harness.edge.ag-ui :as ag]
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
+            [harness.edge.mux :as mux]
+            [harness.edge.sessions :as sessions]
             [harness.edge.stats :as stats]
             [harness.edge.trajectory :as trajectory]
             [harness.fake :as fake]
@@ -1051,45 +1053,96 @@
                 "and it answers the SAME thing -- from the view, not from the file"))
           (finally (.renameTo moved f)))))))
 
+(defn- with-subscription
+  "A LIVE DOWNLINK SUBSCRIBED TO THREAD-ID for the duration of F.
+
+  THIS IS NOT DECORATION (`.scratch/memory-hygiene/` 票 02): the trajectory stream's doorbell is
+  OWNED by this conversation's live subscription, because the stream's OWN reader cannot be
+  observed at all -- http-kit reports no close for a plain streaming response and its `open?`
+  stays true after the client is gone (measured). A stream nobody is subscribed to is a BOUNDED
+  read, so a case that wants the push has to say who is listening. The channel is nil because
+  nothing here reads the downlink -- this is about the OWNERSHIP, not the frames."
+  [thread-id f]
+  (let [token (str "tok-" thread-id)]
+    (mux/attach! token nil)
+    (mux/subscribe! token thread-id (fn [] nil))
+    (try (f) (finally (mux/detach! token)))))
+
 (deftest a-later-turn-is-pushed-on-the-open-stream
   ;; TICKET 13: an open stream over a HELD session stays open and PUSHES the turns that
   ;; finalize after it opened -- no second GET, and no file read.
   (with-server "trajectory-push" [{:content "first"} {:content "second"}]
     (fn [port]
-      (let [path "/api/threads/trajectory-push/trajectory"]
-        (send-run! port "trajectory-push")
-        (await-run-recorded! "trajectory-push" 5000)
-        (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
-                       (.GET)
-                       (.build))
-              resp (.send (HttpClient/newHttpClient) req
-                          (HttpResponse$BodyHandlers/ofInputStream))
-              in   (.body resp)
-              rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
-          (try
-            (json/read-str (.readLine rd) :key-fn keyword) ; the header
-            (let [first-turn (json/read-str (.readLine rd) :key-fn keyword)
-                  _          (is (= 1 (:index first-turn)))
-                  ;; THE SECOND RUN HAPPENS WHILE THIS STREAM IS OPEN. The stream is read
-                  ;; until the SECOND turn arrives -- the open one is re-sent as it grows, so
-                  ;; the first line pushed is not necessarily the new turn.
-                  running    (future (send-run! port "trajectory-push" "u2"))
-                  pushed     (loop [left 50]
-                               (if (zero? left)
-                                 ::timeout
-                                 (let [line (deref (future (.readLine rd)) 15000 ::timeout)]
-                                   (cond
-                                     (or (= ::timeout line) (nil? line)) ::timeout
-                                     (= 2 (:index (json/read-str line :key-fn keyword)))
-                                     (json/read-str line :key-fn keyword)
-                                     :else (recur (dec left))))))]
-              (is (= 2 (:index pushed)) (str "pushed=" (pr-str pushed)))
-              (is (some? (deref running 15000 ::timeout)))
-              (is (= 2 (count (:turns (trajectory/trajectory-answer (trajectory/view-value "trajectory-push")))))
-                  "the view itself has both turns")
-              (is (= 2 (count (:turns (trajectory/log-trajectory (replay/locate (home/projects-dir) "trajectory-push")))))
-                  "a FRESH fold of the record has both turns"))
-            (finally (.close in))))))))
+      (with-subscription "trajectory-push"
+        (fn []
+          (let [path "/api/threads/trajectory-push/trajectory"]
+            (send-run! port "trajectory-push")
+            (await-run-recorded! "trajectory-push" 5000)
+            (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+                           (.GET)
+                           (.build))
+                  resp (.send (HttpClient/newHttpClient) req
+                              (HttpResponse$BodyHandlers/ofInputStream))
+                  in   (.body resp)
+                  rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
+              (try
+                (json/read-str (.readLine rd) :key-fn keyword) ; the header
+                (let [first-turn (json/read-str (.readLine rd) :key-fn keyword)
+                      _          (is (= 1 (:index first-turn)))
+                      ;; THE SECOND RUN HAPPENS WHILE THIS STREAM IS OPEN. The stream is read
+                      ;; until the SECOND turn arrives -- the open one is re-sent as it grows, so
+                      ;; the first line pushed is not necessarily the new turn.
+                      running    (future (send-run! port "trajectory-push" "u2"))
+                      pushed     (loop [left 50]
+                                   (if (zero? left)
+                                     ::timeout
+                                     (let [line (deref (future (.readLine rd)) 15000 ::timeout)]
+                                       (cond
+                                         (or (= ::timeout line) (nil? line)) ::timeout
+                                         (= 2 (:index (json/read-str line :key-fn keyword)))
+                                         (json/read-str line :key-fn keyword)
+                                         :else (recur (dec left))))))]
+                  (is (= 2 (:index pushed)) (str "pushed=" (pr-str pushed)))
+                  (is (some? (deref running 15000 ::timeout)))
+                  (is (= 2 (count (:turns (trajectory/trajectory-answer (trajectory/view-value "trajectory-push")))))
+                      "the view itself has both turns")
+                  (is (= 2 (count (:turns (trajectory/log-trajectory (replay/locate (home/projects-dir) "trajectory-push")))))
+                      "a FRESH fold of the record has both turns"))
+                (finally (.close in))))))))))
+
+(deftest a-stream-nobody-is-subscribed-to-ends-and-holds-nothing
+  ;; THE OTHER HALF OF 'DO NOT HOLD WHAT YOU CANNOT WATCH' (`.scratch/memory-hygiene/` 票 02): a
+  ;; reader with no owner -- a curl, a test, a page whose downlink is gone -- gets the fold it
+  ;; asked for and the stream ENDS. Before this, every one of those left a doorbell on the
+  ;; session for as long as the process lived, holding this response's channel and the folded
+  ;; payload in its closure.
+  (with-server "trajectory-lone" [{:content "alone"}]
+    (fn [port]
+      (send-run! port "trajectory-lone")
+      (await-run-recorded! "trajectory-lone" 5000)
+      (let [[status head turns] (get-trajectory port "/api/threads/trajectory-lone/trajectory" 1)]
+        (is (= 200 status))
+        (is (= "trajectory-lone" (:threadId head)))
+        (is (seq turns) "the reader still gets the whole fold")
+        (is (empty? (get (deref (var-get #'sessions/watchers)) "trajectory-lone"))
+            "and no doorbell was left for a stream nothing can watch")))))
+
+(deftest a-subscribed-stream-s-doorbell-dies-with-the-subscription
+  ;; THE TICKET'S FIRST ACCEPTANCE, at the door that needed it: the count goes to zero the
+  ;; moment the subscription ends -- NOT at the next idle sweep.
+  (with-server "trajectory-owned" [{:content "watched"}]
+    (fn [port]
+      (send-run! port "trajectory-owned")
+      (await-run-recorded! "trajectory-owned" 5000)
+      (let [bells (fn [] (get (deref (var-get #'sessions/watchers)) "trajectory-owned"))]
+        (mux/attach! "tok-owned" nil)
+        (mux/subscribe! "tok-owned" "trajectory-owned" (fn [] nil))
+        (get-trajectory port "/api/threads/trajectory-owned/trajectory" 1)
+        (is (= 2 (count (bells)))
+            "the subscription's own bell, and the stream's (owned by that subscription)")
+        (mux/detach! "tok-owned")
+        (is (empty? (bells))
+            "the socket went, and both bells went with it -- the stream's by the prune")))))
 
 (deftest the-endpoint-says-not-here-for-a-session-that-has-no-log
   (with-server "trajectory-no-log" [{:content "unused"}]

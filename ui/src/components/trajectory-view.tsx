@@ -56,6 +56,7 @@ import { useTranslation } from "react-i18next";
 
 import { formatMillis, formatTime, formatTokens } from "@/lib/format";
 import { asLanguage } from "@/lib/language";
+import { onDownlinkOpen } from "@/lib/mux";
 import { type TrajectoryItem, type TrajectoryPayload, type TrajectoryTurn, trajectoryFor } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 import { KIND_HUE } from "@/components/trajectory-colors";
@@ -554,24 +555,40 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
 
   useEffect(() => {
     let live = true;
-    const controller = new AbortController();
-    void trajectoryFor(
-      threadId,
-      (soFar) => {
-        // A late turn from a previous session must not land on this one.
-        if (live) setPayload(soFar);
-      },
-      controller.signal,
-    )
-      .then((next) => {
-        if (live && next !== null) setPayload(next);
-      })
-      .catch(() => {
-        // AN ABORT IS THE CLEANUP (a session change, a run settling, an unmount), not a
-        // failure: whatever arrived is already on screen.
-      });
+    let controller = new AbortController();
+    /// ONE READ, ASKED AGAIN WHENEVER THE STREAM HAS TO BE (a mount, a run settling, the
+    /// downlink coming back): the route keeps the connection open for pushes, so a second ask
+    /// REPLACES the first rather than stacking beside it.
+    const open = (): void => {
+      controller.abort();
+      controller = new AbortController();
+      void trajectoryFor(
+        threadId,
+        (soFar) => {
+          // A late turn from a previous session must not land on this one.
+          if (live) setPayload(soFar);
+        },
+        controller.signal,
+      )
+        .then((next) => {
+          if (live && next !== null) setPayload(next);
+        })
+        .catch(() => {
+          // AN ABORT IS THE CLEANUP (a session change, a run settling, an unmount), not a
+          // failure: whatever arrived is already on screen.
+        });
+    };
+    open();
+    /// AND A SOCKET THAT COMES BACK IS A GAP THIS STREAM CANNOT CLOSE ON ITS OWN
+    /// (`.scratch/memory-hygiene/` 票 02): the server cannot see this response's reader go
+    /// away, so the doorbell that pushes into it is OWNED by this page's downlink
+    /// subscription -- when the socket went, the server pruned it and the stream went quiet.
+    /// Coming back is therefore a fresh answer, the same repair every pane owes after a
+    /// reconnect (`docs/rules/panel-data.md`).
+    const stop = onDownlinkOpen(open);
     return () => {
       live = false;
+      stop();
       // CLOSING THE CONNECTION IS THE CLEANUP TOO: the route keeps it open for pushes, so a
       // view that went away would otherwise leave a watcher on the session.
       controller.abort();

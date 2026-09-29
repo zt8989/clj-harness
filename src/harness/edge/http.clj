@@ -3857,19 +3857,34 @@
                                             (when (pos? (count turns))
                                               (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
                           (push!)
-                          (when (some? held)
-                            ;; THE SESSION IS HELD HERE, so every change to it can be a push --
-                            ;; and the session's own doorbell is the notification.
+                          (if (and (some? held) (mux/watching? stem))
+                            ;; THE SESSION IS HELD *AND* SOMEBODY IS SUBSCRIBED TO IT, so every
+                            ;; change to it can be a push -- and the session's own doorbell is
+                            ;; the notification.
+                            ;;
+                            ;; AND THAT SUBSCRIPTION IS THE DOORBELL'S OWNER, which is the fix
+                            ;; this route needed (`.scratch/memory-hygiene/` 票 02): THIS
+                            ;; RESPONSE'S OWN CLIENT CANNOT BE OBSERVED AT ALL. http-kit reports
+                            ;; no close for a plain streaming channel and its `open?` stays true
+                            ;; after the reader is gone (measured), so a doorbell tied to this
+                            ;; socket outlives every tab that ever opened one -- holding this
+                            ;; closure (the channel, the folded payload) and pinning the session
+                            ;; in memory, because `watched?` counts it as a reader. The page's own
+                            ;; downlink IS observable, so that is what owns it.
                             (let [watcher (fn [_thread-id event]
                                             (case (:kind event)
                                               :entries (try (push!) (catch Throwable _ nil))
                                               :gone    (hk/close ch)
                                               nil))]
                               (reset! watching watcher)
-                              (sessions/watch! stem watcher)))
-                          ;; NOT HELD: there is nothing here to push from, so the stream ends
-                          ;; after the first load and the client is free to come back.
-                          (when (nil? held) (hk/close ch)))
+                              (sessions/watch! stem watcher (fn [] (mux/watching? stem))))
+                            ;; NOT PUSHABLE: this process does not hold the session (no view to
+                            ;; push from), or NOBODY IS SUBSCRIBED to it -- and a stream whose
+                            ;; reader is a bare HTTP client (a curl, a test) has no owner that
+                            ;; could ever end its doorbell. Either way the reader gets the fold
+                            ;; it asked for and the stream ENDS, which is the other half of 'do
+                            ;; not hold what you cannot watch'.
+                            (hk/close ch)))
                         (catch Throwable t
                           (log/error! :trajectory/stream-failed t {:threadId stem}))))
           :on-close (fn [_ch _status]

@@ -331,7 +331,10 @@
 ;; ------------------------------------------------------------------ the doorbell
 
 (defonce watchers
-  ;; thread-id -> #{fn}. SEE `watch!`: a notification, not a subscription.
+  ;; thread-id -> {fn alive?}. SEE `watch!`: a notification, not a subscription -- and the
+  ;; OWNER is the third of those three, spelled as the `alive?` half: a watcher whose owner
+  ;; is gone is not a reader, and a registry that cannot tell the difference is the leak
+  ;; `.scratch/memory-hygiene/` ticket 02 measured (`prune-watches!` is what lets it go).
   (atom {}))
 
 (defn watch!
@@ -349,15 +352,28 @@
   ..} -- the session was put away or its claim changed hands, and the window built on it
   is over. `:reason` is a value the reader can be told (`harness.edge.http`'s feed sends
   it as the last frame), because a stream that just stops leaves a replica believing
-  it has everything."
-  [thread-id f]
-  (swap! watchers update (str thread-id) (fnil conj #{}) f)
-  f)
+  it has everything.
+
+  ITS OWNER IS ITS THIRD ARGUMENT (`.scratch/memory-hygiene/` ticket 02). A watcher is a
+  CONNECTION's doorbell, and the connection is what says when the bell is dead: `alive?` is a
+  0-arg predicate the owner answers, asked by `prune-watches!` (the sweeper asks it every
+  tick). A caller that really does hold the thing in-process (a test, a dev scratch) passes
+  none -- `nil` reads as ALWAYS ALIVE and `unwatch!` is then the only thing that ends it --
+  but a route whose reader is a socket must not: THE SERVER CANNOT SEE A PLAIN STREAMING
+  RESPONSE'S CLIENT GO AWAY (measured: no `:on-close`, `open?` still true, writes still
+  'succeed' -- http-kit 2.8, `.scratch/memory-hygiene/` 票 02), so a watch registered for
+  one with no owner outlives its reader, holds its closure, and pins the session in memory
+  for as long as the process lives."
+  ([thread-id f] (watch! thread-id f nil))
+  ([thread-id f alive?]
+   (swap! watchers update (str thread-id) (fnil assoc {}) f alive?)
+   f))
 
 (defn unwatch!
   "Stop calling F for THREAD-ID."
   [thread-id f]
-  (swap! watchers update (str thread-id) disj f)
+  (swap! watchers update (str thread-id)
+         (fn [m] (when-some [m m] (not-empty (dissoc m f)))))
   nil)
 
 (defn- ring!
@@ -366,7 +382,10 @@
   (the landing) as well as on request threads, and a doorbell that can break the thing
   ringing it is worse than a missed one -- the next read catches up anyway."
   [thread-id event]
-  (doseq [f (get @watchers (str thread-id))]
+  ;; THE OWNER IS DROPPED HERE, and dropped at the CALL: what a watcher is handed is (THREAD-ID
+  ;; EVENT) -- the same two arguments it has always been handed, so the third one's
+  ;; bookkeeping never reaches a reader.
+  (doseq [[f _owner] (get @watchers (str thread-id))]
     (try (f (str thread-id) event) (catch Throwable _ nil)))
   nil)
 
@@ -410,6 +429,9 @@
   (swap! grown conj (str thread-id))
   nil)
 
+;; `watched?` lives with the lifetime it decides (`sweep!`), and this tick asks it too.
+(declare watched?)
+
 (defn ring-growth!
   "THE TICK: ring every conversation marked since the last one, if somebody is WATCHING it.
 
@@ -419,7 +441,9 @@
   [ ] ; no arguments
   (let [[before _] (swap-vals! grown (fn [_] #{}))]
     (doseq [tid before]
-      (when (seq (get @watchers tid))
+      ;; WATCHED MEANS SOMEONE CAN STILL BE RUNG (`watched?` asks each owner) -- a wall of
+      ;; dead doorbells is not an audience (`.scratch/memory-hygiene/` ticket 02).
+      (when (watched? tid)
         (ring! tid {:kind :entries})))))
 
 ;; ------------------------------------------------------------------- the views
@@ -1128,11 +1152,45 @@
     (ring! id {:kind :gone :reason :put-away})
     nil))
 
+(defn- owner-alive?
+  "Whether a WATCHER'S OWNER still answers (`watch!`'s third argument). `nil` is 'no owner'
+  and reads as alive; an owner that throws is gone -- a doorbell nobody can ask is not a
+  reader."
+  [owner]
+  (try (if (nil? owner) true (boolean (owner))) (catch Throwable _ false)))
+
+(defn prune-watches!
+  "FORGET THE WATCHERS WHOSE OWNER IS GONE -- one TID, or every conversation there is.
+  Answers the thread ids it dropped something for.
+
+  THIS IS HOW A SESSION GETS UNPINNED. `watched?` is what keeps an idle entry alive, and a
+  dead watcher's closure holds whatever it closed over (a socket, a payload, a page's whole
+  fold) for as long as its row is in this table -- so 'nobody can ask it' has to mean 'it is
+  gone', not 'it is ignored'. THE SWEEPER ASKS BEFORE IT DECIDES, and a door that knows its
+  own subscriptions just ended (`.scratch/memory-hygiene/` ticket 02: `harness.edge.mux`'s
+  release path) asks for the one conversation it let go."
+  [& [thread-id]]
+  (let [ids (if thread-id [(str thread-id)] (keys @watchers))]
+    (into []
+          (keep (fn [tid]
+                  (let [[before after]
+                        (swap-vals! watchers
+                                    (fn [m]
+                                      (if (contains? m tid)
+                                        (let [kept (not-empty
+                                                    (into {} (filter (fn [[_ owner]] (owner-alive? owner)))
+                                                          (get m tid)))]
+                                          (if kept (assoc m tid kept) (dissoc m tid)))
+                                        m)))]
+                    (when (not= before after) tid))))
+          ids)))
+
 (defn- watched?
-  "Is anything connected to TID's window right now? (`watch!` / `unwatch!`;
-  `harness.edge.http/stream-feed!` is the one caller that holds a connection open.)"
+  "Is anything connected to TID's window right now? A watcher whose owner is gone is not a
+  reader even before it is pruned -- `prune-watches!` is what takes the row out, and
+  `watch!`'s third argument is who decides."
   [tid]
-  (boolean (seq (get @watchers (str tid)))))
+  (boolean (some (fn [[_ owner]] (owner-alive? owner)) (get @watchers (str tid)))))
 
 (defn- evictable?
   "May TID's ENTRY be put away as of NOW? FOUR things, and every one of them is a reason
@@ -1145,7 +1203,9 @@
   never asked for anything, and the server does the same thing again half a minute later.
   A poll used to keep such a session alive by touching it on every read; a feed's
   connection is the same fact without the traffic, and `unwatch!` is what ends it
-  (http-kit's close handler, so a tab that goes away releases it)."
+  (http-kit's close handler, so a tab that goes away releases it). A WATCHER WHOSE OWNER SAYS
+  IT IS GONE COUNTS AS GONE TOO (`watch!`'s third argument, asked by `watched?` and taken out
+  of the table by `sweep!`'s own `prune-watches!` first)."
   [tid entry now]
   (and (empty? (:runs entry))
        (not (@unflushed? tid))
@@ -1158,6 +1218,10 @@
   milliseconds. Answers the ids it put away, in no particular order -- an answer rather
   than a count, because 'which one' is the only thing a reader can act on."
   [now]
+  ;; THE DEAD WATCHERS GO FIRST: a watcher whose owner is gone (a socket that went away) does
+  ;; not make a session present -- it keeps it HERE, with its closure and everything that
+  ;; closure holds. Prune, then decide (`.scratch/memory-hygiene/` ticket 02).
+  (prune-watches!)
   (let [[before after] (swap-vals! registry
                                    (fn [m]
                                      (into {} (remove (fn [[tid e]] (evictable? tid e now))) m)))

@@ -43,7 +43,7 @@
 
 ## 今天谁这么做了（这份文件就是它们的规矩）
 
-**没有欠账了**——四处都按上面那两半走（2026-09-29 复查过每一条都落在代码里）：
+**没有欠账了**——五处都按上面那两半走（2026-09-29 复查过每一条都落在代码里）：
 
 - **左侧清单**：挂载一次 `GET /api/projects`，之后每一个 host 级变化（run 起止、别窗发送、项目增删、
   归档）由 `events.host` 推来（`ui/src/components/sidebar.tsx` + `ui/src/lib/host.ts`，ADR 0004）。
@@ -59,6 +59,13 @@
   自己 ring 一次 host 流）。在它之前，每一个还没开聊的会话的 composer 都会各发一次 `GET /api/projects`。
 - **composer 下面那条统计条**：挂载一次 `GET …/stats`，之后 `model/end` 推着走，
   `ui/src/components/composer-numbers.tsx` 明写 `THERE IS NO POLLING`。本文件是从它开始写的。
+- **trajectory 那一栏**（`.scratch/memory-hygiene/` 票 02，2026-09-29）：挂载一次（换会话、run 落定也各一次）
+  读一次 `GET /api/threads/<stem>/trajectory`，之后由**服务端推**——只是推它走的不是下行 socket，
+  而是这条响应自己，而它的门铃**归这一页的下行订阅所有**（服务端看不见一条普通流式响应的读者走没走，
+  实测 `open?` 在读者走了以后还是 true）。所以**重连之后它要再问一次**：`onDownlinkOpen`
+  （`ui/src/lib/mux.ts`）叫它重开，`ui/src/components/trajectory-view.tsx` 是唯一的读者；没有人在订阅
+  这场会话时，服务端把折好的那一份给完就结束，不留门铃。
 
-把这四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与左栏那一半）；目录选择器那一处是
-2026-09-29 随手合上的。
+**没有欠账了**——上面五处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
+左栏那一半）；目录选择器那一处是 2026-09-29 随手合上的，trajectory 那一处同一天随
+`.scratch/memory-hygiene/` 票 02 一起（它本来就在推，缺的是「重连之后补一次」。）

@@ -179,15 +179,62 @@
   ;; watching their conversation get rebuilt on a timer. The pin ends where the
   ;; connection does (`unwatch!`, which is http-kit's close handler).
   (sessions/touch! "t-watched")
-  (sessions/watch! "t-watched" (fn [_ _] nil))
-  (let [touched (:touched-at (get (sessions/live) "t-watched"))
-        later   (+ touched (* 100 sessions/idle-ttl-ms))]
-    (testing "however long nobody touches it, a watched session stays"
-      (is (= [] (sessions/sweep! later)))
-      (is (contains? (sessions/live) "t-watched")))
-    (testing "and when the window closes it is eligible again"
-      (sessions/unwatch! "t-watched" (first (get (deref (var-get #'sessions/watchers)) "t-watched")))
-      (is (= ["t-watched"] (sessions/sweep! later))))))
+  (let [bell (fn [_ _] nil)]
+    ;; THE BELL IS HELD HERE rather than dug back out of the table: the table is keyed by the
+    ;; fn now (`watch!`'s fourth line of documentation) and a case that asks it what it put
+    ;; there is testing the shape rather than the pin.
+    (sessions/watch! "t-watched" bell)
+    (let [touched (:touched-at (get (sessions/live) "t-watched"))
+          later   (+ touched (* 100 sessions/idle-ttl-ms))]
+      (testing "however long nobody touches it, a watched session stays"
+        (is (= [] (sessions/sweep! later)))
+        (is (contains? (sessions/live) "t-watched")))
+      (testing "and when the window closes it is eligible again"
+        (sessions/unwatch! "t-watched" bell)
+        (is (= ["t-watched"] (sessions/sweep! later)))))))
+
+(deftest a-watcher-whose-owner-is-gone-does-not-hold-the-session
+  ;; (`.scratch/memory-hygiene/` 票 02) A DOORBELL IS NOT A READER ONCE NOBODY CAN RING IT.
+  ;; `watch!`'s third argument is the owner, and the sweep asks it before it decides: without
+  ;; that question the last reader of a conversation that went away is a pin for as long as the
+  ;; process lives -- and the closure it holds (a socket, a page's whole folded payload) sits in
+  ;; memory with it.
+  (sessions/touch! "t-orphan")
+  (let [owner (atom true)
+        bell  (fn [_ _] nil)]
+    (sessions/watch! "t-orphan" bell (fn [] @owner))
+    (let [touched (:touched-at (get (sessions/live) "t-orphan"))
+          later   (+ touched (* 100 sessions/idle-ttl-ms))]
+      (testing "while the owner answers, it is a pin like any other"
+        (is (= [] (sessions/sweep! later)))
+        (is (contains? (sessions/live) "t-orphan")))
+      (testing "and the moment the owner says it is gone, the sweep hands the session back"
+        (reset! owner false)
+        (is (= ["t-orphan"] (sessions/sweep! later)))
+        (is (not (contains? (sessions/live) "t-orphan"))))
+      (testing "and the dead bell is FORGOTTEN, not merely ignored -- it held a closure"
+        (is (empty? (get (deref (var-get #'sessions/watchers)) "t-orphan")))))))
+
+(deftest pruning-answers-which-conversations-lost-a-reader
+  ;; The door that can see its own subscriptions end (`harness.edge.mux/detach!`) prunes THAT
+  ;; conversation rather than waiting for the sweeper, and it has to be able to name it: the
+  ;; answer is the ids it dropped something for, not a count.
+  (let [live  (fn [_ _] nil)
+        gone  (fn [_ _] nil)]
+    (sessions/watch! "t-live" live)
+    (sessions/watch! "t-live" gone (fn [] false))
+    (sessions/watch! "t-gone" gone (fn [] false))
+    (testing "one conversation"
+      (is (= ["t-gone"] (sessions/prune-watches! "t-gone")))
+      (is (= [] (sessions/prune-watches! "t-gone")) "and asking again finds nothing left"))
+    (testing "and it names the conversation whose DEAD bell it took out"
+      (is (= ["t-live"] (sessions/prune-watches! "t-live")))
+      (is (= 1 (count (get (deref (var-get #'sessions/watchers)) "t-live")))
+          "the live reader is still in the table -- pruning is not 'forget anything'"))
+    (testing "and the sweep's own form, once there is nothing dead left to take"
+      (is (not (contains? (set (sessions/prune-watches!)) "t-live"))
+          "a conversation whose readers are all alive is not a name it answers with")
+      (sessions/unwatch! "t-live" live))))
 
 (deftest bytes-that-have-not-reached-the-record-hold-a-session
   (sessions/touch! "t-pending")
