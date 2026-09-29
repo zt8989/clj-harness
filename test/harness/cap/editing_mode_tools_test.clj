@@ -45,7 +45,7 @@
   home's mode and not DIR's."
   [thread-id dir mode]
   (project/bind! thread-id dir)
-  (support/write-session! {:editing {:mode mode}}))
+  (support/write-session! (str "{:editing {:mode " mode "}}")))
 
 (defn- spec-names
   ([thread-id] (mapv #(get-in % [:function :name]) (tools/specs thread-id))))

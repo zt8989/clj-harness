@@ -35,8 +35,8 @@
     (try (f) (finally (doseq [td teardowns] (td))))))
 
 (defn- each-test-gets-its-own-home [f]
-  ;; A HOME OF THE TEST'S OWN, per AGENTS.md, because the definitions reader opens a
-  ;; USER-level harness.edn -- a file that belongs to whichever root is in force, and
+  ;; A HOME OF THE TEST'S OWN, per AGENTS.md, because the definitions reader opens
+  ;; this home's config.edn -- a file that belongs to whichever root is in force, and
   ;; the run-wide root belongs to every namespace in this JVM. Writing the cases'
   ;; declarations there and wiping them afterwards is a delete against a directory
   ;; somebody else is also reading, and it puts the wipe's correctness in the way of
@@ -55,10 +55,10 @@
 (defn- range-of [name]
   (set (keys (subagents/table-for "sa-parent" (definition name)))))
 
-(defn- write-user-harness-edn!
-  "A user-level harness.edn, as the settings form would leave it."
+(defn- write-session!
+  "A :session block in this home's config.edn, as the settings form would leave it."
   [edn]
-  (spit (io/file (home/root) "harness.edn") (pr-str edn) :encoding "UTF-8"))
+  (support/write-session! (pr-str edn)))
 
 ;; ------------------------------------------------------------------ the floor
 
@@ -275,10 +275,10 @@
     (is (= {:name "x" :description "" :baseline :read-only :exclude ["read"]}
            (subagents/check-entry! "x" {:baseline :read-only :exclude ["read"]})))))
 
-;; -------------------------------------------------------- harness.edn, the file
+;; -------------------------------------------------------- config.edn, the file
 
 (deftest a-user-entry-replaces-a-built-in-in-place
-  (write-user-harness-edn! {:subagents {"explore" {:baseline :read-only
+  (write-session! {:subagents {"explore" {:baseline :read-only
                                                    :exclude ["read"]
                                                    :description "a narrower explorer"}}})
   (let [defs (definitions)]
@@ -290,7 +290,7 @@
     (is (= :all (:baseline (definition "general"))) "and the other built-in is untouched")))
 
 (deftest a-custom-entry-is-appended-to-the-built-ins
-  (write-user-harness-edn! {:subagents {"auditor" {:baseline :read-only
+  (write-session! {:subagents {"auditor" {:baseline :read-only
                                                    :exclude ["web_fetch"]
                                                    :description "reads only files"}}})
   (let [defs (definitions)]
@@ -303,7 +303,7 @@
   ;; reader that threw would turn one typo in an optional block into a harness
   ;; that cannot talk to a model at all. The first thing it could not honour is
   ;; reported instead, and the delegation is what refuses.
-  (write-user-harness-edn! {:subagents {"broken" {:baseline :read-write}}})
+  (write-session! {:subagents {"broken" {:baseline :read-write}}})
   (let [defs (definitions)]
     (is (str/includes? (:problem defs) "baseline")
         "the problem says what was wrong")
@@ -311,14 +311,14 @@
         "and the built-ins are exactly as they were")))
 
 (deftest a-subagents-block-that-is-not-a-map-is-reported-not-obeyed
-  (write-user-harness-edn! {:subagents ["general"]})
+  (write-session! {:subagents ["general"]})
   (let [defs (definitions)]
     (is (str/includes? (:problem defs) "must be a map"))
     (is (= ["general" "explore"] (subagents/known-names defs)))))
 
 (deftest the-report-names-the-file-a-person-has-to-open
-  (write-user-harness-edn! {:subagents {"broken" {:baseline :nope}}})
-  (is (= (.getAbsolutePath (io/file (home/root) "harness.edn"))
+  (write-session! {:subagents {"broken" {:baseline :nope}}})
+  (is (= (project/harness-config-path)
          (:path (definitions)))
       "a broken block is only actionable once the reader knows which file to open"))
 
@@ -336,8 +336,8 @@
 (defn- home-snapshot
   "Every file in the configuration home with its size -- what 'the home did not move'
   means, measured over the whole home rather than asserted about the one file a
-  write happens to name. A save that created a `.bak`, or a `harness.edn` in a home
-  that had none, shows up here."
+  write happens to name. A save that created a `.bak` in a home that had none shows
+  up here."
   []
   (->> (file-seq (io/file (home/root)))
        (filter #(.isFile %))
@@ -362,36 +362,37 @@
       "and the row carries the shape the screen draws: baseline plus exclusions"))
 
 (deftest a-save-writes-the-block-it-owns-and-leaves-every-other-key-alone
-  (write-user-harness-edn! {:editing {:mode :hashline}
+  (write-session! {:editing {:mode :hashline}
                             :skills {:roots ["~/skills"]}
                             :subagents {"explore" {:baseline :read-only
                                                    :exclude ["read"]
                                                    :description "was here first"}}})
-  (let [before (text-of "harness.edn")]
+  (let [before (text-of "config.edn")]
     (put! "auditor" {:baseline "read-only" :description "reads and reports"
                      :exclude ["web_search"]})
-    (let [raw (edn/read-string (text-of "harness.edn"))]
-      (is (= {:mode :hashline} (:editing raw)) "the keys this namespace does not own come through")
-      (is (= {:roots ["~/skills"]} (:skills raw)))
+    (let [raw (edn/read-string (text-of "config.edn"))]
+      (is (= {:mode :hashline} (get-in raw [:session :editing]))
+          "the keys this namespace does not own come through")
+      (is (= {:roots ["~/skills"]} (get-in raw [:session :skills])))
       (is (= {:baseline :read-only :exclude ["read"] :description "was here first"}
-             (get-in raw [:subagents "explore"]))
+             (get-in raw [:session :subagents "explore"]))
           "and so does the entry the save did not touch")
       (is (= {:baseline :read-only :exclude ["web_search"] :description "reads and reports"}
-             (get-in raw [:subagents "auditor"])))
+             (get-in raw [:session :subagents "auditor"])))
       (is (= "was here first" (:description (definition "explore")))
           "the reader sees the same thing the file says")
       (is (= ["general" "explore" "auditor"] (subagents/known-names (definitions)))
           "a custom name is appended after the built-ins"))
-    (is (= before (text-of "harness.edn.bak"))
+    (is (= before (text-of "config.edn.bak"))
         "and the version it replaced is beside it, whole")))
 
 (deftest a-second-save-takes-the-spring-backup-rather-than-the-first
   ;; One generation, stated as a claim: the backup is the file as it stood BEFORE
   ;; this write, not the file as it stood before some earlier one.
   (put! "auditor" {:baseline "read-only" :description "first"})
-  (let [first-write (text-of "harness.edn")]
+  (let [first-write (text-of "config.edn")]
     (put! "auditor" {:baseline "read-only" :description "second"} true)
-    (is (= first-write (text-of "harness.edn.bak")))
+    (is (= first-write (text-of "config.edn.bak")))
     (is (= "second" (:description (definition "auditor"))))))
 
 (deftest a-new-name-is-refused-when-it-is-already-taken
@@ -409,11 +410,12 @@
 
 (deftest every-refusal-a-form-can-show-leaves-the-home-byte-for-byte
   ;; THE PROMISE THE FORM MAKES WHEN IT KEEPS THE FORM OPEN: the sentence is the
-  ;; whole of what happened. Measured over the home rather than over harness.edn,
+  ;; whole of what happened. Measured over the home rather than over config.edn,
   ;; because the failure worth catching is a REFUSAL THAT CREATED SOMETHING -- a
   ;; backup, or a file in a home that had none.
-  (testing "in a home that has no harness.edn yet"
-    (let [before (home-snapshot)]
+  (testing "in a home whose config.edn says nothing about subagents"
+    (let [before (home-snapshot)
+          text   (text-of "config.edn")]
       (doseq [[what thunk] [["a blank name"      #(put! "  " {:baseline "all"})]
                             ["a baseline nobody knows" #(put! "x" {:baseline "read/write"})]
                             ["an exclusion naming no tool" #(put! "x" {:baseline "all"
@@ -422,11 +424,11 @@
                                                                     :exclude ["eval"]})]
                             ["an unknown key" #(put! "x" {:baseline "all" :allow ["eval"]})]]]
         (is (thrown? Exception (thunk)) what)
-        (is (nil? (text-of "harness.edn")) (str what " -- and no file appeared"))
-        (is (nil? (text-of "harness.edn.bak")) (str what " -- and no backup either")))
+        (is (= text (text-of "config.edn")) (str what " -- and not a byte of the file moved")))
+      (is (nil? (text-of "config.edn.bak")) "no backup either: the write never happened")
       (is (= before (home-snapshot)))))
   (testing "and in one that has a file"
-    (write-user-harness-edn! {:editing {:mode :hashline}})
+    (write-session! {:editing {:mode :hashline}})
     (let [before (home-snapshot)]
       (doseq [thunk [#(put! "x" {:baseline "read/write"})
                      #(put! "x" {:baseline "all" :exclude ["eval"]})
@@ -436,11 +438,11 @@
 
 (deftest a-save-is-refused-while-the-file-holds-an-entry-nobody-can-honour
   ;; The reader is tolerant and the WRITER is not, and this is the case that tells
-  ;; them apart: a harness.edn somebody hand-edited into a broken entry has to leave
+  ;; them apart: a config.edn somebody hand-edited into a broken entry has to leave
   ;; a harness that still runs, so reading reports it and carries on. A save is a
   ;; person asking for a change, and rewriting a block the next read would refuse is
   ;; the one outcome worse than refusing the save.
-  (write-user-harness-edn! {:subagents {"broken" {:baseline :nope}}})
+  (write-session! {:subagents {"broken" {:baseline :nope}}})
   (let [before (home-snapshot)]
     (is (thrown-with-msg? Exception #"baseline of \"broken\" must be"
                           (put! "auditor" {:baseline "read-only"})))
@@ -452,7 +454,7 @@
     (is (= ["general" "explore" "auditor"] (subagents/known-names (definitions))))
     (is (= "auditor" (:name (subagents/remove-definition! "auditor"))))
     (is (= ["general" "explore"] (subagents/known-names (definitions))))
-    (is (contains? (edn/read-string (text-of "harness.edn")) :subagents)
+    (is (contains? (get-in (edn/read-string (text-of "config.edn")) [:session]) :subagents)
         "the block stays, empty of custom entries -- removing one is not removing the key"))
   (testing "a built-in cannot, and the refusal says what to do instead"
     (let [before (home-snapshot)]

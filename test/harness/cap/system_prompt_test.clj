@@ -314,21 +314,23 @@
     (testing "and no strict sentence, because this project is not strict"
       (is (not (str/includes? proj ":strict true"))))))
 
-(deftest a-strict-project-takes-its-own-directory-out-of-the-free-set
+(deftest a-strict-home-takes-the-project-directory-out-of-the-free-set
   ;; The acceptance criterion that keeps this block from stating a rule that does
   ;; not hold: under :approval {:strict true} a path inside the project parks too,
-  ;; so listing the project directory as free would be the lie.
+  ;; so listing the project directory as free would be the lie. ONE LEVEL NOW, so
+  ;; 'strict' is this HOME's setting rather than one project's -- the sentence the
+  ;; block must state is about the bound directory, and that is what it is read for.
   (let [dir (io/file (home/root) "sp-projects/strict")]
-    (.mkdirs (io/file dir ".harness"))
-    (spit (io/file dir ".harness/harness.edn") (pr-str {:approval {:strict true}})
-          :encoding "UTF-8")
+    (.mkdirs dir)
     (project/bind! "sp-proj-strict" (str dir))
+    (support/write-session! {:approval {:strict true}})
     (let [proj (block (:text (assemble-run "sp-proj-strict")) "project")]
       (is (str/includes? proj (str "bound to: " dir)))
       (is (str/includes? proj ":approval {:strict true}"))
       (is (str/includes? proj "paths inside it park too"))
       (is (not (str/includes? proj (str dir " -- this project")))
-          "the project directory is NOT in the free list -- that would be the lie"))))
+          "the project directory is NOT in the free list -- that would be the lie"))
+    (support/wipe-session!)))
 
 (deftest the-project-block-follows-a-rebind-and-an-unbind
   (testing "unbound: it says so, and says where relative paths land instead"

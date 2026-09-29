@@ -63,15 +63,15 @@
 ;; else here runs unbound, which since ticket 12 means anchor editing.
 (use-fixtures :each
   (fn [f]
-    (let [f' (io/file dir ".harness" "harness.edn")]
-      (.mkdirs (.getParentFile f'))
-      (spit f' "{:editing {:mode :str-replace}}" :encoding "UTF-8"))
+    ;; The mode is THIS HOME's now, not the project's: the fixture writes the session
+    ;; section and takes it out again, because config.edn is shared by the whole run.
+    (support/write-session! "{:editing {:mode :str-replace}}")
     (project/bind! "tt-strrep-toolset" dir)
     (project/bind! "tt-edit" dir)
     (f)
     (project/bind! "tt-strrep-toolset" nil)
     (project/bind! "tt-edit" nil)
-    (io/delete-file (io/file dir ".harness") true)))
+    (support/wipe-session!)))
 
 (defn- tmp [name] (str dir "/" name))
 
@@ -97,9 +97,7 @@
   they mean instead of inheriting whatever the default happens to be this month."
   [thread-id dir mode]
   (project/bind! thread-id dir)
-  (let [f (io/file dir ".harness" "harness.edn")]
-    (.mkdirs (.getParentFile f))
-    (spit f (str "{:editing {:mode " mode "}}") :encoding "UTF-8")))
+  (support/write-session! (str "{:editing {:mode " mode "}}")))
 
 (deftest write-then-read-roundtrips
   (let [p (tmp "round-trip.txt")]

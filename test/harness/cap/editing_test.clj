@@ -1,8 +1,15 @@
 (ns harness.cap.editing-test
   "harness.cap.editing's external behavior: which editing implementation a session is
-  served by, how the two harness.edn levels compose, and what a broken block
-  says. The regression guarantee is the first test -- with nobody saying
-  anything, a session is str-replace, which is what this harness already was."
+  served by, how the block composes over the defaults, and what a broken one says. The
+  regression guarantee is the first test -- with nobody saying anything, a session edits
+  by anchor, which is what this harness does by default.
+
+  ONE LEVEL NOW (.scratch/config-merge). :editing used to be composed from two harness.edn
+  levels, user then project, key by key; it lives in this home's config.edn, :session
+  :editing, and there is one file -- so what the cases below check is the block, the
+  defaults it composes over, and what a broken one refuses. Where a case used to pin the
+  two-level behavior it was rewritten to pin what replaced it, and the ones whose whole
+  premise was 'the project level wins' are gone with the level."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -16,29 +23,18 @@
 ;; (the tools-test precedent).
 (def ^:private root (support/temp-dir "editing"))
 
-(def ^:private user-file    (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
-
-;; Both levels live OUTSIDE this namespace's scratch directory: the user level in
-;; the (shared, test-runner-owned) config home, the project level under the
-;; shared root. Wipe them around every test -- a leftover :editing would leak
-;; into the next namespace as a silently different editing mode, which is the
-;; exact confusion this namespace exists to refuse.
-(defn- wipe-harness-edn [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+;; THE :session SECTION LIVES IN THE SHARED HOME, so a leftover would leak into the
+;; NEXT namespace as a silently different editing mode -- the exact confusion this
+;; namespace exists to refuse. Wipe it around every test; the rest of config.edn (the
+;; provider fixtures) is left alone, which is what `wipe-session!` is for.
+(defn- wipe-session [f]
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
-(use-fixtures :each wipe-harness-edn)
+(use-fixtures :each wipe-session)
 
-(defn- write-user! [edn]
-  (spit user-file edn :encoding "UTF-8"))
-
-(defn- write-project! [edn]
-  (.mkdirs (.getParentFile project-file))
-  (spit project-file edn :encoding "UTF-8"))
+(defn- write-session! [edn] (support/write-session! edn))
 
 (defn- ex-data-of [f]
   (try (f) nil (catch Exception e (ex-data e))))
@@ -59,101 +55,123 @@
     (is (= editing/defaults (editing/editing-mode "ed-default"))))
   (testing "and a session that wants the exact-string editor says so, one key"
     (project/bind! "ed-default" root)
-    (write-project! "{:editing {:mode :str-replace}}")
+    (write-session! "{:editing {:mode :str-replace}}")
     (is (= :str-replace (:mode (editing/editing-mode "ed-default"))))
     (is (= :on (:boundary-dedup (editing/editing-mode "ed-default")))
         "and the other keys keep their defaults -- the block composes by key")))
 
-(deftest a-local-dir-without-the-file-is-just-as-empty
+(deftest a-session-with-nothing-written-is-just-as-empty
+  ;; A binding whose directory has no .harness/ at all, and a home whose config.edn says
+  ;; nothing: both answer the defaults. (The `.harness` directory itself is still made
+  ;; here: it is where hooks.edn lives, and a session bound to a project is the everyday
+  ;; case -- what must be true is that NOTHING in it changes this answer.)
   (.mkdirs (io/file root ".harness"))
   (is (= editing/defaults (editing/editing-mode "ed-emptydir"))))
 
-;; ------------------------------------------------------------------- overlay
+;; ------------------------------------------------------------------- writing
 
-(deftest the-two-levels-compose-key-by-key
-  ;; This is the ONE departure from harness.edn's shallow merge, and the whole
-  ;; reason this namespace composes its own block: a project that wants to turn
-  ;; one knob off must not have to restate the block and re-decide every default
-  ;; the user chose.
+(deftest the-block-composes-over-the-defaults-key-by-key
+  ;; What is left of the old 'two levels compose key by key' case. The composition that
+  ;; matters is block-over-defaults: a person who writes ONE key must not have to restate
+  ;; the other seven, and a key nobody named keeps its default.
   (project/bind! "ed-overlay" root)
-  (write-user! "{:editing {:mode :hashline :diff-context-lines 4}}")
-  (testing "the user level alone answers the user level"
+  (write-session! "{:editing {:mode :hashline :diff-context-lines 4}}")
+  (testing "the keys that were written are the ones answered"
     (is (= {:mode :hashline :diff-context-lines 4}
            (select-keys (editing/editing-mode "ed-overlay")
                         [:mode :diff-context-lines]))))
-  (testing "the project level adds to it without erasing it"
-    (write-project! "{:editing {:grep false}}")
-    (is (= :hashline (:mode (editing/editing-mode "ed-overlay")))
-        "the user's mode survived a project that never mentioned :mode")
-    (is (= 4 (:diff-context-lines (editing/editing-mode "ed-overlay"))))
-    (is (false? (:grep (editing/editing-mode "ed-overlay")))))
-  (testing "and a key BOTH levels name is the project's"
-    (write-project! "{:editing {:mode :str-replace}}")
-    (is (= :str-replace (:mode (editing/editing-mode "ed-overlay")))))
-  (testing "the keys nobody named are still the defaults"
-    (write-project! "{:editing {:grep false}}")
+  (testing "and the keys nobody named are still the defaults"
     (is (= :on (:boundary-dedup (editing/editing-mode "ed-overlay")))
-        "neither level named :boundary-dedup, so it is the default")
-    (is (= 4 (:diff-context-lines (editing/editing-mode "ed-overlay")))
-        "and the user's :diff-context-lines is still standing, not reset")))
+        "nobody named :boundary-dedup, so it is the default")
+    (is (true? (:grep (editing/editing-mode "ed-overlay")))))
+  (testing "writing the block again REPLACES it -- there is one level, not a merge of two"
+    ;; THE THING THE PROJECT LEVEL USED TO BUY, said out loud as its absence: a second
+    ;; write is the whole block, so a key the first write set and the second does not
+    ;; mention goes back to its default. Two levels would have kept it; one level cannot.
+    (write-session! "{:editing {:grep false}}")
+    (is (false? (:grep (editing/editing-mode "ed-overlay"))))
+    (is (= :hashline (:mode (editing/editing-mode "ed-overlay")))
+        "the mode is the DEFAULT again -- the second write replaced the block")))
 
-(deftest an-unbound-session-sees-only-the-user-level
-  (write-user! "{:editing {:mode :hashline}}")
-  (write-project! "{:editing {:mode :str-replace}}")
+(deftest every-session-reads-the-same-one-file
+  ;; The old case was 'an unbound session sees only the user level'. With one level there
+  ;; is no second file to be seen by anyone, and the property worth pinning is the one
+  ;; that replaced it: the write is the WHOLE home's mode, bound or not.
+  (write-session! "{:editing {:mode :str-replace}}")
   (project/bind! "ed-bound" root)
   (is (= :str-replace (:mode (editing/editing-mode "ed-bound"))))
-  (is (= :hashline (:mode (editing/editing-mode "ed-unbound")))
-      "an unbound thread has no project file to read"))
+  (is (= :str-replace (:mode (editing/editing-mode "ed-unbound")))
+      "a session with no binding reads the same file -- there is nowhere else to look"))
 
 (deftest the-block-is-read-fresh-on-every-ask
-  ;; The config.edn discipline: editing harness.edn moves the mode without a
-  ;; restart. A cached answer would make the file a thing you have to know about
-  ;; rather than a thing that works.
-  (write-user! "{:editing {:mode :str-replace}}")
+  ;; The config.edn discipline: editing the file moves the mode without a restart. A
+  ;; cached answer would make the file a thing you have to know about rather than a thing
+  ;; that works.
+  (write-session! "{:editing {:mode :str-replace}}")
   (is (= :str-replace (:mode (editing/editing-mode "ed-fresh"))))
-  (write-user! "{:editing {:mode :hashline}}")
+  (write-session! "{:editing {:mode :hashline}}")
   (is (= :hashline (:mode (editing/editing-mode "ed-fresh")))))
+
+(deftest the-project-level-is-gone
+  ;; DECISION 2 OF .scratch/config-merge, pinned where it is cheapest to see: a
+  ;; `.harness/harness.edn` in the bound project is a file NOTHING reads. It is not an
+  ;; error and it is not a second level -- it simply has no say.
+  (project/bind! "ed-project-level" root)
+  (write-session! "{:editing {:mode :hashline} :approval {:allow [\"shared\"]}}")
+  (let [f (io/file root ".harness" "harness.edn")]
+    (.mkdirs (.getParentFile f))
+    (spit f "{:editing {:mode :str-replace} :approval {:strict true}}" :encoding "UTF-8")
+    (try
+      (testing "what the session reads is the file it actually reads"
+        (is (= :hashline (:mode (editing/editing-mode "ed-project-level"))))
+        (is (= {:editing {:mode :hashline} :approval {:allow ["shared"]}}
+               (project/harness-config "ed-project-level"))
+            "harness-config answers the one level, with the project file unread")
+        (is (= (.getAbsolutePath (home/config-file)) (project/harness-config-path))
+            "and it names the file a failure would have to send somebody to"))
+      (finally
+        (io/delete-file (io/file root ".harness") true)))))
 
 ;; ------------------------------------------------------- broken is a failure
 
 (deftest a-broken-block-is-a-named-failure-not-a-quiet-default
   (project/bind! "ed-broken" root)
   (testing ":editing that is not a map names the file and the value"
-    (write-user! "{:editing :hashline}")
+    (write-session! "{:editing :hashline}")
     (let [e (ex-data-of #(editing/editing-mode "ed-broken"))]
       (is (= :editing-not-a-map (:reason e)))
-      (is (= "user" (name (:level e))))
-      (is (= (.getAbsolutePath user-file) (:path e)))
+      (is (= "config" (name (:level e))) "one level, and it says which one")
+      (is (= (.getAbsolutePath (home/config-file)) (:path e)))
       (is (str/includes? (msg-of #(editing/editing-mode "ed-broken")) ":hashline"))))
-  (testing "the same at the project level names the PROJECT file"
-    (write-user! "{}")
-    (write-project! "{:editing 42}")
-    (let [e (ex-data-of #(editing/editing-mode "ed-broken"))]
-      (is (= :editing-not-a-map (:reason e)))
-      (is (= "project" (name (:level e))))
-      (is (= (.getAbsolutePath project-file) (:path e)))))
   (testing "a file that is not EDN at all fails too, and is not this namespace's
-            error to spell -- harness.cap.project owns that message"
-    (write-project! "{:editing ")
-    (let [e (ex-data-of #(editing/editing-mode "ed-broken"))]
-      (is (= :invalid-edn (:reason e))))
-    (io/delete-file project-file true))
+            error to spell -- harness.cap.providers owns that message"
+    (let [f (home/config-file)
+          old (when (.exists f) (slurp f :encoding "UTF-8"))]
+      (try
+        (spit f "{:editing " :encoding "UTF-8")
+        (is (= ::threw (try (editing/editing-mode "ed-broken")
+                            ::answered
+                            (catch Exception _ ::threw))))
+        (finally
+          (if old
+            (spit f old :encoding "UTF-8")
+            (io/delete-file f true))))))
   (testing "and a silent fallback to the defaults is exactly what must NOT happen"
-    (write-user! "{:editing :hashline}")
+    (write-session! "{:editing :hashline}")
     (is (= ::threw (try (editing/editing-mode "ed-broken")
                         ::answered
                         (catch Exception _ ::threw))))))
 
 ;; ------------------------------------------------------------- key checking
 
-(deftest an-unknown-key-names-the-file-that-wrote-it
+(deftest an-unknown-key-names-the-file-it-came-from
   (project/bind! "ed-unknown" root)
-  (write-user! "{:editing {:mode :hashline :modes :hashline}}")
+  (write-session! "{:editing {:mode :hashline :modes :hashline}}")
   (let [e (ex-data-of #(editing/editing-mode "ed-unknown"))]
     (is (= :unknown-editing-key (:reason e)))
     (is (= :modes (:key e)))
-    (is (= "user" (name (:level e))))
-    (is (= (.getAbsolutePath user-file) (:path e))))
+    (is (= "config" (name (:level e))))
+    (is (= (.getAbsolutePath (home/config-file)) (:path e))))
   (testing "the message lists what IS legal, so the reader can fix it in place"
     (let [m (msg-of #(editing/editing-mode "ed-unknown"))]
       (is (str/includes? m ":mode"))
@@ -162,45 +180,46 @@
 (deftest a-key-that-was-removed-is-an-unknown-key
   ;; `:auto-read` used to be legal: a successful write handed the head of the file
   ;; back with fresh anchors. It is gone -- writing content is not knowing its line
-  ;; numbers -- and a harness.edn that still names it gets the same NAMED failure
+  ;; numbers -- and a config.edn that still names it gets the same NAMED failure
   ;; any typo gets: the key, the file, and what IS legal, so the fix is deleting one
   ;; line rather than wondering why nothing happened.
   (project/bind! "ed-auto-read" root)
-  (write-user! "{:editing {:auto-read true}}")
+  (write-session! "{:editing {:auto-read true}}")
   (let [e (ex-data-of #(editing/editing-mode "ed-auto-read"))]
     (is (= :unknown-editing-key (:reason e)))
     (is (= :auto-read (:key e)))
-    (is (= "user" (name (:level e))))
-    (is (= (.getAbsolutePath user-file) (:path e))))
+    (is (= "config" (name (:level e))))
+    (is (= (.getAbsolutePath (home/config-file)) (:path e))))
   (testing "and the legal list does not offer the removed key back"
     (is (not (contains? editing/defaults :auto-read))
         "the key is not a default any more")
     (is (str/includes? (msg-of #(editing/editing-mode "ed-auto-read")) ":grep")
         "while the keys that ARE legal are listed")))
 
-(deftest an-unknown-key-in-either-file-fails-even-when-shadowed
-  ;; A typo is not a value that loses a merge: it is a request neither level was
-  ;; ever going to honour, so looking at what survived the merge would hide it.
+(deftest an-unknown-key-fails-even-beside-a-legal-one
+  ;; A typo is not a value that loses a merge: it is a request nobody was ever going to
+  ;; honour, so looking at what survived would hide it. (This used to be the case that
+  ;; wrote the typo at one level and a legal :mode at the other -- the shadowing half is
+  ;; gone, the property is not.)
   (project/bind! "ed-shadow-unknown" root)
-  (write-user! "{:editing {:modes :hashline}}")
-  (write-project! "{:editing {:mode :hashline}}")
+  (write-session! "{:editing {:modes :hashline :mode :hashline}}")
   (let [e (ex-data-of #(editing/editing-mode "ed-shadow-unknown"))]
     (is (= :unknown-editing-key (:reason e)))
-    (is (= "user" (name (:level e)))
-        "the shadowed half is still reported, against the level that wrote it")))
+    (is (= :modes (:key e))
+        "the unknown key is reported, beside a legal :mode that says nothing about it")))
 
 ;; ----------------------------------------------------------- value checking
 
 (deftest an-illegal-value-names-the-file-the-key-and-what-is-legal
   (project/bind! "ed-values" root)
   (let [check (fn [edn kw fragment]
-                (write-user! edn)
+                (write-session! edn)
                 (let [e (ex-data-of #(editing/editing-mode "ed-values"))
                       m (msg-of #(editing/editing-mode "ed-values"))]
                   (is (= :bad-editing-value (:reason e)) (str "for " edn))
                   (is (= kw (:key e)) (str "for " edn))
-                  (is (= "user" (name (:level e))))
-                  (is (= (.getAbsolutePath user-file) (:path e)))
+                  (is (= "config" (name (:level e))))
+                  (is (= (.getAbsolutePath (home/config-file)) (:path e)))
                   (is (str/includes? m fragment) (str "message for " edn))
                   (is (str/includes? m (str kw)) "the message names the key")))]
     (testing "an unimplemented mode is refused, and a legal one is offered"
@@ -227,9 +246,9 @@
   (doseq [mode [:hashline :str-replace]
           dedup [:on :strict :off]
           n [0 1 10]]
-    (write-user! (str "{:editing {:mode " mode " :boundary-dedup " dedup
-                      " :diff-context-lines " n
-                      " :grep false :require-path true :strict-input false}}"))
+    (write-session! (str "{:editing {:mode " mode " :boundary-dedup " dedup
+                         " :diff-context-lines " n
+                         " :grep false :require-path true :strict-input false}}"))
     (let [m (editing/editing-mode "ed-legal")]
       (is (= mode (:mode m)))
       (is (= dedup (:boundary-dedup m)))
@@ -243,43 +262,27 @@
   ;; failure while doing exactly what they were told.
   (project/bind! "ed-edges" root)
   (doseq [n [0 10]]
-    (write-user! (str "{:editing {:diff-context-lines " n "}}"))
+    (write-session! (str "{:editing {:diff-context-lines " n "}}"))
     (is (= n (:diff-context-lines (editing/editing-mode "ed-edges")))
         (str "diff-context-lines " n)))
   (doseq [d [:on :strict :off]]
-    (write-user! (str "{:editing {:boundary-dedup " d "}}"))
+    (write-session! (str "{:editing {:boundary-dedup " d "}}"))
     (is (= d (:boundary-dedup (editing/editing-mode "ed-edges")))
         (str "boundary-dedup " d))))
 
-(deftest values-are-checked-as-effective-not-as-written
-  ;; A project overriding a broken user value has to be able to FIX it -- which
-  ;; it cannot do if the user's half is validated on its own way through.
+(deftest a-broken-value-is-refused-even-though-the-defaults-would-cover-it
+  ;; Values are judged as WRITTEN, not as they survive the fold over the defaults. A
+  ;; broken :mode whose default is perfectly legal must be a refusal: reading it as
+  ;; 'the default wins' would be the silent fallback this namespace exists to prevent.
+  ;; (The old case was 'a project overriding a broken user value has to be able to FIX
+  ;; it' -- with one level there is nothing to override, so the property left is the
+  ;; refusal itself.)
   (project/bind! "ed-fix" root)
-  (write-user! "{:editing {:mode :nonsense}}")
-  (write-project! "{:editing {:mode :hashline}}")
-  (is (= :hashline (:mode (editing/editing-mode "ed-fix"))))
-  (testing "but the user's half still answers for itself when nothing overrides it"
-    (io/delete-file project-file true)
-    (is (= :bad-editing-value (:reason (ex-data-of #(editing/editing-mode "ed-fix")))))))
-
-;; ------------------------------------------- harness.edn's own merge is intact
-
-(deftest harness-configs-shallow-merge-is-untouched
-  ;; harness-edn-levels was extracted from harness-config so this namespace could
-  ;; compose :editing itself. The extraction must not have moved the fence's own
-  ;; behavior: a project still REPLACES a top-level key whole.
-  (project/bind! "ed-fence" root)
-  (write-user! "{:approval {:allow [\"shared\"]} :other 1}")
-  (write-project! "{:approval {:strict true}}")
-  (is (= {:approval {:strict true} :other 1}
-         (project/harness-config "ed-fence")))
-  (testing "and the unmerged pair is available for a finer overlay"
-    (let [{:keys [user project files]} (project/harness-edn-levels "ed-fence")]
-      (is (= {:approval {:allow ["shared"]} :other 1} user))
-      (is (= {:approval {:strict true}} project))
-      (is (= (.getAbsolutePath user-file) (:user files)))
-      (is (= (.getAbsolutePath project-file) (:project files)))))
-  (testing "an unbound thread reports no project file, rather than a path to one"
-    (let [{:keys [files]} (project/harness-edn-levels "ed-nobody")]
-      (is (.endsWith ^String (:user files) "harness.edn"))
-      (is (nil? (:project files))))))
+  (write-session! "{:editing {:mode :nonsense}}")
+  (let [e (ex-data-of #(editing/editing-mode "ed-fix"))]
+    (is (= :bad-editing-value (:reason e)))
+    (is (= :mode (:key e)))
+    (is (= :nonsense (:value e))))
+  (testing "and the default it would have fallen back to is never handed back instead"
+    (is (not= :hashline
+              (try (:mode (editing/editing-mode "ed-fix")) (catch Exception _ ::refused))))))

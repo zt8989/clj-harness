@@ -31,6 +31,7 @@
 
 (defn- put! [name content]
   (let [f (io/file root name)]
+    (.mkdirs (.getParentFile f))
     (spit f content :encoding "UTF-8")))
 
 (defn- rm-rf

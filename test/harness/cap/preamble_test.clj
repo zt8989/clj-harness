@@ -132,12 +132,12 @@
       (is (= [(str (io/file (home/user-home) "AGENTS.md"))
               (str (io/file proj "AGENTS.md"))]
              (project/preamble-files "pr-4")))
-      (testing "and it reads harness.edn fresh, project level winning"
-        (let [harness-edn (io/file proj ".harness" "harness.edn")]
-          (.mkdirs (.getParentFile harness-edn))
-          (spit harness-edn "{:instructions {:files [\"AGENTS.md\"]}}\n" :encoding "UTF-8")
+      (testing "and it reads the :session section fresh -- one level, this home's"
+        (try
+          (support/write-session! "{:instructions {:files [\"AGENTS.md\"]}}")
           (is (= [(str (io/file proj "AGENTS.md"))]
-                 (project/preamble-files "pr-4"))))))))
+                 (project/preamble-files "pr-4")))
+          (finally (support/wipe-session!)))))))
 
 ;; ----------------------------------------------------------------- reading
 

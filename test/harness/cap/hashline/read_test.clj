@@ -48,7 +48,7 @@
 
 (defn- use-mode! [thread-id mode]
   (project/bind! thread-id root)
-  (support/write-session! {:editing {:mode mode}}))
+  (support/write-session! (str "{:editing {:mode " mode "}}")))
 
 (defn- call [thread-id name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}} thread-id))
@@ -258,7 +258,10 @@
 (deftest what-cannot-be-read-is-refused-by-name
   (use-mode! "r1" ":hashline")
   (testing "a directory"
-    (let [{:keys [content error]} (call "r1" "read" {:path ".harness"})]
+    ;; The directory is made HERE rather than borrowed from a fixture: the fixture used
+    ;; to create `.harness/` for the project's harness.edn, and that file is gone.
+    (.mkdirs (io/file root "a-dir"))
+    (let [{:keys [content error]} (call "r1" "read" {:path "a-dir"})]
       (is (true? error))
       (is (str/includes? content "directory"))
       (is (str/includes? content "bash") "and it says what to do instead")))

@@ -204,12 +204,12 @@
       (is (= [(str (io/file (home/user-home) ".agents" "skills"))
               (str (io/file proj ".agents" "skills"))]
              (project/skill-roots "sk-4")))
-      (testing "and it reads harness.edn fresh, project level winning"
-        (let [harness-edn (io/file proj ".harness" "harness.edn")]
-          (.mkdirs (.getParentFile harness-edn))
-          (spit harness-edn "{:skills {:roots [\".agents/skills\"]}}\n" :encoding "UTF-8")
+      (testing "and it reads the :session section fresh -- one level, this home's"
+        (try
+          (support/write-session! "{:skills {:roots [\".agents/skills\"]}}")
           (is (= [(str (io/file proj ".agents" "skills"))]
-                 (project/skill-roots "sk-4"))))))))
+                 (project/skill-roots "sk-4")))
+          (finally (support/wipe-session!)))))))
 
 ;; ------------------------------------------------------------------- the catalog
 

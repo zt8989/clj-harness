@@ -42,17 +42,19 @@
 ;; A fixture is (fn [f] ... (f) ...): it RUNS f between its own two halves.
 ;; Wrapping the whole body in another (fn []) would swallow f -- every test
 ;; silently skipped, :test 0, no error anywhere (measured, not guessed).
-(defn- wipe-user-harness-edn [f]
-  (io/delete-file (io/file (home/root) "harness.edn") true)
-  ;; The project-level file lives under the SHARED root, which tmpdir
-  ;; keeps across JVM runs: a leftover strict/allow from the last run
-  ;; would silently move this run's fence. Same wipe before and after.
+(defn- wipe-session-and-project [f]
+  ;; THE SESSION SECTION LIVES IN config.edn, in the SHARED test home: a leftover :approval
+  ;; would silently move the NEXT case's fence (or the next namespace's), which is the
+  ;; exact "config that says nothing vs a config that was ignored" confusion the reader
+  ;; refuses to conflate. The project-level file is wiped too, because a case below writes
+  ;; one ON PURPOSE -- to prove that nothing reads it.
+  (support/wipe-session!)
   (io/delete-file (io/file root ".harness" "harness.edn") true)
   (f)
-  (io/delete-file (io/file (home/root) "harness.edn") true)
+  (support/wipe-session!)
   (io/delete-file (io/file root ".harness" "harness.edn") true))
 
-(use-fixtures :each wipe-user-harness-edn)
+(use-fixtures :each wipe-session-and-project)
 
 (deftest bind-validates-the-directory-before-binding
   (testing "a path that does not exist is a NAMED error"
@@ -159,83 +161,88 @@
       (project/bind! "pt-fence" nil)
       (is (false? (project/out-of-bounds? "pt-fence" outside))))))
 
+(defn- write-session-harness!
+  "Write an EDN string into this home's config.edn :session -- the fence's own settings
+  now that there is one level. SLASHED paths in the EDN: io/File accepts forward slashes
+  on Windows, and EDN strings would need the backslashes escaped anyway."
+  [edn]
+  (support/write-session! edn))
+
 (defn- write-project-harness!
-  "Drop an EDN string at the project's .harness/harness.edn. SLASHED paths in
-  the EDN: io/File accepts forward slashes on Windows, and EDN strings would
-  need the backslashes escaped anyway."
+  "Drop an EDN string at the project's .harness/harness.edn -- the file NOTHING reads.
+  Kept because one case writes one on purpose, to pin exactly that."
   [edn]
   (let [f (io/file root ".harness" "harness.edn")]
     (.mkdirs (.getParentFile f))
     (spit f edn :encoding "UTF-8")
     f))
 
-(deftest harness-config-assembles-two-levels
-  ;; User level = the config home's harness.edn; project level = the bound
-  ;; project's .harness/harness.edn. Top-level shallow merge, project wins.
-  (let [user-file (io/file (home/root) "harness.edn")]
-    (project/bind! "pt-cfg" root)
-    (testing "missing at both levels is the empty map -- and a .harness dir
-              without the file is just as empty"
-      (.mkdirs (io/file root ".harness"))
-      (is (= {} (project/harness-config "pt-cfg"))))
-    (testing "the user level alone answers the user level"
-      (spit user-file "{:approval {:allow [\"shared\"]} :other 1}" :encoding "UTF-8")
-      (is (= {:approval {:allow ["shared"]} :other 1}
+(deftest harness-config-answers-the-one-level
+  ;; ONE LEVEL (.scratch/config-merge decision 2): the :session section of this home's
+  ;; config.edn. The project's .harness/harness.edn is a file nothing reads, and the case
+  ;; that used to pin "project wins" now pins that the project does not speak at all.
+  (project/bind! "pt-cfg" root)
+  (testing "a home that says nothing is the empty map -- and a .harness dir
+            without the file is just as empty"
+    (.mkdirs (io/file root ".harness"))
+    (is (= {} (project/harness-config "pt-cfg"))))
+  (testing "the section is answered whole, bound or not"
+    (write-session-harness! "{:approval {:allow [\"shared\"]}}")
+    (is (= {:approval {:allow ["shared"]}} (project/harness-config "pt-cfg")))
+    (is (= {:approval {:allow ["shared"]}} (project/harness-config))
+        "an unbound thread reads the same file -- there is no second one to read"))
+  (testing "and a project-level file is NOT read, whatever it says"
+    (let [f (write-project-harness! "{:approval {:strict true}}")]
+      (is (= {:approval {:allow ["shared"]}}
              (project/harness-config "pt-cfg")))
-      (testing "an UNBOUND thread sees only the user level, even while another
-                thread is bound to a project with its own file"
-        (write-project-harness! "{:approval {:strict true}}")
-        (is (= {:approval {:allow ["shared"]} :other 1}
-               (project/harness-config)))))
-    (testing "the project level alone answers the project level"
-      (io/delete-file user-file true)
-      (is (= {:approval {:strict true}} (project/harness-config "pt-cfg"))))
-    (testing "both levels: the project REPLACES the user's top-level keys whole"
-      (spit user-file "{:approval {:allow [\"shared\"]} :other 1}" :encoding "UTF-8")
-      ;; :approval is replaced entirely (no deep merge, no union); :other,
-      ;; which the project does not mention, survives the merge.
-      (is (= {:approval {:strict true} :other 1}
-             (project/harness-config "pt-cfg"))))))
+      (is (.exists f) "the file is still there -- it is ignored, not deleted")))
+  (testing "the reader names the file a failure would have to send somebody to"
+    (is (= (.getAbsolutePath (home/config-file)) (project/harness-config-path)))))
 
-(deftest a-broken-harness-edn-is-a-named-failure-not-a-silent-empty
-  (let [user-file (io/file (home/root) "harness.edn")]
-    (project/bind! "pt-bad" root)
-    (testing "invalid EDN at the user level names the absolute path"
-      (spit user-file "{:approval " :encoding "UTF-8")
-      (let [e (try (project/harness-config "pt-bad") nil (catch Exception e e))]
-        (is (some? e))
-        (is (str/includes? (ex-message e) (.getAbsolutePath user-file)))
-        (is (= :invalid-edn (:reason (ex-data e))))))
-    (testing "invalid EDN at the user level breaks even an UNBOUND query"
-      (is (thrown-with-msg? Exception #"not valid EDN" (project/harness-config))))
-    (testing "valid EDN that is not a map is broken too, project level"
-      (io/delete-file user-file true)
-      (let [pf (write-project-harness! "42")]
+(deftest a-broken-config-edn-is-a-named-failure-not-a-silent-empty
+  ;; The distinction the fence rests on: 'says nothing' and 'could not be read' must not
+  ;; look the same. The reader of the file is harness.cap.providers now, so what this
+  ;; namespace pins is that the failure reaches a caller of harness-config, by name.
+  (project/bind! "pt-bad" root)
+  (let [f (home/config-file)
+        old (when (.exists f) (slurp f :encoding "UTF-8"))]
+    (try
+      (testing "invalid EDN names the file, at the level that reads it"
+        (spit f "{:approval " :encoding "UTF-8")
         (let [e (try (project/harness-config "pt-bad") nil (catch Exception e e))]
           (is (some? e))
-          (is (str/includes? (ex-message e) (.getAbsolutePath pf)))
-          (is (= :not-a-map (:reason (ex-data e)))))))))
+          (is (str/includes? (ex-message e) (.getAbsolutePath f)))
+          (is (= :invalid-edn (:reason (ex-data e))))))
+      (testing "and it breaks even an UNBOUND query"
+        (is (thrown? Exception (project/harness-config))))
+      (testing "a section that is not a map is a named failure too"
+        (spit f "{:session 42}" :encoding "UTF-8")
+        (let [e (try (project/harness-config "pt-bad") nil (catch Exception e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) ":session"))))
+      (finally
+        (if old (spit f old :encoding "UTF-8") (io/delete-file f true))))))
 
-(deftest the-fence-obeys-harness-edn
+(deftest the-fence-obeys-the-session-config
   ;; The first real consumer of the assembly: the approval boundary.
   (let [outside (support/outside-path "harness-project-outside2.txt")]
     (.mkdirs (io/file root ".harness"))
     (project/bind! "pt-fence-cfg" root)
     (testing ":allow frees a declared path, resolved like any tool path"
-      (write-project-harness! "{:approval {:allow [\"../shared\"]}}")
+      (write-session-harness! "{:approval {:allow [\"../shared\"]}}")
       (is (false? (project/out-of-bounds? "pt-fence-cfg"
                                           (str (io/file root ".." "shared" "x.txt")))))
       (is (true? (project/out-of-bounds? "pt-fence-cfg" outside))
           "only what was declared is freed, not the world"))
     (testing ":strict tightens the fence over the project itself, config home kept"
-      (write-project-harness! "{:approval {:strict true}}")
+      (write-session-harness! "{:approval {:strict true}}")
       (is (true? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))
           "a project-relative path is out of bounds under strict")
       (is (false? (project/out-of-bounds? "pt-fence-cfg"
                                           (str (io/file (home/root) "config.edn"))))
           "the configuration home is never tightened away"))
     (testing "the file is read fresh per call: edits move the fence live"
-      (write-project-harness! "{}")
+      (support/wipe-session!)
       (is (false? (project/out-of-bounds? "pt-fence-cfg" "in.txt"))))))
 
 
@@ -254,7 +261,7 @@
           (is (true? (project/out-of-bounds? "pt-temp"
                                              (str (io/file tree ".." "escape.txt"))))))
         (testing ":strict does not take it away, exactly like the config home"
-          (write-project-harness! "{:approval {:strict true}}")
+          (write-session-harness! "{:approval {:strict true}}")
           (is (false? (project/out-of-bounds? "pt-temp" (str (io/file tree "x.txt")))))
           (is (true? (project/out-of-bounds? "pt-temp" "in.txt"))))
         (finally
@@ -731,9 +738,7 @@
      ;; This test's project is its own directory, so its harness.edn goes THERE --
      ;; write-project-harness! targets the namespace's shared root, which this
      ;; thread is not bound to.
-     (let [proj-edn! (fn [text]
-                       (.mkdirs (io/file proj ".harness"))
-                       (spit (str (io/file proj ".harness" "harness.edn")) text :encoding "UTF-8"))]
+     (let [proj-edn! (fn [text] (support/write-session! text))]
        (try
          (testing "a file inside a skill root is free of the fence"
            (is (false? (project/out-of-bounds? "pt-skills"
@@ -742,7 +747,7 @@
          (testing "and it stays free under :strict, exactly like the config home"
            (proj-edn! "{:approval {:strict true}}")
            (is (false? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md")))))
-           (proj-edn! "{}"))
+           (support/wipe-session!))
 
          (testing "but the world outside the roots still parks -- the allowance is the roots, not everything"
            (is (true? (project/out-of-bounds? "pt-skills" (str (io/file elsewhere "x.md"))))))
@@ -758,7 +763,7 @@
              (is (false? (project/out-of-bounds? "pt-skills" (str (io/file custom "x.md")))))
              (is (true? (project/out-of-bounds? "pt-skills" (str (io/file skill-dir "x.md"))))
                  "the default root is no longer in force, so it is no longer free")
-             (proj-edn! "{}")))
+             (support/wipe-session!)))
 
          (testing "an INSTRUCTION file's content grants nothing: a path it merely mentions still parks"
            ;; The point of the boundary. AGENTS.md is READ BY harness, not by the

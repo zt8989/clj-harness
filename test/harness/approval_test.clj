@@ -20,6 +20,10 @@
 
 (use-fixtures :once support/with-builtins)
 
+;; THE FENCE'S SETTINGS ARE THIS HOME'S NOW, and config.edn is shared by the whole run:
+;; wipe the :session section around every case, exactly as the harness.edn fixtures did.
+(use-fixtures :each (fn [f] (support/wipe-session!) (f) (support/wipe-session!)))
+
 (def ^:private dir (support/temp-dir "approval"))
 
 (defn- drain [ch]
@@ -433,29 +437,29 @@
 
 ;; ------------------------------------------------- the fence, configurable
 ;;
-;; Ticket 03: the project's .harness/harness.edn (over the config home's user
-;; level) moves the fence -- :allow frees declared paths, :strict tightens it
-;; over the project itself. Same park, same interrupt; only the allowed set
-;; changes. Slash-form paths in the EDN: io/File accepts them on Windows and
-;; EDN would need backslashes escaped anyway.
+;; Ticket 03: :approval moves the fence -- :allow frees declared paths, :strict tightens
+;; it over the bound project itself. Same park, same interrupt; only the allowed set
+;; changes. Slash-form paths in the EDN: io/File accepts them on Windows and EDN would
+;; need backslashes escaped anyway.
+;;
+;; ONE LEVEL NOW (.scratch/config-merge): these settings live in this home's config.edn,
+;; :session :approval, so the write below is a SESSION write and the dir argument that
+;; used to say WHICH project is gone with the project level.
 
-(defn- write-project-harness!
-  "Drop an EDN string at the project's .harness/harness.edn."
-  [pdir edn]
-  (let [f (io/file pdir ".harness" "harness.edn")]
-    (.mkdirs (.getParentFile f))
-    (spit f edn :encoding "UTF-8")
-    f))
+(defn- write-session-harness!
+  "Write an EDN string into this home's config.edn :session -- the fence's own settings."
+  [edn]
+  (support/write-session! edn))
 
 (defn- slashed [p] (str/replace p "\\" "/"))
 
-(deftest the-project-can-free-a-path-with-allow
+(deftest this-home-can-free-a-path-with-allow
   (let [thr   "thr-fence-allow-cfg"
         pdir  (fence-rig thr)
         freed (str dir "/freed-neighbor")
         _     (.mkdirs (io/file freed))
         _     (spit (str freed "/note.txt") "free to read" :encoding "UTF-8")
-        _     (write-project-harness! pdir
+        _     (write-session-harness!
                                       (str "{:approval {:allow [\"" (slashed freed) "\"]}}"))
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
@@ -467,10 +471,10 @@
       (is (= ["free to read"] (read-lines (:content (first (results seen))))))
       (is (= 1 (count (tool-msgs history)))))))
 
-(deftest strict-tightens-the-fence-over-the-project-itself
+(deftest strict-tightens-the-fence-over-the-bound-project
   (let [thr  "thr-fence-strict"
         pdir (fence-rig thr)
-        _    (write-project-harness! pdir "{:approval {:strict true}}")
+        _    (write-session-harness! "{:approval {:strict true}}")
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
                               :tool-calls [(call "c1" "read" {:path "inside.txt"})]}
@@ -492,7 +496,7 @@
         pdir (fence-rig thr)
         uf   (io/file (home/root) "harness.edn")]
     (spit uf (str "{:approval {:allow [\"" (slashed pdir) "\"]}}") :encoding "UTF-8")
-    (write-project-harness! pdir "{:approval {:strict true}}")
+    (write-session-harness! "{:approval {:strict true}}")
     (try
       (let [{:keys [seen]}
             (run (fake/scripted [{:content ""

@@ -554,6 +554,22 @@
                 {:path path :section section :unknown unknown-keys})))))
   raw)
 
+(defn- read-config-text
+  "config.edn parsed, or {} when the file says nothing -- and a NAMED failure carrying the
+  absolute path when it cannot be read at all.
+
+  A FILE THAT SAYS NOTHING AND A FILE THAT COULD NOT BE READ MUST NOT LOOK THE SAME, and
+  this is where that line is drawn now: the file holds the session's keys as well as the
+  provider catalog, so a broken one has to be fixable from the sentence alone. (Before
+  .scratch/config-merge this lived in harness.cap.project's harness.edn reader; the keys
+  moved here, and the sentence came with them.)"
+  [path]
+  (try
+    (or (edn/read-string (home/config)) {})
+    (catch Exception e
+      (fail (str path " is not valid EDN (" (ex-message e) ")")
+            {:path path :reason :invalid-edn}))))
+
 (defn config
   "config.edn, re-read every time so it can be edited while the process runs ->
   the sections it is made of, checked as such.
@@ -581,7 +597,7 @@
 
   The path comes from harness.infra.home."
   []
-  (check-config (or (edn/read-string (home/config)) {})
+  (check-config (read-config-text (.getAbsolutePath (home/config-file)))
                 (.getAbsolutePath (home/config-file))))
 
 ;; ------------------------- the two sections that used to be files of their own
