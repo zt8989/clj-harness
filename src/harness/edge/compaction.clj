@@ -196,11 +196,11 @@ not invent anything. Be concise.")
   [merged]
   (doseq [k [:threshold-ratio :retain-ratio] :let [v (get merged k)]]
     (when-not (and (number? v) (pos? v) (<= v 1))
-      (throw (ex-info (str "harness.edn :compaction " (name k) " must be a fraction in (0, 1], but it is "
+      (throw (ex-info (str "config.edn's :session :compaction " (name k) " must be a fraction in (0, 1], but it is "
                            (pr-str v))
                       {:key k :value v :reason :bad-compaction-value}))))
   (when (>= (:retain-ratio merged) (:threshold-ratio merged))
-    (throw (ex-info (str "harness.edn :compaction retain-ratio " (:retain-ratio merged)
+    (throw (ex-info (str "config.edn's :session :compaction retain-ratio " (:retain-ratio merged)
                          " must be strictly below threshold-ratio " (:threshold-ratio merged))
                     {:reason :retain-not-below-threshold})))
   merged)
@@ -215,26 +215,26 @@ not invent anything. Be concise.")
     (if (map? b) b {})))
 
 (defn config
-  "The compaction proportions THIS SESSION is configured with, from harness.edn's
+  "The compaction proportions THIS SESSION is configured with, from config.edn's
   `:compaction` (`{:threshold-ratio 0.7 :retain-ratio 0.16}`), the project level over the
   user level, and `harness.edge.pressure`'s defaults when neither says anything.
 
   REFUSES A PAIR THAT CANNOT WORK, naming what is wrong: a retain that is not STRICTLY
   below the threshold would keep everything a compaction was asked to shrink, and a value
-  that is not a fraction is not a proportion at all. Reading is on demand (harness.edn is
+  that is not a fraction is not a proportion at all. Reading is on demand (config.edn is
   re-read, not cached), so a bad value is refused the moment a compaction is asked for."
   [thread-id]
   (check-ratios! (merge pressure/default-ratios (block thread-id))))
 
 (def default-overflow-retries
   "How many times ONE model call the vendor refused for LENGTH may be retried after an
-  aggressive compaction, when `harness.edn` says nothing: once. A retry happens only when the
+  aggressive compaction, when `config.edn` says nothing: once. A retry happens only when the
   aggressive pass actually shortened the model view, so this bounds a path that must make
   progress rather than a loop that might not. `0` disables the recovery."
   1)
 
 (defn overflow-retries
-  "How many times a length-refused model call may be retried for this session: `harness.edn`'s
+  "How many times a length-refused model call may be retried for this session: `config.edn`'s
   `:compaction :overflow-retries`, the project level over the user level, defaulting to
   `default-overflow-retries`. `0` disables the recovery -- the vendor's own refusal is then
   handed out untouched.
@@ -245,7 +245,7 @@ not invent anything. Be concise.")
   [thread-id]
   (let [n (get (block thread-id) :overflow-retries default-overflow-retries)]
     (when-not (and (integer? n) (not (neg? n)))
-      (throw (ex-info (str "harness.edn :compaction overflow-retries must be a whole number of"
+      (throw (ex-info (str "config.edn's :session :compaction overflow-retries must be a whole number of"
                            " retries (0 disables the recovery), but it is " (pr-str n))
                       {:key :overflow-retries :value n :reason :bad-overflow-retries})))
     n))

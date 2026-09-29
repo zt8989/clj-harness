@@ -2,7 +2,7 @@
   "Subagents: what they ARE, which names each one serves, and the delegation that
   hands one a task. Two are built in -- `general` (everything the main agent has,
   except `eval`) and `explore` (only the tools that cannot change anything) -- and
-  a home may add its own in harness.edn.
+  a home may add its own in config.edn.
 
   THE WHOLE FEATURE IS ONE TOOL CALL FROM THE OUTSIDE. The main agent's table gains
   `agent`, whose arguments are a subagent's name and a task; the subagent runs its
@@ -14,7 +14,7 @@
 
   A PANEL asks two questions and this namespace answers both from their owners:
   what are the subagents (the definitions in force -- `definitions`, which reads
-  harness.edn) and what has been delegated (the RECORD of it, which is the store's
+  config.edn) and what has been delegated (the RECORD of it, which is the store's
   -- `runs`, which asks harness.cap.project). Neither is derived from the other:
   a definition that has never run is a row with no record, and a record whose
   definition was since deleted is a row with no definition, and both are ordinary.
@@ -125,7 +125,7 @@
 
 (def built-ins
   "The two subagents every home has, in the order they are offered. They are
-  ordinary definitions -- a harness.edn entry with the same name REPLACES one
+  ordinary definitions -- a config.edn entry with the same name REPLACES one
   whole -- and the only thing they get from being here is that they cannot be
   deleted, because there would then be no names to delegate to in a fresh home."
   [{:name        "general"
@@ -160,7 +160,7 @@
 
 (defn check-entry!
   "NAME -> ENTRY as a full definition, or a NAMED failure. The one place a
-  definition is judged, so the settings form, a hand-edited harness.edn and this
+  definition is judged, so the settings form, a hand-edited config.edn and this
   namespace's own reader cannot disagree about what a legal one is.
 
   Refused by name, each for its own reason:
@@ -312,7 +312,7 @@
 (defn built-in?
   "Is this definition one of the two the CODE provides?
   Asked by name against the built-in list rather than by comparing whole maps, and
-  the difference is the settings form's whole behaviour: a harness.edn entry that
+  the difference is the settings form's whole behaviour: a config.edn entry that
   replaced a built-in keeps its name's standing, so 'explore' stays the row that is
   editable and not deletable however much of it somebody rewrote. What a person is
   told is true either way -- the built-in is what supplies the name, and the file is
@@ -810,7 +810,7 @@
   is how a form would become the thing that lost it.
 
   VALIDATION IS BEFORE THE WRITE, which is the whole of 'a refused save changes
-  nothing': an empty home gets no harness.edn out of a refusal, and an existing one
+  nothing': an empty home gets no config.edn out of a refusal, and an existing one
   is not so much as opened for writing."
   [change]
   (let [raw  (project/harness-config nil)
@@ -845,7 +845,7 @@
 
 (defn put-definition!
   "NAME + ROW (the form's shape) + REPLACE? -> the definition now in force, and the
-  user-level harness.edn rewritten to hold it.
+  user-level config.edn rewritten to hold it.
 
   CREATE OR REPLACE, ONE FUNCTION FOR BOTH, and REPLACE? is what tells them apart.
   It is not decoration: 'new subagent' and 'edit this one' are the same write, and
@@ -872,7 +872,7 @@
     d))
 
 (defn remove-definition!
-  "NAME -> the definition that was removed, and the user-level harness.edn rewritten
+  "NAME -> the definition that was removed, and the user-level config.edn rewritten
   without it.
 
   BUILT-INS ARE NOT DELETABLE, and the refusal says why rather than just no: they
@@ -898,7 +898,7 @@
                       {:reason :unknown-subagent :name n :known (known-names defs)})))
     (when (built-in? known)
       (throw (ex-info (str (pr-str n) " is built in: it comes from the code, so there is"
-                           " nothing in harness.edn to remove. Edit it instead -- an entry"
+                           " nothing in config.edn to remove. Edit it instead -- an entry"
                            " with its name replaces it wherever it appears.")
                       {:reason :built-in :name n})))
     (change-subagents! (fn [block]

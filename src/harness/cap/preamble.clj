@@ -51,10 +51,10 @@
   "The instruction files this session reads, as path strings, in the order they
   should be presented.
 
-  CFG is the `:instructions` value from harness.edn (or nil), which the caller
+  CFG is the `:instructions` value from config.edn (or nil), which the caller
   takes from (harness.cap.project/harness-config thread-id); PROJECT-DIR is that
   session's binding, or nil. Read fresh on every call, matching config.edn and
-  harness.edn, so editing the configuration takes effect on the next run.
+  config.edn, so editing the configuration takes effect on the next run.
 
   Two shapes:
 
@@ -121,7 +121,7 @@
       nothing -- and neither is worth stopping a run over.
     - A file that IS there but cannot be READ is a NAMED failure carrying the
       absolute path. This is the session's own configuration, the same family as
-      config.edn and harness.edn: a run that quietly proceeded without it would
+      config.edn and config.edn: a run that quietly proceeded without it would
       be following rules the user did not write, which is the one thing a session
       must never do silently.
 

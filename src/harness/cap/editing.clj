@@ -10,7 +10,7 @@
                   instead of fuzzy-matched. THE DEFAULT since 2026-09-15.
     :str-replace  the original `edit` -- an exact `old_string` replaced, refused
                   when it is absent or not unique. Still first-class, still fully
-                  tested, and one line of harness.edn away.
+                  tested, and one line of config.edn away.
 
   WHY THE DEFAULT MOVED, and why it is one line to move back. Anchor editing is
   what the session does unless somebody says otherwise, because the thing it fixes
@@ -27,40 +27,33 @@
   model reliably reaches for the wrong one. So the choice is made once, by
   whoever runs the session, and the toolset is BUILT to match it.
 
-  WHERE IT LIVES, AND WHY NOT config.edn. In harness.edn, beside the fence's
-  :approval, with the same two-level shape -- so a project that wants anchors can
-  say so without the user's home agreeing. config.edn is deliberately NOT the
-  place: its documented shape is exactly three knobs (provider, model,
-  reasoning-effort), and a fourth knob there is a NAMED failure rather than a
-  value somebody quietly drops (see harness.edge.http/model-post). Editing
-  policy is policy; it belongs with the rest of harness.edn.
+  WHERE IT LIVES: config.edn's :session :editing, beside the fence's :approval. It got
+  there by .scratch/config-merge -- it used to be harness.edn, with a project level -- and
+  what a person edits is now one file rather than four.
 
-  THE ONE DEPARTURE FROM harness.edn's SHALLOW MERGE, and it is paid for here.
-  harness-config replaces a top-level key WHOLE, project wins -- right for
-  :approval, where 'what will the fence do' should be legible in one file, and
-  wrong for this one. :editing composes KEY BY KEY, so a project that wants to
-  turn :grep off does not have to restate the block and re-decide every
-  default the user chose. harness-config's own behavior is untouched.
+  IT COMPOSES KEY BY KEY OVER THE DEFAULTS, and that is the property worth stating: a person
+  who writes ONE key (`:grep false`) does not have to restate the block and re-decide every
+  other default. (It used to be 'the two levels compose key by key'; the second level is
+  gone, the composition over the defaults is not.) What it does NOT do is remember an
+  earlier write: the block in the file IS the block, so a second write replaces the first
+  whole.
 
   Read fresh on every call, like every other config in this harness: editing
-  harness.edn moves the mode without a restart.
+  config.edn moves the mode without a restart.
 
   A BROKEN BLOCK IS A NAMED FAILURE, never a quiet fallback to the defaults. The
-  defaults are what a session gets when nobody SAID anything -- no harness.edn at
-  all, or no :editing key in one. A file that exists and says something
-  unreadable is a different situation, and conflating the two would make 'the
-  project asked for anchors' indistinguishable from 'the project's config was
-  ignored'. That is the same distinction harness.cap.project/read-harness-edn draws
-  for the fence, and it is reused rather than reinvented: one rule, one
-  implementation.
+  defaults are what a session gets when nobody SAID anything -- no :session section at all,
+  or no :editing key in one. A file that exists and says something unreadable is a
+  different situation, and conflating the two would make 'somebody asked for anchors'
+  indistinguishable from 'that config was ignored'. It is the same distinction
+  harness.cap.providers/check-config draws for every key in this file, reused rather than
+  reinvented: one rule, one implementation.
 
-  KEYS NOBODY READS ARE A FAILURE IN EITHER FILE, even when shadowed. A typo'd
-  :modes is not a value that loses a merge -- it is a request that was never
-  going to be honoured by either level, so it is reported against the level that
-  wrote it. The check therefore walks both blocks rather than the merged result.
-  The VALUES, by contrast, are checked as EFFECTIVE: a project overriding a
-  broken user value has to be able to fix it, so a shadowed-and-overridden value
-  is not itself an error."
+  KEYS NOBODY READS ARE A FAILURE, and the check walks the block AS WRITTEN. A typo'd
+  :modes is not a value that loses a merge -- it is a request nobody was ever going to
+  honour, so it is reported with the key and the file. The VALUES are checked as EFFECTIVE
+  (the folded result, against the defaults), because that is what a session is served.
+is not itself an error."
   (:require [clojure.string :as str]
             [harness.cap.project :as project]))
 
@@ -162,7 +155,7 @@
   config.edn, :session :editing, applied :editing-key by :editing-key.
 
   ONE LEVEL. `:editing` composed KEY BY KEY rather than whole (that finer overlay is why
-  this fn exists at all, and it is kept), but the two harness.edn levels it composed are
+  this fn exists at all, and it is kept), but the two config.edn levels it composed are
   gone -- see harness.cap.project/harness-config.
 
   Throws on a broken block, an unknown key, or an illegal effective value, each naming the
@@ -192,7 +185,7 @@
 ;; that a model which cannot see a capability reads its absence as "this does not
 ;; exist" and goes looking for a way around it. The answer is that the absence is
 ;; never silent: a call to an unserved name is refused BY NAME, and the refusal
-;; says what this session edits with instead and which harness.edn key switches
+;; says what this session edits with instead and which config.edn key switches
 ;; back. So the model learns the capability exists, learns what replaced it, and
 ;; learns how to get it -- which is more than the visible-but-refused version
 ;; ever told it.
@@ -246,7 +239,7 @@
   switched off with its own knob.
 
   The configuration is resolved per call, so a session that changes its
-  harness.edn changes its toolset on the next ask -- there is no cache to
+  config.edn changes its toolset on the next ask -- there is no cache to
   invalidate and no restart to perform."
   [thread-id name]
   (let [config (editing-mode thread-id)
@@ -270,10 +263,10 @@
       ;; Switched off by its own key rather than taken away by the mode: saying
       ;; 'this session edits by anchor, and grep is the anchor-based
       ;; editor' would be nonsense, and the way back is a different key.
-      (str name " is switched off in this session: harness.edn says "
+      (str name " is switched off in this session: config.edn says "
            (pr-str knob) " false. Nothing takes its place -- use `bash` if you"
            " need a search. To switch it back, write :editing {" knob " true} in"
-           " harness.edn.")
+           " config.edn.")
       (str name " is not served in this session: this session edits by "
            (get-in families [mode :edits-by])
            ", and " name " is " (get-in families [other :label]) "."

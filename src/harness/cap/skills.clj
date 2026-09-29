@@ -11,7 +11,7 @@
 
   `roots` IS PURE, AND THAT IS A SHAPE CONSTRAINT RATHER THAN A STYLE. It takes
   the configured value and the session's project directory and answers with
-  paths: it does not read harness.edn, does not look up a binding, and does not
+  paths: it does not read config.edn, does not look up a binding, and does not
   require harness.cap.project. The reason is a cycle. The project fence has to know
   these roots -- a skill's body says 'read references/x.md', and that path lands
   outside the project directory -- so harness.cap.project requires THIS namespace,
@@ -71,10 +71,10 @@
   fence, a tool body). A caller that has to SAY where a skill came from wants
   `root-layers`, which is where those two are decided.
 
-  SKILLS-CFG is the `:skills` value from harness.edn (or nil), which the caller
+  SKILLS-CFG is the `:skills` value from config.edn (or nil), which the caller
   takes from (harness.cap.project/harness-config thread-id); PROJECT-DIR is that
   session's binding, or nil. Read fresh on every call, matching config.edn and
-  harness.edn, so editing the configuration moves the roots without a restart.
+  config.edn, so editing the configuration moves the roots without a restart.
 
   Two shapes:
 

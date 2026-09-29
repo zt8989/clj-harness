@@ -16,7 +16,7 @@
   once, is what lets the tool and the tests above stay vendor-blind.
 
   THE KEY IS NOT CONFIGURATION. Each vendor's variable has a fixed name (no
-  `harness.edn` entry, no configurable env-var name) and is read through
+  `config.edn` entry, no configurable env-var name) and is read through
   harness.infra.home/env-value -- the home's .env first, then the environment, the same
   lookup the provider's HARNESS_API_KEY goes through. A key is a secret somebody put
   outside the repository; where it is looked for is not a per-session preference.

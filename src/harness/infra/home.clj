@@ -344,23 +344,22 @@
 
 ;; ------------------------------------------------- configured lists of paths
 ;;
-;; Two keys in harness.edn name lists of places to look -- :skills {:roots ..}
+;; Two keys in config.edn's :session name lists of places to look -- :skills {:roots ..}
 ;; and :instructions {:files ..} -- and both mean the same thing by them: a list
 ;; of directories or files, relative entries resolved against the session's
 ;; project directory like any tool path. The SHAPE CHECK lives here rather than
-;; in either consumer because it is this file's business (harness.edn is where
-;; these keys come from, and this is the namespace that owns harness.edn), and
+;; in either consumer because it is this file's business (config.edn is where
+;; these keys come from, and this is the namespace that owns it), and
 ;; because the two consumers must not require each other: the skills half has to
 ;; stay reachable from harness.cap.project, and the preamble half does not.
 
 (defn- config-files
-  "The harness.edn files a value could have come from, as absolute paths -- the
-  user level always, the bound project's when a project is bound. A failure
-  names these rather than a bare key: 'the configuration' is not a file, and a
-  reader told only the key has nowhere to go and look."
-  [project-dir]
-  (cond-> [(str (io/file (root) "harness.edn"))]
-    project-dir (conj (str (io/file project-dir ".harness" "harness.edn")))))
+  "The config.edn a value could have come from, as absolute paths -- ONE file now
+  (.scratch/config-merge): these keys live in :session, so there is exactly one place a
+  failure can send a reader to. The argument survives so a caller that still passes a
+  project directory compiles; it decides nothing."
+  [_project-dir]
+  [(str (io/file (root) "config.edn"))])
 
 (defn as-config-section
   "SECTION -> a map, or a NAMED failure when it is neither a map nor nil.
@@ -391,7 +390,7 @@
 
   The rule harness.cap.project/resolve-path applies to a tool's path argument,
   stated over an EXPLICIT directory so that the namespaces which must not
-  require harness.cap.project can still honour it -- a relative entry in harness.edn
+  require harness.cap.project can still honour it -- a relative entry in config.edn
   has to mean the same thing wherever it is written."
   [project-dir path]
   (let [f (io/file path)]
@@ -406,7 +405,7 @@
 
   An EMPTY vector is accepted and means what it says -- read nothing -- which is
   how a session turns one of these surfaces off without turning off everything
-  that reads harness.edn. Refusing it would leave 'I want none' expressible only
+  that reads config.edn. Refusing it would leave 'I want none' expressible only
   by pointing at a path that does not exist."
   [values expected key-name project-dir]
   (if (and (sequential? values) (every? string? values))

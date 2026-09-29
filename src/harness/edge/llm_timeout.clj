@@ -5,15 +5,15 @@
 
   IT IS ITS OWN NAMESPACE BECAUSE OF WHO READS IT. The guard itself is the kernel's
   (`harness.kernel.llm/idle-guarded-lines` disconnects, `harness.kernel.loop/model-call-watched`
-  decides), and the kernel reads no configuration -- so harness.edn is read HERE, at the
+  decides), and the kernel reads no configuration -- so config.edn is read HERE, at the
   edge, and handed down the same way `harness.edge.compaction/overflow-retries` is. Two
   readers (the run edge and the compaction path, which makes a model call of its own) and
   one answer, which is the whole reason this is a namespace rather than four lines in
   `harness.edge.http`.
 
-  THE VALUES ARE harness.edn's `:llm` BLOCK, composed KEY BY KEY from the two levels --
+  THE VALUES ARE config.edn's :session :llm` BLOCK, composed KEY BY KEY from the two levels --
   the project level over the user level, the shape `:editing` and `:compaction` already
-  use -- and read FRESH on every call (harness.edn's own discipline: edit the file and the
+  use -- and read FRESH on every call (config.edn's own discipline: edit the file and the
   next run obeys it, no restart). A block that says nothing takes the defaults:
 
       {:llm {:idle-timeout-ms     30000   ; 0 turns the guard off
@@ -29,7 +29,7 @@
             [harness.kernel.llm :as llm]))
 
 (def default-retries
-  "How many times a model call that went quiet may be tried again, when harness.edn says
+  "How many times a model call that went quiet may be tried again, when config.edn says
   nothing: THREE -- four attempts in all, counting the one that timed out.
 
   IT IS A BUDGET FOR ONE MODEL CALL, not for a run and not for a session. A call that
@@ -59,7 +59,7 @@
 
 (defn idle-timeout-ms
   "How long THREAD-ID's model calls may go without a line before the guard cuts them off,
-  in milliseconds: harness.edn's `:llm :idle-timeout-ms`, defaulting to
+  in milliseconds: config.edn's :session :llm :idle-timeout-ms`, defaulting to
   `harness.kernel.llm/default-idle-timeout-ms` (30000).
 
   THE DEFAULT LIVES IN THE KERNEL, not here: this is the knob's reader, and the one
@@ -69,7 +69,7 @@
                  :idle-timeout-ms))
 
 (defn retries
-  "How many times a call that timed out may be tried again for THREAD-ID: harness.edn's
+  "How many times a call that timed out may be tried again for THREAD-ID: config.edn's
   `:llm :idle-timeout-retries`, defaulting to `default-retries` (3)."
   [thread-id]
   (whole-number! (get (block thread-id) :idle-timeout-retries default-retries)
