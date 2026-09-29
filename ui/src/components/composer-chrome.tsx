@@ -104,6 +104,7 @@ import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { bindThread, projectName, type ProjectSummary } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
+import { isNewChatView } from "@/lib/thread-view";
 
 import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
@@ -806,7 +807,14 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
 /// copied element, so the declaration lives here and `thread.aui.tsx` is untouched.
 export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
   const threadId = useThreadId();
-  const started = useAuiState((s) => s.thread.messages.length > 0);
+  // WHETHER THIS IS THE NEW-CHAT COMPOSER, and it is the LAYOUT's answer rather than a
+  // second count of the messages. `lib/thread-view.ts` owns the question, and the two
+  // halves of the screen must not answer it differently: counting messages here said a
+  // session whose history is still in flight WAS a new chat, so for that instant the
+  // frame drew the project/branch bar over a docked conversation, and the footer kept the
+  // `pb-4 md:pb-6` strip `styles.css` removes once this attribute is on
+  // (`.scratch/composer-loading-state`).
+  const started = useAuiState((s) => !isNewChatView(s));
   // The attachment rule's refusal, if the last file offered was turned away. THIS
   // IS THE ONLY PLACE A REFUSAL IS DRAWN -- both reasons a file can be refused
   // arrive here (see lib/attachment-rules.ts), which is what keeps "what a refusal

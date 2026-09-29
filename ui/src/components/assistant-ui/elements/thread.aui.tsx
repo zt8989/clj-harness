@@ -47,6 +47,9 @@ import { WindowTop, type WindowTopProps } from "@/components/window-top";
 import { InjectionCard } from "@/components/context-card";
 import { isCardOnly, isCardPart } from "@/lib/card-parts";
 import { isOpeningEntryId, textOfParts } from "@/lib/injections";
+// LOCAL (`.scratch/composer-loading-state`): the new-chat question lives in `lib/` now, so
+// the view and the composer's chrome ask it once instead of twice -- see that module's head.
+import { isNewChatView } from "@/lib/thread-view";
 import { cn } from "@/lib/utils";
 // LOCAL (ticket 09): the server's own word for this conversation's run. The composer's
 // action row reads it to decide whether Send is even on offer -- see `ComposerAction`.
@@ -187,12 +190,6 @@ const PassthroughFrame: FC<PropsWithChildren> = ({ children }) => <>{children}</
 
 const ThreadComponentsContext =
   createContext<ThreadComponents>(EMPTY_COMPONENTS);
-
-// Startup exposes a loading placeholder thread; treat it as a new chat so
-// the composer mounts centered. Loads after startup keep the docked layout.
-const isNewChatView = (s: AssistantState) =>
-  s.thread.messages.length === 0 &&
-  (!s.thread.isLoading || s.threads.isLoading);
 
 // A switched thread that is still fetching its history: skeleton, not welcome.
 const isHistoryLoadingView = (s: AssistantState) =>
