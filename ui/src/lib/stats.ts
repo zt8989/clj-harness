@@ -53,11 +53,31 @@ export async function statsFor(threadId: string): Promise<StatsPayload | null> {
 ///
 /// A KEY THE PUSH DOES NOT CARRY IS NOT DELETED: 'not reported' is not zero, and the
 /// strip draws absences by leaving them out (`lib/format.ts`'s `nCells`).
+///
+/// AND THE SAME RULE ONE LEVEL DOWN, WHICH TOOK A BROWSER TO LEARN (measured 2026-09-29): the
+/// `context` section is merged FIELD BY FIELD rather than replaced. Every key in it is
+/// independently optional -- `harness.edge.context/state->context` says 'every key is absent
+/// when it would be a guess' -- and the one that is routinely absent is `parts`: the
+/// apportioned buckets need the run's message side, which the kernel writes one beat AFTER the
+/// terminal frame the push rides on. Spreading the section DELETED the split the snapshot had,
+/// so the ring went from three coloured arcs to the single-colour 'no split yet' arc
+/// (near-black `text-foreground` in the light theme) -- and it STAYED that way, because
+/// `pushed` is never cleared: the fresh snapshot the ask after a run brings was overridden by
+/// the same stale section for the rest of the session.
 export function withPushedNumbers(
   snapshot: StatsPayload | null,
   numbers: Partial<StatsPayload> | null | undefined,
 ): StatsPayload | null {
   if (numbers === null || numbers === undefined) return snapshot;
   if (snapshot === null) return numbers as StatsPayload;
-  return { ...snapshot, ...numbers };
+  return {
+    ...snapshot,
+    ...numbers,
+    // THE ONE SECTION THAT IS MERGED RATHER THAN REPLACED (see the paragraph above): a push
+    // that does not report the split must not take away the one the snapshot had.
+    context:
+      numbers.context === undefined
+        ? snapshot.context
+        : { ...snapshot.context, ...numbers.context },
+  };
 }

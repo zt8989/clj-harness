@@ -494,7 +494,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// only the task pane follows is in the declared set (and out of it again when the pane stops).
 /// It is a value question about a RECONNECT: the declaration is what a replaced socket
 /// re-states, and a family missing from it is a family the server stops sending to.
-const EXPECTED_CASES = 174;
+///
+/// ...174 -> 175: the `stats` suite's case for the ring that went black (2026-09-29) -- a push
+/// whose `context` reports no `parts` must not delete the split the snapshot had.
+const EXPECTED_CASES = 175;
 
 let total = 0;
 for (const suite of SUITES) {

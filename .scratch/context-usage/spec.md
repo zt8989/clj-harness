@@ -215,3 +215,29 @@
 那次压缩折掉 308,071 tokens 之后，紧接那一发请求的 `prompt_cache_hit_tokens` 是 696,064/696,304
 （前缀命中 99.97%）——**发出去的数组与压缩前逐字相同**；以及同一 run 里随后 5 次压缩被厂商 400 以
 「assistant 的 tool_calls 没有对应的 tool 消息」挡回，最后一次成功那条记的区间是反的。
+
+## 收尾时抓到的 bug：推送把它抹黑（2026-09-29）
+
+**症状（主人报的）**：composer 的上下文圈**首次加载是彩色，之后一次增量推送就变黑**，而且一直是黑的。
+
+**根因**：`withPushedNumbers` 是 `{...snapshot, ...numbers}`——整份 `context` **整个**被推送那份顶掉。而推送
+那份的 `parts` 是**例行缺席**的：三个桶要那一轮 run 的 message 侧，而内核是在推送所骑的那个终止帧**之后
+一拍**才把它写完的（`harness.edge.context/state->context` 自己写着「每个键在只能猜的时候就缺席」）。桶没了
+⇒ `arcsOf` 返回空 ⇒ 环退化成「只有份额、没有分色」那支单色弧，颜色是 `text-foreground`——浅色主题里就是
+近黑。**而且它一直黑**：`pushed` 从不被清，run 结束后那次补读拿回来的新快照，照样被同一份陈旧 section 顶掉。
+
+**修法**：`context` 这一节**按键合并**（`{...snapshot.context, ...numbers.context}`），其余顶层键照旧由推送
+替换。这与 `lib/stats.ts` 里早就写着的那条规矩是同一条——「推送不带的键不是被删掉」，只是这次要往下走一层。
+推送**带**了桶就照旧替换（桶不是不可动的，只是不能被沉默删掉）。
+
+**判据**：`stats` 套件 `a-push-that-does-not-report-the-split-does-not-delete-it`（一条带三桶的快照 + 一条只带
+usedTokens/windowTokens/percent 的推送 ⇒ 三个桶还在、`contextCells` 仍数得出它们；推送自己带桶时替换；推送
+整个没有 `context` 时整节照旧）。用例数 174 → 175。
+
+**真机复验**（`node scripts/dev.mjs --scripted --ui-port 5199`，真浏览器）：新会话第一拍环还没数（那是对的：
+那一轮 run 的 split 还不存在），`+9s` 起三个颜色（`primary` / `amber-500` / `sky-500`）一直保持到这一段落定——
+中间又落了推送；面板点开三个桶都在（System prompt ~132 / Tool definitions ~978 / Conversation ~124，三条色带
+10.7% / 79.3% / 10.0%）。
+
+**没动的一件**：`UNKNOWN_HUE`（分色还不知道时那支单色弧的颜色）仍是 `text-foreground`。它只在**没有**桶可画的
+时候出现（新会话的第一拍），不是这次报的那件事；要让它读起来更中性，改那一处即可。

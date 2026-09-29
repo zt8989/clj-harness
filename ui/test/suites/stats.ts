@@ -17,7 +17,14 @@ import { expect } from "vitest";
 
 import { type Case, type Suite, postRun, script, threadId, url } from "../e2e";
 import { translator } from "../support/locale";
-import { type StatsPayload, formatBytes, formatMillis, formatTime, statsCells } from "../../src/lib/format";
+import {
+  type StatsPayload,
+  contextCells,
+  formatBytes,
+  formatMillis,
+  formatTime,
+  statsCells,
+} from "../../src/lib/format";
 import { withPushedNumbers } from "../../src/lib/stats";
 
 /// English is the language these cells were first written in, and it stays the one
@@ -340,6 +347,65 @@ const cases: Case[] = [
 
       // ...and the same two readings in Chinese, where the words differ but the mark does not.
       expect(statsCells(opening, zh)?.total).toBe("~12k tok");
+    },
+  },
+
+  {
+    name: "a-push-that-does-not-report-the-split-does-not-delete-it",
+    run: async () => {
+      // THE BUG, PINNED WHERE IT WAS SEEN (owner, 2026-09-29): the composer's ring was
+      // COLOURED on the first load and went BLACK on the next push. What arrives is a push
+      // whose `context` is one call's numbers with the split left out -- `parts` needs the
+      // run's message side, written a beat after the terminal frame the push rides on -- and
+      // spreading the section deleted the snapshot's buckets, which is the single-colour
+      // 'no split yet' arc in `components/context-ring.tsx`.
+      const snapshot = {
+        steps: 4,
+        context: {
+          usedTokens: 900,
+          windowTokens: 3000,
+          percent: 30,
+          parts: [
+            { key: "system", tokens: 100 },
+            { key: "tools", tokens: 200 },
+            { key: "conversation", tokens: 600 },
+          ],
+        },
+      } as StatsPayload;
+
+      // THE PUSH THAT CAUSED IT: the same window one call later, and no split at all.
+      const merged = withPushedNumbers(snapshot, {
+        steps: 5,
+        context: { usedTokens: 1200, windowTokens: 3000, percent: 40 },
+      }) as StatsPayload;
+
+      // WHAT THE PUSH REPORTS IS THE PUSH'S -- the fill moves with it.
+      expect(merged.context?.usedTokens).toBe(1200);
+      expect(merged.context?.percent).toBe(40);
+      expect(merged.steps).toBe(5);
+
+      // AND WHAT IT DOES NOT REPORT IS STILL THERE, so the ring can go on drawing three arcs
+      // instead of falling back to one.
+      expect(merged.context?.parts?.map((part) => part.key)).toEqual([
+        "system",
+        "tools",
+        "conversation",
+      ]);
+      const cells = contextCells(merged, en);
+      expect(cells?.parts.map((part) => part.tokens)).toEqual([100, 200, 600]);
+      expect(cells?.percent).toBe(40);
+
+      // A PUSH THAT *DOES* REPORT A SPLIT REPLACES IT -- the buckets are not sacrosanct, they
+      // are simply not deleted by silence.
+      const reported = withPushedNumbers(snapshot, {
+        context: { usedTokens: 1000, windowTokens: 3000, percent: 33, parts: [{ key: "tools", tokens: 1000 }] },
+      }) as StatsPayload;
+      expect(reported.context?.parts?.map((part) => part.key)).toEqual(["tools"]);
+
+      // AND NOTHING ELSE ABOUT THE SNAPSHOT IS DISTURBED: no push is still the snapshot, and
+      // a push with no context at all keeps the whole section.
+      expect(withPushedNumbers(snapshot, { steps: 6 })).toEqual({ ...snapshot, steps: 6 });
+      expect((withPushedNumbers(snapshot, { steps: 6 }) as StatsPayload).context?.parts?.length).toBe(3);
     },
   },
 ];
