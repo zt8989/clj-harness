@@ -89,6 +89,11 @@ lib/
   turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、它做了几次调用几条消息、
                     摘要那行写什么。**零 import**（`turnBounds` / `turnIsSettled` /
                     `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
+  thread-view.ts    「这一屏是新建的，还是已经在会话里」这道题（`isNewChatView`）：布局按它决定
+                    composer 居中还是贴底，composer 的 chrome 按它决定画不画项目/分支条、
+                    `ui/src/styles.css` 按它决定收不收 footer 那 16–24px。**一处定义、两处读**——
+                    它原先是两份（布局一份、composer 那份数消息），两份的差额就是「加载中」那
+                    第三种形态（`.scratch/composer-loading-state/`）
   picker.ts         选择器那份清单的**过滤与分组**：查什么（标签 / hint / 组名）、
                     同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
   reasoning-preview.ts  思考行那一行字说的是什么（想完了说**首行**，还在想就把**已经到达的那一段**
@@ -507,8 +512,9 @@ abort 一次两段都停，所以始终只有一个在飞的东西），只在�
 - **会话开始之后，composer 底下不留空隙**：抄来那份 footer 带着上游的 `pb-4 md:pb-6`，于是停靠的
   composer 与窗口底边之间留着 16–24px 的页面底色——一段读起来像「剩下来的地方」的空白。
   规则写在 `ui/src/styles.css`：`.aui-thread-viewport-footer:has([data-started]) { padding-bottom: 0 }`，
-  `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框在会话有消息时挂上），
-  首次会话居中的时候仍是上游的间距。
+  `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框挂上，判据是 `lib/thread-view.ts`
+  的 `isNewChatView`——与布局决定居中还是贴底的**是同一句**，所以「这场会话的历史还在读」那一瞬
+  也贴底、也不留空隙），首次会话居中的时候仍是上游的间距。
 
 抄进来的清单（**对账是读 `LOCAL:` 标注**——i18n 那批落地之后这些文件就地改，逐字节 diff 不再是手段）：
 
