@@ -1,0 +1,64 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c1",
+          "name": "todo_write",
+          "arguments": {
+            "todos": [
+              { "content": "读一遍 ComposerFrame", "status": "completed" },
+              { "content": "读一遍 mux 的 fact 家族", "status": "completed" },
+              { "content": "写 composer 之上那条横条", "status": "in_progress" },
+              { "content": "接上 model/start 与 turn/end 两个重问时机", "status": "pending" },
+              { "content": "开浏览器走一遍", "status": "pending" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "content": "清单写好了：两条已完成，一条正在做，两条待处理。上面那条横条现在就该报这个数。"
+    },
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c2",
+          "name": "todo_write",
+          "arguments": {
+            "todos": [
+              { "content": "读一遍 ComposerFrame", "status": "completed" },
+              { "content": "读一遍 mux 的 fact 家族", "status": "completed" },
+              { "content": "写 composer 之上那条横条", "status": "completed" },
+              { "content": "接上 model/start 与 turn/end 两个重问时机", "status": "in_progress" },
+              { "content": "开浏览器走一遍", "status": "pending" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "content": "改好了：横条上「已完成」多了一条、「进行中」换成了下一件。",
+      "usage": {
+        "prompt_tokens": 1234,
+        "completion_tokens": 42,
+        "total_tokens": 1276
+      }
+    },
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "c3",
+          "name": "todo_write",
+          "arguments": { "todos": [] }
+        }
+      ]
+    },
+    {
+      "content": "清单清空了：这条 run 已经没有要做的事。"
+    }
+  ]
+}

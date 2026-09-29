@@ -108,6 +108,7 @@ import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/
 import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
+import { ComposerTodos } from "./composer-todos";
 import { Picker } from "./picker";
 // THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING USED TO OWE IS GONE (ticket 09
 // of `.scratch/session-after-refresh`): what stands there now is a STOP button, drawn in
@@ -818,6 +819,9 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
             (ticket 09): the composer's own action row draws a STOP there instead
             (`thread.aui.tsx`'s `ComposerStop`), because the thing that was shut is a
             thing a person can now act on. */}
+        {/* THE TASK LIST SITS ABOVE THE INPUT -- the same slot the context bar leaves once
+            the conversation starts, so the two never meet and neither has to be ordered. */}
+        <ComposerTodos threadId={threadId} />
         {children}
         {refusal !== null && (
           <p

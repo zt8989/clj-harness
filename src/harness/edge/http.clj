@@ -119,6 +119,7 @@
             [harness.cap.instruction-updates :as instructions]
             [harness.cap.jobs :as jobs]
             [harness.cap.subagents :as subagents]
+            [harness.cap.todos :as todos]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
@@ -3489,12 +3490,13 @@
   nobody serves -- has to fall through to the ordinary AG-UI handler rather than
   be answered 405 by a route that was never about it.
 
-  SEVEN OF THE TWELVE ARE GETS, AND ONE VERB HAS BOTH METHODS: `stats`, `trajectory` and
+  EIGHT OF THE FOURTEEN ARE GETS, AND ONE VERB HAS BOTH METHODS: `stats`, `trajectory` and
   `delegations` only READ the log (a folded
   view of a finished conversation, and the per-turn timeline), `sofar` reads the
   same file while it is still being written, the window's two verbs (`feed` and
-  `page`) read it in pieces, and `jobs` reads the process's own JOB REGISTRY rather
-  than any file -- while a POST of that same verb STOPS one of those jobs (ticket 04
+  `page`) read it in pieces, `jobs` reads the process's own JOB REGISTRY rather than
+  any file, `todos` reads the STORE's task-list row, and the POST of `jobs` STOPS one
+  of those
   of `.scratch/right-pane-tasks`: a person's stop, which claims no telling). The set
   stays closed and the 405 stays here -- what
   changed is that the sentence 'every verb on this shape is a POST' is no longer
@@ -3518,7 +3520,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs"})
+  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs" "todos"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -3958,6 +3960,27 @@
 
       :else
       (api-response 200 {:threadId stem :delegations (:ok folded)}))))
+
+(defn- todos-get
+  "GET /api/threads/<stem>/todos -- the task list a model last wrote for one session, as
+  the store's row holds it: one map of `content` and `status` per item, in the order it
+  was written, straight from harness.cap.todos/items-for.
+
+  IT READS THE STORE'S ROW, NOT THE LOG, and that is the whole of its point: the
+  `todo_write` call that produced the list is folded away by a compaction, while the row
+  outlives the run that wrote it -- so 'what is left to do' is a question a screen can
+  ask of a conversation it scrolled away from.
+
+  NO LOCATE AND NO 404: the list is a row keyed by the thread id, not a line under the
+  home's log tree. A stem this home has never heard of answers [] exactly as a session
+  that never wrote one does -- `items-for` already collapses those two facts, and this
+  route does not take them apart again.
+
+  READ-ONLY, so no audit line: asking again is the ordinary use (the composer's strip
+  re-asks on every model call), and a route that wrote a line per ask would fill the
+  logs with 'somebody looked'."
+  [stem]
+  (api-response 200 {:threadId stem :todos (todos/items-for stem)}))
 
 (defn- jobs-get
   "GET /api/threads/<stem>/jobs -- the background commands THIS PROCESS is running for
@@ -6281,8 +6304,8 @@
 
     :else
     (if-some [{:keys [verb stem]} (stem-verb-route "threads" thread-verbs (:uri req))]
-      ;; The verb-carrying routes: one shape, many verbs. FOUR OF THEM ARE POSTS
-      ;; because they have an effect, and seven are GETs because they only read --
+      ;; The verb-carrying routes: one shape, many verbs. The POST-only verbs have an
+      ;; effect and the GET-only verbs only read --
       ;; and `jobs` HAS BOTH, because a GET lists the process's jobs and a POST
       ;; stops one of them -- so the rule is 'the method says whether there is an
       ;; effect', not 'this shape is POST-only'. A method this shape does not serve
@@ -6304,6 +6327,7 @@
         [:get "page"]     (page-get req stem)
         [:get "delegations"] (delegations-get stem)
         [:get "frames"]    (frames-get stem)
+        [:get "todos"]    (todos-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]

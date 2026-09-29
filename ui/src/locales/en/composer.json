@@ -36,5 +36,18 @@
   },
   "run": {
     "stop": "Stop answering"
+  },
+  "todos": {
+    "done_one": "{{count}} done",
+    "done_other": "{{count}} done",
+    "inProgress_one": "{{count}} in progress",
+    "inProgress_other": "{{count}} in progress",
+    "pending_one": "{{count}} pending",
+    "pending_other": "{{count}} pending",
+    "state": {
+      "completed": "completed",
+      "inProgress": "in progress",
+      "pending": "pending"
+    }
   }
 }

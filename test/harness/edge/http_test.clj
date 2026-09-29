@@ -22,6 +22,7 @@
             [harness.edge.http :as http]
             [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
+            [harness.cap.todos :as todos]
             [harness.cap.providers :as providers]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
@@ -1851,6 +1852,17 @@
     (.send (HttpClient/newHttpClient) (.build b)
            (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
 
+(defn- api-call-as
+  "A call to PATH with METHOD spelled out -- the pairs `api-call` cannot make, a PUT or a
+  DELETE on a verb that serves GET only. No body: the refusal is about the METHOD, and
+  the dispatch answers before it would read one."
+  [method path]
+  (let [b (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
+              (.header "Content-Type" "application/json")
+              (.method (str/upper-case (name method)) (HttpRequest$BodyPublishers/noBody)))]
+    (.send (HttpClient/newHttpClient) (.build b)
+           (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))))
+
 (defn- read-json [resp]
   (json/read-str (.body resp) :key-fn keyword))
 
@@ -3452,6 +3464,56 @@
            (let [{:keys [id]} (jobs/start! t {:command "sleep 30"})]
              (is (= 404 (.statusCode (stop "it-jobs-stop-other" id))))))))
       (finally (jobs/shutdown!)))))
+
+(deftest the-todos-route-answers-the-row-a-model-wrote
+  ;; THE TASK LIST OVER THE REAL EDGE. Unlike the log-folding GETs, this one reads the
+  ;; store's ROW -- the same row `todo_write` replaces and `todo_read` folds back -- so the
+  ;; answers worth pinning are what 'never wrote one' looks like (an ordinary [], never a
+  ;; 404), that the route adds nothing to the row it read, and that reading it writes
+  ;; nothing anywhere. The row's own lifecycle is `harness.cap.todos-test`'s case.
+  (let [t "it-todos-list"
+        nowhere "no-such-session-anywhere"
+        items [{:content "读一遍 ComposerFrame" :status "in_progress"}
+               {:content "写横条" :status "pending"}
+               {:content "走查一遍" :status "completed"}]
+        todos-of (fn [tid]
+                   (:todos (read-json (api-call :get (str "/api/threads/" tid "/todos") nil))))
+        row-of (fn [tid]
+                 (first (db/select "SELECT items, updated_at FROM todos WHERE thread_id = ?" tid)))]
+    (with-bare-server
+     (fn []
+       (testing "a session that never wrote a list answers [], not a refusal"
+         (let [resp (api-call :get (str "/api/threads/" t "/todos") nil)]
+           (is (= 200 (.statusCode resp)))
+           (is (= t (:threadId (read-json resp))))
+           (is (= [] (:todos (read-json resp))))))
+       (testing "and a stem this home has never heard of answers [] too"
+         ;; No locate, no 404: the list is a row keyed by the thread id, not a line under
+         ;; the home's log tree -- `jobs` answers its strangers the same way.
+         (let [resp (api-call :get (str "/api/threads/" nowhere "/todos") nil)]
+           (is (= 200 (.statusCode resp)))
+           (is (= nowhere (:threadId (read-json resp))))
+           (is (= [] (:todos (read-json resp))))))
+       (testing "what the model wrote is what the route answers, field for field, in order"
+         (todos/write! t items)
+         (is (= items (todos-of t)))
+         (is (= (todos/items-for t) (todos-of t))
+             "the route is a second READER of the row, not a second implementation"))
+       (testing "asking twice answers the same thing and changes no row"
+         (let [before (row-of t)
+               first-answer (todos-of t)
+               second-answer (todos-of t)]
+           (is (= first-answer second-answer))
+           (is (= before (row-of t)) "a GET on this edge only answers")
+           (is (false? (.exists (io/file (log-file-for t))))
+               "read-only: no audit line, no log for this session at all")))
+       (testing "a method the verb does not serve is a 405, from the dispatch's own case"
+         (doseq [m [:post :put :delete]]
+           (let [resp (if (= :post m)
+                        (api-call :post (str "/api/threads/" t "/todos") "{}")
+                        (api-call-as m (str "/api/threads/" t "/todos")))]
+             (is (= 405 (.statusCode resp)) (str (name m) " is not a method this verb serves"))
+             (is (= "method not allowed" (:error (read-json resp)))))))))))
 
 (deftest rebuilding-a-session-that-has-never-run-answers-an-empty-conversation
   ;; The sidebar's very first click on a brand-new session. Binding wrote an audit
