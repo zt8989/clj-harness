@@ -103,7 +103,6 @@
             [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
-            [harness.edge.projection :as projection]
             [harness.edge.compaction :as compaction]
             [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
@@ -6576,13 +6575,20 @@
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
-                   ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
-                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `stream/push!` must not wait for
-                   ;; a database write, and a pass that misses a tick is a NUMBER
-                   ;; (`harness.edge.projection/lag`) rather than a lost line. It HAS a teardown,
-                   ;; unlike the writer: a process that stops serving stops copying, and the next one
-                   ;; resumes at the offset it left.
-                   (projection/start!)]]
+                   ;; THE CONTENT PROJECTION (ADR 0008) IS PAUSED -- `harness.edge.projection/start!`
+                   ;; used to stand here (2026-09-29). Why, and at what price it comes back, is
+                   ;; `.scratch/memory-hygiene/`: its spec carries the readings and the ruling, ticket 04
+                   ;; the way back. A round walks EVERY session and every round's every lookup
+                   ;; opens its own sqlite connection (plus a migration pass) -- interval 2000 ms vs a
+                   ;; measured 3,914 ms round, 46% of this process's CPU -- and no reader in the tree
+                   ;; asks for `messages` / `tool_calls` yet, so nothing is lost while it is off.
+                   ;; ADR 0008's three claims are untouched: the record is still the only truth, the
+                   ;; projection is still read-only, and `harness.edge.projection/rebuild!` still makes
+                   ;; it whole, from the record alone.
+                   ;; PUT IT BACK ONLY AFTER ticket 04 makes a round cheap (touch only the sessions
+                   ;; whose log grew; ONE connection per round -- the discipline decision 4 left
+                   ;; unstated). Putting it back is this require plus this call, and nothing else.
+                   ]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.infra.stream`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the
