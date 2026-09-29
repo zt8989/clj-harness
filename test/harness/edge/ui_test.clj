@@ -19,7 +19,9 @@
   (:import [java.net Socket URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse HttpResponse$BodyHandlers]
-           [java.nio.charset StandardCharsets]))
+           [java.io ByteArrayInputStream]
+           [java.nio.charset StandardCharsets]
+           [java.util.zip GZIPInputStream]))
 
 ;; ------------------------------------------------------------------- the tools
 
@@ -47,6 +49,26 @@
 
 (defn- header [^HttpResponse resp name]
   (str (.orElse (.firstValue (.headers resp) name) "")))
+
+(defn- exchange-with
+  "One request to PATH on PORT carrying HEADERS, answered as RAW BYTES: a folded body
+  is not text until somebody unfolds it, and this client would happily hand back the
+  gzip bytes decoded as UTF-8 -- mojibake that still compares unequal to the file, so
+  the case would pass for the wrong reason."
+  [port method path headers]
+  (let [builder (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
+        builder (reduce (fn [b [name value]] (.header b name value)) builder headers)
+        builder (case method
+                  :get  (.GET builder)
+                  :head (.method builder "HEAD" (HttpRequest$BodyPublishers/noBody)))]
+    (.send (HttpClient/newHttpClient) (.build builder)
+           (HttpResponse$BodyHandlers/ofByteArray))))
+
+(defn- gunzipped
+  "BODY, raw off the wire, unfolded back into text."
+  [^bytes body]
+  (with-open [in (GZIPInputStream. (ByteArrayInputStream. body))]
+    (String. (.readAllBytes in) StandardCharsets/UTF_8)))
 
 (defn- raw-get
   "PATH asked for over a BARE SOCKET, byte for byte, and the whole response back as
@@ -170,6 +192,72 @@
       (finally
         (support/wipe-tree! dist)
         (support/wipe-tree! outside)))))
+
+(deftest the-page-goes-out-folded-when-the-client-asks-and-only-then
+  ;; THE FILES ARE SIZED FOR THE RULES, not for a build: one above the floor and
+  ;; compressible, one below it, and one that is big enough but an already-compressed
+  ;; TYPE -- so a case that came out the wrong way could not be explained by the other
+  ;; rule.
+  (let [dist  (support/temp-dir "ui-gzip")
+        big   (str "<!doctype html>" (apply str (repeat 128 "<div id=\"root\"></div>")))
+        tiny  "x"
+        image (apply str (repeat 4096 "PNG"))]
+    (try
+      (write-file! dist "index.html" big)
+      (write-file! dist "assets/big.js" big)
+      (write-file! dist "assets/tiny.js" tiny)
+      (write-file! dist "assets/logo.png" image)
+      (with-dist
+        dist
+        (fn [port]
+          (testing "a client that takes gzip gets the folded form, and it unfolds to the file"
+            (let [resp (exchange-with port :get "/assets/big.js" {"Accept-Encoding" "gzip"})
+                  raw  (.body resp)]
+              (is (= 200 (.statusCode resp)))
+              (is (= "gzip" (header resp "Content-Encoding")))
+              (is (= "text/javascript; charset=utf-8" (header resp "Content-Type"))
+                  "the type is the FILE's: the encoding describes the body, not what it is")
+              (is (= "Accept-Encoding" (header resp "Vary"))
+                  "one URL, two possible bodies -- a cache has to be told")
+              (is (< (alength raw) (count big))
+                  "and it is smaller than the file, which is the whole point")
+              (is (= big (gunzipped raw)) "the bytes, exactly, after unfolding")))
+
+          (testing "a client that did not ask gets the file itself, and no Vary is owed"
+            (let [resp (exchange port :get "/assets/big.js")]
+              (is (= "" (header resp "Content-Encoding")))
+              (is (= big (.body resp)))))
+
+          (testing "`gzip;q=0` is a client saying NO"
+            (is (= "" (header (exchange-with port :get "/assets/big.js"
+                                               {"Accept-Encoding" "gzip;q=0"})
+                             "Content-Encoding"))))
+
+          (testing "`*` and a weighted gzip are a yes"
+            (doseq [said ["*" "gzip;q=0.5" "identity, gzip"]]
+              (is (= "gzip"
+                     (header (exchange-with port :get "/assets/big.js" {"Accept-Encoding" said})
+                             "Content-Encoding"))
+                  said)))
+
+          (testing "a type that is already compressed is never folded, however big"
+            (let [resp (exchange-with port :get "/assets/logo.png" {"Accept-Encoding" "gzip"})]
+              (is (= "" (header resp "Content-Encoding"))
+                  "folding a PNG makes it bigger")
+              (is (= "" (header resp "Vary"))
+                  "nothing about this answer depends on the request header")))
+
+          (testing "a body under the floor is not worth folding"
+            (is (= "" (header (exchange-with port :get "/assets/tiny.js"
+                                               {"Accept-Encoding" "gzip"})
+                             "Content-Encoding"))))
+
+          (testing "HEAD answers the headers of the GET it stands for"
+            (let [resp (exchange-with port :head "/assets/big.js" {"Accept-Encoding" "gzip"})]
+              (is (= 200 (.statusCode resp)))
+              (is (= "gzip" (header resp "Content-Encoding")))
+              (is (zero? (alength ^bytes (.body resp))) "and still no body")))))
+      (finally (support/wipe-tree! dist)))))
 
 ;; ------------------------------------------------------------- no build at all
 

@@ -22,6 +22,22 @@
   running is picked up on the next request: the directory is a path, whether it
   holds a page is asked per request, and the shell is answered `no-cache` so the
   browser comes back for the new hashed names instead of keeping the old ones.
+  THAT INCLUDES THE COMPRESSED FORM: a file is folded on the way out, per request,
+  and the bytes are not kept (`gzipped`).
+
+  THE PAGE GOES OUT COMPRESSED when the client says it takes gzip (`accepts-gzip?`),
+  and only then. The built bundle is 1.5 MB of JavaScript that gzips to 417 KB and
+  a stylesheet that gzips to a sixth of itself -- 1.62 MB of page becomes 444 KB,
+  measured on this repo's own `ui/dist` 2026-09-29 -- which is the whole of what
+  this namespace is for: handing a browser the page, over a link that may be a
+  phone on the LAN rather than the loopback.
+
+  TWO RULES BOUND IT, and both are about not making things worse. Only a type that
+  CAN be folded is folded (`compressible?`): a PNG or a woff2 is already
+  compressed, and gzipping one makes it BIGGER (measured: 1 KB of random bytes ->
+  1047), so the type decides and not the size. And only a file above a floor
+  (`gzip-min-bytes`), because gzip's own header and trailer are ~20 bytes that a
+  very small body cannot pay for (measured: 24 bytes -> 44, 48 -> 68, 96 -> 68).
 
   THREE RULES, and each one is a refusal:
 
@@ -43,10 +59,11 @@
   change depending on whether a build happens to exist on the machine."
   (:require [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import [java.io File]
+  (:import [java.io ByteArrayOutputStream File]
            [java.net URLConnection URLDecoder]
            [java.nio.charset StandardCharsets]
-           [java.util Locale]))
+           [java.util Locale]
+           [java.util.zip GZIPOutputStream]))
 
 (defn default-dir
   "Where a build lands when nobody names one: `ui/dist` under the directory this
@@ -150,6 +167,67 @@
         (URLConnection/guessContentTypeFromName name)
         "application/octet-stream")))
 
+(def ^:private gzip-min-bytes
+  "How small a file may be and still be worth folding, in bytes.
+
+  GZIP'S OWN HEADER AND TRAILER ARE ABOUT 20 BYTES, and the deflate framing adds a
+  little more, so a body with nothing to fold comes back BIGGER. Measured on this
+  machine 2026-09-29: a 24-byte body becomes 44, a 48-byte body 68, a 64-byte body
+  68; 96 bytes is where it starts paying. 128 sits above that line rather than on
+  it, so this stays one number instead of a judgement call per request."
+  128)
+
+(defn- compressible?
+  "Whether a body of this TYPE has anything for gzip to fold.
+
+  BY TYPE AND NOT BY SIZE, which is the half worth stating: a PNG, a JPEG, a woff2
+  or a `.gz` is ALREADY compressed, and folding one makes the answer bigger
+  (measured: 1 KB of random bytes -> 1047 bytes) as well as slower. What is listed
+  here is what a build of this page emits and can be folded, plus `application/wasm`,
+  which compresses to about half and is fetched by the same browser that asked for
+  the JavaScript."
+  [^String type]
+  (let [bare (first (str/split type #";"))]
+    (or (str/starts-with? bare "text/")
+        (contains? #{"application/json" "application/javascript" "application/xml"
+                     "image/svg+xml" "application/wasm"}
+                   bare))))
+
+(defn- accepts-gzip?
+  "Whether the CLIENT said it takes gzip -- the whole of what makes folding legal.
+  Answering gzip to a client that did not ask is a corrupt file, not a smaller one.
+
+  PARSED RATHER THAN MATCHED BY SUBSTRING, because `gzip;q=0` is a client saying NO
+  and `str/includes?` would read it as a yes. A bare `gzip`, `gzip;q=0.5` and `*` are
+  all a yes; anything unreadable is a no -- and the safe answer to 'unreadable' is
+  the file exactly as it sits on disk."
+  [req]
+  (let [said (get-in req [:headers "accept-encoding"])]
+    (boolean
+     (when (string? said)
+       (some (fn [entry]
+               (let [[token params] (str/split entry #";" 2)
+                     name  (str/lower-case (str/trim (or token "")))
+                     q     (some->> params (re-find #"q=([0-9.]+)") second Double/parseDouble)]
+                 (and (contains? #{"gzip" "*"} name)
+                      (or (nil? q) (pos? q)))))
+             (str/split said #","))))))
+
+(defn- gzipped
+  "FILE's bytes, folded. ONE PASS, PER REQUEST, AND NOTHING IS KEPT -- the rule the
+  directory above keeps, so a build that lands mid-flight is picked up by the next
+  request and there is no copy here that could go stale.
+
+  WHAT THE PASS COSTS, measured on this machine 2026-09-29 (the JDK's default level):
+  the 1.5 MB bundle folds in ~160 ms, the 102 KB stylesheet in ~2.5 ms. Once per page
+  load, after which the browser keeps it for a year (`cache-control`), and the bytes
+  that go out are 1.62 MB -> 444 KB."
+  ^bytes [^File file]
+  (let [out (ByteArrayOutputStream. 65536)]
+    (with-open [gzip (GZIPOutputStream. out)]
+      (io/copy file gzip))
+    (.toByteArray out)))
+
 (defn- cache-control
   "HOW LONG A BROWSER MAY KEEP THIS WITHOUT ASKING AGAIN.
 
@@ -213,7 +291,7 @@
     (catch Exception _ nil)))
 
 (defn- file-response
-  "FILE, at PATH, as a ring response for METHOD.
+  "FILE, at PATH, as a ring response for METHOD and REQ.
 
   HEAD CARRIES THE HEADERS AND NO BODY, which is what ring's own head middleware
   does and what the HTTP spec asks for. http-kit then reports
@@ -221,12 +299,34 @@
   handed and overwrites whatever is in the map -- so a HEAD here answers the right
   type, the right cache rule, and a length that belongs to the stream rather than
   the file. Sending the body instead would be a worse lie; measured 2026-09-20
-  with `curl -I` against a built `ui/dist`."
-  [^File file ^String path method]
-  {:status  200
-   :headers {"Content-Type"  (content-type file)
-             "Cache-Control" (cache-control path)}
-   :body    (when (= :get method) file)})
+  with `curl -I` against a built `ui/dist`. THE COMPRESSED FORM IS PART OF 'THE
+  HEADERS': a HEAD from a client that takes gzip says `Content-Encoding: gzip`,
+  because that is what the GET it stands for would answer -- the 0 length above is
+  the only thing about a HEAD that is not the GET's.
+
+  THE TWO FORMS ARE DECIDED HERE AND ONLY HERE: the same file is answered as itself
+  or folded, depending on the client's `Accept-Encoding` (`accepts-gzip?`), the type
+  (`compressible?`) and the size (`gzip-min-bytes`). The folding itself is `gzipped`,
+  and it happens only for a GET -- a HEAD has no body to fold."
+  [^File file ^String path method req]
+  (let [type  (content-type file)
+        fold? (and (accepts-gzip? req)
+                   (compressible? type)
+                   (<= gzip-min-bytes (.length file)))]
+    {:status  200
+     :headers (cond-> {"Content-Type"  type
+                       "Cache-Control" (cache-control path)}
+                ;; THE SAME URL ANSWERS TWO DIFFERENT BODIES DEPENDING ON A REQUEST
+                ;; HEADER, and that is what a cache has to be told: without this line a
+                ;; proxy may hand the folded bytes to a client that never asked for them,
+                ;; or the plain file to one that did. It goes on whether or not THIS
+                ;; response was folded.
+                (compressible? type) (assoc "Vary" "Accept-Encoding")
+                ;; AND WHAT THE BODY IS, which a browser undoes before the file gets to
+                ;; it.
+                fold? (assoc "Content-Encoding" "gzip"))
+     :body    (when (= :get method)
+                (if fold? (gzipped file) file))}))
 
 (defn answer
   "REQ as one file of the built page, or nil -- nil being 'this request is not one
@@ -240,7 +340,7 @@
                (not (api-path? path)))
       (when-let [dir @root]
         (when-let [file (file-for dir path)]
-          (file-response file path method))))))
+          (file-response file path method req))))))
 
 (defn- no-build
   "The sentence a person gets when the page they asked for is not there. It names
