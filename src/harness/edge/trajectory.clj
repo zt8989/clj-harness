@@ -153,9 +153,10 @@
     ;; A TOOL CALL THAT HAS ARRIVED BELONGS TO THE SEGMENT IT ARRIVED IN, because that is the
     ;; only place the record says so while the run is still going: the tool message that answers
     ;; it lands at `:run/done` (see `pending-tool-items`). A line carrying ANOTHER run's id is
-    ;; not this segment's -- a summarizer call is logged with no run id at all
-    ;; (`harness.edge.pressure`) -- so what is collected here is the run's own calls, in the
-    ;; order they reached the seam.
+    ;; not this segment's -- a tool row always carries the run that made the call -- so what is
+    ;; collected here is the run's own calls, in the order they reached the seam. (The MODEL rows
+    ;; above are collected for EVERY call written while the run was open, run id or not, which is
+    ;; what `own-calls` is the reader for.)
     (and (= "tools/pre-execute" (replay/kind record))
          (= (:runId record) (:run-id (:open state))))
     (update state :open
@@ -172,10 +173,40 @@
   [state]
   (cond-> (:closed state) (:open state) (conj (:open state))))
 
+
+(defn own-calls
+  "ONE RUN's OWN model calls, in order -- the `model/start`/`model/end` rows that carry THE RUN'S
+  OWN ID.
+  
+  A CALL THE HARNESS WROTE FOR ITSELF LANDS IN A RUN'S `:calls` TOO. A compaction's summarizer
+  call is logged with NO run id, and this machine attaches an event to whichever run is still
+  open (a fact opens no run) -- so what `segments-step` collects is one call broader than 'the
+  calls this run made', and a reader that wants the latter has to ask for it. The two answer
+  DIFFERENT QUESTIONS: the summarizer's request carries a RANGE of the conversation plus an
+  instruction, not the conversation -- so it is neither the call the next one continues from
+  (`harness.edge.pressure`'s anchor) nor a measurement of how full the session is
+  (`harness.edge.context`'s ring). Both readers take their calls from HERE, so the rule is
+  spelled once and they cannot disagree about it.
+  
+  FOUND TWICE, BY TWO READERS. 2026-09-24 (thread `bbcd4ae4-…`): the newest such row became the
+  pressure meter's `latest-start`, and its empty tool table flipped the band's `:baseline` from
+  `usage` to `estimated`, moving the anchor off the vendor's own number. 2026-09-28 (session
+  `86c1c343-…`): the ring met the same row -- after a compaction folded 308,071 tokens, the
+  summarizer's own 281,889-token prompt (the very range being folded away) became the number
+  under the composer (27%), and the session's real 696,114 came back on the next call."
+  [run]
+  (filterv #(and (some? (:runId %)) (= (:run-id run) (:runId %))) (:calls run)))
+
 (defn run-segments
   "RECORDS split into runs, in order:
   [{:opener <row> :at <ms> :brought [msg…] :submitted [msg…] :returned [msg…]
     :calls [row…] :tool-ids [id…] :streaming bool :prompt-row <the run's system row or nil>}].
+
+  `:calls` IS BROADER THAN THE RUN, on purpose: a `model/start`/`model/end` row is attached to
+  whichever segment is open, so a call the HARNESS wrote for itself -- a compaction's summarizer
+  -- is in there too. A reader that wants 'the calls this run made' asks `own-calls`, and the two
+  readers that do (`harness.edge.pressure`'s anchor, `harness.edge.context`'s ring) ask there so
+  they cannot disagree.
 
   A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there.
   `harness.edge.http` writes the prompt BEFORE the action's own entries, so that row IS the

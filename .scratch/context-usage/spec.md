@@ -177,3 +177,41 @@
 - **摊法没有在真机上调过**：三个篮子的和是**算**出来的（有一条恒等式钉着），但它们各自离真值多远
   （工具表 JSON 的 token 密度、中文正文字符数与 token 数的比）**没有量过**。要量需要真厂商报的
   prompt_tokens 与同一份请求的字节，这台机器上没做。
+
+### 落地之后的一条修复：压缩那一刻，环量的是压缩自己的那一发（2026-09-29）
+
+**主人的报告**（会话 86C1C3，真机）：「这个会话发生了两次压缩，第一次压缩完变成了 30%，然后立即变为
+成 60%，测量的有问题。」
+
+**根因**：`harness.edge.context/last-reporting-call` 取的是「最近一次报过 `prompt_tokens` 的调用」，
+而**压缩自己那次摘要调用也是一次模型调用**——它的 `model/start`/`model/end` 行**没有 run id**
+（写它的那条路不属于任何 run），`harness.edge.trajectory` 的段机器却把 `model/*` 行挂到**当时开着的
+那一段**上，于是它落在这一场的 `:calls` 里，成了最新的一次「测量」。可它发出去的是**被折掉的那一段
+范围**加上一句指令，**不是这场会话**：环因此在压缩刚发生时报出「刚被折掉多少」，13 秒后真调用又把它
+顶回去——人读到的是「压缩没生效」。真机上那份记录（`86c1c343-…`，窗口 1,048,576）：
+
+```
+10112  model/end  used=281889 pct=27   ← 摘要调用自己那一发（刚折掉的 range 的估价）
+10124  model/end  used=696304 pct=66   ← 下一次真调用
+```
+
+**修法：那条规则早就有了，只是没有一处共用的拼法。** `harness.edge.pressure` 在 2026-09-24 就撞过同一
+行（那次它把压力表的锚点带偏了，`.scratch/compaction-shape` 收的口），它那时用一个私有的 `own-calls`
+按「行的 run id 是不是这一段自己的」筛。现在这个函数**搬到 `harness.edge.trajectory`（`own-calls`，
+公开）**——段机器是造出这个形状的地方，两个读者（pressure 的锚点、context 的环）都从那里取，
+**一处拼法，不可能各说各话**。`context` 的 `last-reporting-call` 改成 `(call-records
+(trajectory/own-calls run))`。
+
+**判据**：`context_test/a-compactions-own-call-is-not-the-rings-number`（夹具：一场真调用报 600、
+然后一次压缩的摘要调用报 300 ⇒ 环必须说 600/60%，修之前说 300/30%——**先红后绿已验**）；
+`trajectory_test/own-calls-is-the-runs-own-calls` 把那条规则钉在它的新家。pressure 那半早就有
+`pressure_test/a-compactions-own-call-does-not-move-the-anchor`。
+
+**真机上复验**：`dev/scratch_ctx_compaction.clj` 把 `86c1c343-…` 从头折一遍，两次压缩那两段在修之前
+是 281,889/27% 与 6,022/1%，修之后整段都停在会话自己的数上（696,114 / 699,245），每一次真调用照旧
+把它推上去。两份输出逐字抄在 `evidence/compaction-is-not-the-ring.txt`（**其余行两次跑完全相同**）。
+
+**顺带量到、不在这一笔里的两件事**（记在 `.scratch/compaction-shape/spec.md` 的「已知、未修」里）：
+那次压缩折掉 308,071 tokens 之后，紧接那一发请求的 `prompt_cache_hit_tokens` 是 696,064/696,304
+（前缀命中 99.97%）——**发出去的数组与压缩前逐字相同**；以及同一 run 里随后 5 次压缩被厂商 400 以
+「assistant 的 tool_calls 没有对应的 tool 消息」挡回，最后一次成功那条记的区间是反的。

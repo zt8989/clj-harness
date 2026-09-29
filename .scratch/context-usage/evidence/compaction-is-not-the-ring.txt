@@ -1,0 +1,47 @@
+# 走查：压缩那一刻，圆环报的是谁（2026-09-29）
+
+主人的报告：86C1C3 那场会话压缩了两次，「第一次压缩完变成了 30%，然后立即变为成 60%」。
+
+命令（只读真家，把那份记录从头折一遍）：
+
+```
+clojure -J-Dstdout.encoding=UTF-8 -M:dev -m scratch-ctx-compaction
+```
+
+`86c1c343-a946-4421-8c54-6b81de6fffb6.jsonl`（10,245 行，窗口 1,048,576）。下面是**两次压缩那两段**，
+修之前 / 修之后各一份。**其余每一行两次跑出来逐字相同**，差的就是这两段：
+
+## 修之前（`harness.edge.context/last-reporting-call` 直接吃 run 的全部 `:calls`）
+
+```
+10103  model/end          ts=1790605890744 used=696114 pct=66
+10110  compaction/start   ts=1790605909748 used=696114 pct=66
+10112  model/end          ts=1790605938829 used=281889 pct=27
+10113  context/compacted  ts=1790605938839 used=281889 pct=27
+10114  compaction/end     ts=1790605938850 used=281889 pct=27
+10226  compaction/start   ts=1790606018124 used=699245 pct=67
+10228  model/end          ts=1790606031557 used=6022 pct=1
+10229  context/compacted  ts=1790606031569 used=6022 pct=1
+10230  compaction/end     ts=1790606031577 used=6022 pct=1
+10240  model/end          ts=1790606036055 used=700562 pct=67
+```
+
+摘要调用自己那一发（281,889 / 6,022 tokens）变成了环上的数：**27%**、**1%**。
+
+## 修之后（同一份记录，同一段代码路径，只换了「谁的调用」这一问）
+
+```
+10103  model/end          ts=1790605890744 used=696114 pct=66
+10110  compaction/start   ts=1790605909748 used=696114 pct=66
+10112  model/end          ts=1790605938829 used=696114 pct=66
+10113  context/compacted  ts=1790605938839 used=696114 pct=66
+10114  compaction/end     ts=1790605938850 used=696114 pct=66
+10226  compaction/start   ts=1790606018124 used=699245 pct=67
+10228  model/end          ts=1790606031557 used=699245 pct=67
+10229  context/compacted  ts=1790606031569 used=699245 pct=67
+10230  compaction/end     ts=1790606031577 used=699245 pct=67
+10240  model/end          ts=1790606036055 used=700562 pct=67
+```
+
+压缩期间环上的数**不动**（`compaction/end` 那几行仍是会话自己的 696,114 / 699,245），
+下一次真调用把它推上去，与之前一样。

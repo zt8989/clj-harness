@@ -162,6 +162,40 @@
     (is (= 700 (:usedTokens answer)) "the last MEASUREMENT, not a blank")
     (is (= 70 (:percent answer)))))
 
+(deftest a-compactions-own-call-is-not-the-rings-number
+  ;; THE NUMBER A PERSON READ AS 'the compaction did not work' (2026-09-28, session
+  ;; `86c1c343-…`): a summarizer's request carries A RANGE OF THE CONVERSATION plus an instruction,
+  ;; not the conversation -- and it is the newest `model/end` of the run, so it used to become the
+  ;; number under the composer one beat after a compaction had folded that very range away (27%
+  ;; where the session stood at 66%). `harness.edge.trajectory/own-calls` is the rule that says it
+  ;; is not the run's own call, and this is the ring's half of it (the meter's half is
+  ;; `pressure_test/a-compactions-own-call-does-not-move-the-anchor`).
+  (let [conversation  [(input 0 (user "u1" "hi"))
+                       (system-prompt 1 "s")
+                       (message 2 "user" "hi")
+                       (start 10 1000 (tool-table 40))
+                       (end 20 (usage 600 5))]
+        ;; A compaction, as the record spells one: three facts around a call the HARNESS wrote for
+        ;; itself -- no run id on those two rows, which is the mark.
+        summarizer    [(record 30 nil "compaction/start" {:compactionId "c1"})
+                       (record 31 nil "model/start" {:model "scripted" :context-window 1000})
+                       (record 32 nil "model/end" {:usage (usage 300 5)})
+                       (record 33 nil "context/compacted"
+                               {:compactionId "c1" :summary "…" :tokens 300
+                                :range {:start 0 :end 2}})
+                       (record 34 nil "compaction/end" {:compactionId "c1"})
+                       finished]]
+    (testing "the summarizer's own request is not what the ring measures"
+      (let [answer (context-of (concat conversation summarizer))]
+        (is (= 600 (:usedTokens answer))
+            "the last MEASUREMENT of the conversation, not of the range just folded away")
+        (is (= 60 (:percent answer)))))
+    (testing "and the next real call moves it, as it always did"
+      (let [answer (context-of (concat conversation summarizer
+                                      [(start 40 1000 nil) (end 50 (usage 500 5))]))]
+        (is (= 500 (:usedTokens answer)))
+        (is (= 50 (:percent answer)))))))
+
 (deftest nothing-reported-is-not-zero
   (testing "no call reported a prompt: no number at all"
     (let [answer (context-of [(input 0 (user "u1" "hi"))

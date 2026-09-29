@@ -185,18 +185,6 @@
       (recur more pending acc))))
 
 
-(defn- own-calls
-  "ONE RUN'S OWN model calls, in order -- the `model/start`/`model/end` rows that carry the
-  run's OWN id.
-
-  A CALL THE HARNESS WROTE FOR ITSELF ALSO LANDS IN A RUN'S `:calls`. A compaction's
-  summarizer call is logged with no run id, and `run-segments` attaches an event to whichever
-  run is still open (a fact opens no run): the newest such row used to become `latest-start`,
-  and its empty tool table flipped `:baseline` from \"usage\" to \"estimated\", moving the
-  anchor off the vendor's own number (2026-09-24, thread `bbcd4ae4-…`). Only the RUN's own
-  calls are the calls 'the next one continues from'."
-  [run]
-  (filterv #(and (some? (:runId %)) (= (:run-id run) (:runId %))) (:calls run)))
 (defn- last-reporting-call
   "The most recent call whose vendor reported a `prompt_tokens`, as
   {:run <the run map> :start <its start row> :end <its end row>} -- nil when nobody
@@ -209,15 +197,16 @@
                         {:run run :start start :end end}
                         acc))
                     acc
-                    (call-pairs (own-calls run))))
+                    (call-pairs (trajectory/own-calls run))))
           nil
           runs))
 
 (defn- latest-start
   "The newest RUN call's start row: what the NEXT call continues from. A call the harness
-  wrote for itself (a compaction's summarizer) is not one -- see `own-calls`."
+  wrote for itself (a compaction's summarizer) is not one -- see
+  `harness.edge.trajectory/own-calls`."
   [runs]
-  (last (filter #(= "model/start" (replay/kind %)) (mapcat own-calls runs))))
+  (last (filter #(= "model/start" (replay/kind %)) (mapcat trajectory/own-calls runs))))
 
 (defn- system-row [records] (last (filter replay/system-prompt? records)))
 

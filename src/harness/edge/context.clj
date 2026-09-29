@@ -91,7 +91,16 @@
 
 (defn- last-reporting-call
   "The most recent call whose vendor reported a `prompt_tokens`, as
-  {:run <index into RUNS> :start <its start record or nil> :end <its end record>}.
+  {:run <index into RUNS> :start <its start record or nil> :end <its end record>.
+
+  ONLY THE RUN'S OWN CALLS COUNT (`harness.edge.trajectory/own-calls`). A run's rows also carry
+  the calls the HARNESS wrote for itself, and right after a compaction the newest of those is the
+  summarizer's own request -- which was sent A RANGE OF THE CONVERSATION plus an instruction, not
+  the conversation. Counting it made the ring report the size of what had just been folded AWAY:
+  measured on a real session (2026-09-28, `86c1c343-…`), a compaction that folded 308,071 tokens
+  put the ring at 27% (the summarizer's own 281,889-token prompt) while the session itself stood
+  at 66%, and it snapped back to 66% on the very next call -- the number a person read as 'the
+  compaction did not work'.
 
   ABSENT WHEN NOBODY REPORTED ONE, and a call that reported nothing does not erase
   an earlier call's number: the ring shows the last MEASUREMENT, not a blank. What
@@ -105,7 +114,7 @@
                           {:run i :start (:start call) :end (:end call)}
                           acc)))
                     acc
-                    (call-records (:calls run))))
+                    (call-records (trajectory/own-calls run))))
           nil
           (map-indexed vector runs)))
 

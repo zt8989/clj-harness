@@ -491,6 +491,24 @@
     (is (not (contains? (item-of turn "tool") :argsText))
         "and so are the arguments -- those live on the assistant message, not written yet")))
 
+(deftest own-calls-is-the-runs-own-calls
+  ;; THE RULE TWO READERS ASK FOR, spelled once (`own-calls`'s docstring carries the two
+  ;; incidents: the meter's anchor on 2026-09-24, the ring's number on 2026-09-28). What the
+  ;; machine collects is deliberately BROADER than the run -- `segments-step` attaches a
+  ;; `model/*` row to whichever segment is open, run id or not -- because a call the harness wrote
+  ;; for itself (a compaction's summarizer) lands inside this run's rows.
+  (let [records (vec (rows [(input 0 (user "u1" "hi"))
+                            (record 10 "model/start" {:model "scripted"})
+                            (record 11 "model/end" {:usage {:prompt_tokens 100}})
+                            (record 20 nil "model/start" {:model "scripted"})
+                            (record 21 nil "model/end" {:usage {:prompt_tokens 300}})
+                            (record 30 "model/start" {:model "scripted"})]))
+        [run]   (trajectory/run-segments records)]
+    (is (= 5 (count (:calls run)))
+        "every call row written while the run was open is in `:calls`")
+    (is (= [10 11 30] (mapv :ts (trajectory/own-calls run)))
+        "and the run's OWN calls are the ones that carry its id")))
+
 (deftest the-answer-replaces-the-call-in-flight-rather-than-joining-it
   ;; ONE CALL, ONE ROW. The item built from the returned messages is the fuller account -- name,
   ;; arguments and result together -- and the in-flight one must give way to it. Two rows for one

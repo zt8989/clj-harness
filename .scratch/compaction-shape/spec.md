@@ -110,6 +110,16 @@ expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder`
 - **本机的全量套件本来就摇**：`harness.edge.http-test` 单独跑要 184–280s（上限 300s），全量那一轮它
   就是在 300s 上被掐掉、报 exit 2 的；`hooks-test` / `hooks.dispatch-test` / git 端点那几条也随负载
   时红时绿（单独跑都绿）。本分支动过的几个命名空间在单独跑里是干净的 —— 除了上面那条先红的。
+- **压缩成功了，那一发请求却没变**（2026-09-28，会话 `86c1c343-…`）：第一次压缩折掉 308,071 tokens
+  （`context/compacted` 的 `:range` 18–5126），紧接的那一发（`model/start` 落在 `compaction/end` 之后
+  2 秒）报 `prompt_tokens` 696,304、`prompt_cache_hit_tokens` 696,064 —— **前缀命中 99.97%**，也就是
+  发出去的那个数组与压缩前逐字相同（真折过的话开头已经是另一句话）。压力因此仍越线，同一个 run 里又
+  压了 5 次。**根因未查**：是 `relieve-pressure!` 判定「没变短、不换 history」，还是模型视图没吃下那
+  条事实，这两个方向都还没量过。
+- **那 5 次被厂商 400 挡回**（同一场会话）：`An assistant message with 'tool_calls' must be followed
+  by tool messages responding to each 'tool_call_id'` —— 摘要请求把一次工具调用与它的答复切在两边。
+  最后一次成功那条 `context/compacted` 记的区间是**反的**：`{:start 10113 :end 5156}`。范围规划
+  （`harness.edge.compaction` 挑的那段）与它记的编号口径要单独查。
 
 ## 四张票
 
