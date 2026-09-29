@@ -22,11 +22,11 @@
 //      over the socket (`events.host` frames increase) and still fetches NOTHING.
 //   3. THE REFRESH BUTTON still works (one fetch, the fallback's contract).
 //
-// WHAT IT DELIBERATELY DOES NOT CLAIM: that a session SWITCH reads nothing. Switching a
-// session in B mounts that session's composer, whose directory picker has a listing read
-// of its own (`components/composer-chrome.tsx`'s `useRemote(listSidebar)`) -- a different
-// component's question, and a later ticket's if it wants the same treatment. This
-// walkthrough is about the SIDEBAR.
+// WHAT IT DELIBERATELY DOES NOT CLAIM: that a session SWITCH mounts nothing. It does: that
+// session's composer, whose directory picker used to fetch a listing of its own
+// (`components/composer-chrome.tsx`) -- 2026-09-29 it reads the page's pushed one instead
+// (`SidebarProjectsContext`), so a page load is ONE `GET /api/projects`. This walkthrough is
+// about the SIDEBAR.
 //
 // Screenshots land in .scratch/sidebar-ws-and-run-state/evidence/.
 import fs from "node:fs";

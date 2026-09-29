@@ -102,7 +102,7 @@ import {
 } from "@/lib/composer";
 import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
-import { bindThread, listSidebar, projectName } from "@/lib/projects";
+import { bindThread, projectName, type ProjectSummary } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
 
 import { ContextRing } from "./context-ring";
@@ -185,18 +185,34 @@ export const HeldSessionContext = createContext<HeldSession | null>(null);
 
 const useHeldSession = (): HeldSession | null => useContext(HeldSessionContext);
 
+/// THE PROJECTS HALF OF THE SIDEBAR'S LISTING, as the PAGE holds it -- supplied by `App`,
+/// which is handed every listing the sidebar lands (`app.tsx`'s `onListed`: one HTTP read at
+/// mount, then a frame per host-level change).
+///
+/// SO THIS BAR READS NO LISTING OF ITS OWN, and that is the whole reason the context exists.
+/// It used to (`useRemote(listSidebar)`), and that was a second `GET /api/projects` for a bar
+/// that is mounted for every session opened before its first message -- the same answer,
+/// asked again, out of a route the page had already paid for (`.scratch/sidebar-ws-and-run-state`
+/// named it a known boundary; 2026-09-29 closed it). WHAT IT TAKES IS THE PROJECTS ALONE: the
+/// tasks in the same payload are conversations with no directory, and this picker is the thing
+/// that gives one.
+///
+/// EMPTY UNTIL THE FIRST LISTING LANDS (a page whose socket is down and whose mount read is
+/// still in flight), and an empty list draws no directory picker at all -- the same shape this
+/// bar had while its own fetch was in the air.
+export const SidebarProjectsContext = createContext<readonly ProjectSummary[]>([]);
+
+const useSidebarProjects = (): readonly ProjectSummary[] => useContext(SidebarProjectsContext);
+
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("composer");
   // The fetch failures below are this side's fallback sentences (see
   // lib/projects.ts and lib/composer.ts), so they are drawn from `errors`.
   const { t: tErrors } = useTranslation("errors");
-  // THE PROJECTS HALF OF THE SIDEBAR'S LISTING, because that is what a session can
-  // be bound to: the tasks in the same payload are conversations with no directory,
-  // and this picker is the thing that gives one -- so lists them nothing to offer.
-  const projects = useRemote(
-    useCallback(() => listSidebar(tErrors), [tErrors]),
-  );
+  // THE PROJECTS A SESSION CAN BE BOUND TO, from the page's copy of the sidebar's listing
+  // (`SidebarProjectsContext`) rather than from a read of this bar's own.
+  const projects = useSidebarProjects();
   const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -213,7 +229,7 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   // The label is the last path segment -- a row has to be scannable -- and the
   // whole path rides along as the hint: it is what the row is searched by (a
   // person remembers `workspace`) and what it shows when the list is open.
-  const dirs = (projects.data?.projects ?? []).map((p) => ({
+  const dirs = projects.map((p) => ({
     value: p.path,
     label: projectName(p.path),
     hint: p.path,
@@ -249,7 +265,9 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
       // The branch belongs to the directory, so the new one has to be read back:
       // keeping the old answer would name a branch the session is no longer on.
       git.reload();
-      projects.reload();
+      // AND THE PROJECT LIST NEEDS NO RELOAD, unlike the branch: `POST /api/project` rings the
+      // host stream (`rung`), so the pushed listing is what re-draws this bar's options -- and
+      // binding a session into a project that is already in that list does not change the list.
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {

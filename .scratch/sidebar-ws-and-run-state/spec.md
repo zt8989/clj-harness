@@ -48,9 +48,9 @@
 
 ### 边界
 
-- composer 的**目录选择器**有它自己的一份 listing 读(`composer-chrome.tsx` 的 `useRemote(listSidebar)`),
-  切到一个新会话会挂载一个新 composer,于是多一次读。这是另一个组件的问题,不在本票里,走查脚本
-  明确写出来而不是假装不存在。它若也要推送化,是后续一票。
+- ~~composer 的**目录选择器**有它自己的一份 listing 读~~ ——**2026-09-29 已拿下**(后续那一票就是它):
+  选择器现在从页面手里那份 listing 取 projects(`composer-chrome.tsx` 的 `SidebarProjectsContext`,
+  由 `app.tsx` 的 `onListed` 填),因此一次页面加载**只有侧栏那一发** `GET /api/projects`。
 
 ## 三、验证
 
@@ -66,3 +66,26 @@
 
 `evidence/`:b-during-run.png(run 进行中,B 的行带 spinner)、b-after-run.png(推送把行放回 idle)、
 b-pushed.png(早期一次)。
+
+## 五、追记 2026-09-29:listed 那一半候选是错的(主人:「还是一直在调用」)
+
+票 02 保留了 ask-again 的两条理由,但**实现**把候选算成了「本页有标题的 id ∪ listing 里的每一个 id」
+(`lib/sidebar-refetch.ts` 的 `nextAsk`)。第二条理由本来只关于**本页自己的写**(行出现了、发送时间还没落),
+而 listing 里的**别人的行**也被算了进去:一条 `last_sent_at` 还是 NULL 的行,对这条规则就是「该再问一次」,
+问的是本页根本没有在等的事。
+
+**为什么这就成了轮询**:每次问都会落一份新 listing,`listedRows` 是一份新 Map,effect 于是重跑,再挑下一个该问的
+id —— 自持的一条链,直到每个 id 花完 5 次预算。主人家里 **243 行有 126 行 `last_sent_at` 是 NULL**
+(比这一列更早的行、fork、子代理、没人发过的会话),于是一次页面加载就是几百次 `GET /api/projects`;
+临时家里 7 条这样的行,**实测 36 次 / 11 秒,每 400ms 一次**。
+
+**改法**:候选只留 `titles`(本页铸的、有标题的那些)。已经出现的行也在里面 —— 库里还没有可读的 title 时
+`app.tsx` 的 `forgetListedTitles` 不会把 id 摘掉 —— 所以「人在等的那一行」照旧会被追问,别的行交给推送。
+同时把侧栏挂载读修成**真的只读一次**:`onListed` 的身份会动(restore 结束、历史加载失败),原来它一变
+`refresh` 就变、挂载 effect 就重跑(每次加载多一发 `GET`,还会把 host socket 关了重开);现在页面那个回调走 ref。
+
+**验证**:`npm run typecheck` / `npm test`(183)/ `npm run build` 全绿;真浏览器(还是这台 scripted 服务):
+加载后**一次页面只有一发** `GET /api/projects`(侧栏那一发;目录选择器那一份同一天也拿下了,见上面「边界」)、
+20 秒内不再有;发一句新会话照旧出现且带时间(3 秒内一次追问);两窗复验票 02 的契约:run 期间 B 显示「运行中」,
+run 结束时行变 idle 而
+**B 的读次数一动不动**。

@@ -468,7 +468,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// unnecessary: `events.host` carries a run's start and its end now, so a `running` that
 /// is still true is a run in flight, not a stale snapshot. One case replaced them
 /// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
-/// candidates), which is why the count lands one lower rather than two.
+/// candidates), which is why the count lands one lower rather than two. THAT LISTED-ROW HALF
+/// WAS WRONG, and 2026-09-29 replaced it one-for-one: a row the listing names with no send
+/// time, that this page never minted, is not this page's write to wait for -- chasing it made
+/// the rule a poll (`a-listed-row-this-page-did-not-mint-is-never-asked-about`).
 ///
 /// ...164 -> 166: the `stats` suite's two cases for `.scratch/session-numbers-in-the-store`
 /// -- the BUG (a payload that had only ever been pushed drew the raw key `stats.turns`) and

@@ -41,15 +41,24 @@
   推送推得出「它变了」，推不出一个连续的量。画那个数字的组件**自己滴答**，但它**不发起任何请求**。
 - 除这一类，**没有第二种例外**。
 
-## 今天谁还没这么做（欠账）
+## 今天谁这么做了（这份文件就是它们的规矩）
 
-- **右侧任务视图**：`ui/src/hooks/use-task-pane.ts` 是 `setInterval(read, 1000)`。代码里写下的理由是
-  「作业的结局没有推到客户端的通道——那条通知搭的是**下一次模型调用**，不是帧」
-  （`.scratch/right-pane-tasks` 决策 7）。**那是一条缺的通道，不是轮询的理由**：本条原则要的就是把那条
-  通道补上——作业与子代理各需要一个写点，不是各需要一个更短的间隔。
-- **左侧清单**：会话/项目那一栏靠挂载与重拉事件更新（`ui/src/lib/sidebar-refetch.ts`），**没有订阅**——
-  别的进程新建的会话，只有这一页自己动手才出现。
-- **已经照做的**：composer 下面那条统计条——挂载一次 `GET …/stats`，之后 `model/end` 推着走，
-  `ui/src/components/composer-numbers.tsx` 明写 `THERE IS NO POLLING`。本文件是把它已经做对的事**写成规矩**。
+**没有欠账了**——四处都按上面那两半走（2026-09-29 复查过每一条都落在代码里）：
 
-前两处欠账的票在 `.scratch/panel-data-push/`。
+- **左侧清单**：挂载一次 `GET /api/projects`，之后每一个 host 级变化（run 起止、别窗发送、项目增删、
+  归档）由 `events.host` 推来（`ui/src/components/sidebar.tsx` + `ui/src/lib/host.ts`，ADR 0004）。
+  **唯一还会再问一次的只有本页自己刚写的那些**（懒创建那一格：「这个 id 我铸了、库还没答」），
+  别的行一律交给推送——listing 里别人的行曾经也被算进那次追问，那就是每 400ms 一次轮询的来路，
+  2026-09-29 删掉（`ui/src/lib/sidebar-refetch.ts` 与 `.scratch/sidebar-ws-and-run-state/spec.md` 的追记）。
+- **右侧任务视图**：挂载一次快照，之后作业的出现与结局、委派的开始与结束走同一条 socket 的 `task` 帧
+  （`ui/src/hooks/use-task-pane.ts` + `harness.edge.http/task-send!`）。原来那个 `setInterval(read, 1000)`
+  没了；留下的每秒一次只推进**正在跑的**行的时长，**它不发起任何请求**——就是本文件那一条例外。
+- **composer 的项目目录选择器**：**不自己读列表**（2026-09-29）。它要的是「这个家有哪几个项目」，
+  而页面手里已经有那一份（侧栏那次存量 + 每条推送），于是它从 `components/composer-chrome.tsx` 的
+  `SidebarProjectsContext` 取——由 `app.tsx` 的 `onListed` 填，绑定时也不重拉（`POST /api/project`
+  自己 ring 一次 host 流）。在它之前，每一个还没开聊的会话的 composer 都会各发一次 `GET /api/projects`。
+- **composer 下面那条统计条**：挂载一次 `GET …/stats`，之后 `model/end` 推着走，
+  `ui/src/components/composer-numbers.tsx` 明写 `THERE IS NO POLLING`。本文件是从它开始写的。
+
+把这四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与左栏那一半）；目录选择器那一处是
+2026-09-29 随手合上的。

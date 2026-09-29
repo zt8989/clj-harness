@@ -76,7 +76,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactN
 import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
-import { HeldSessionContext, ThreadIdContext, type HeldSession } from "@/components/composer-chrome";
+import {
+  HeldSessionContext,
+  SidebarProjectsContext,
+  ThreadIdContext,
+  type HeldSession,
+} from "@/components/composer-chrome";
 import { SessionRunContext, SessionWritableContext } from "@/components/session-run-state";
 // THE TURN'S OWN WORD (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): which turn the
 // server says is open, as a value this host holds and the message footer reads -- see
@@ -1479,6 +1484,15 @@ export function App() {
   /// read one authority instead of two that could drift (a fork's name is written by the
   /// fork, and the runtime's messages cannot know it).
   const [storeTitles, setStoreTitles] = useState<Record<string, string>>({});
+  /// AND THE WHOLE LISTING THE SIDEBAR LANDS, because a component OUTSIDE the sidebar needs
+  /// a half of it: the composer's directory picker offers this page's PROJECTS, and handing
+  /// them down from here is what keeps it from asking `GET /api/projects` a second time
+  /// (`components/composer-chrome.tsx`'s `SidebarProjectsContext`). Same payload the sidebar
+  /// draws from, written by the same call (`onListed` below).
+  const [sidebarListing, setSidebarListing] = useState<SidebarListing>({
+    projects: [],
+    tasks: [],
+  });
   // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
   // their host on the read that opens the session and on every poll after it. A
   // session that is absent from this map is FINE -- that is the ordinary answer, and
@@ -1866,6 +1880,7 @@ export function App() {
       // it lands. The restore below is the part that happens once.
       forgetListedTitles(listing);
       setStoreTitles(listingTitles(listing));
+      setSidebarListing(listing);
       if (restored.current || pending === null) return;
       restored.current = true;
       const listed = listedSession(pending, listing);
@@ -1901,6 +1916,7 @@ export function App() {
           that brings it back are `absolute` (see `components/sidebar.tsx` and
           `components/sidebar-toggle.tsx`), so this row is the box they are placed
           against -- and it is the one element that knows the viewport's height. */}
+      <SidebarProjectsContext.Provider value={sidebarListing.projects}>
       <SubagentViewContext.Provider value={openMirror}>
       <div className="relative flex h-dvh">
         {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
@@ -2059,6 +2075,7 @@ export function App() {
         )}
       </div>
       </SubagentViewContext.Provider>
+      </SidebarProjectsContext.Provider>
     </TooltipProvider>
   );
 }
