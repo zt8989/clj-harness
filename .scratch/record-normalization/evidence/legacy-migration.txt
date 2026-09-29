@@ -26,3 +26,26 @@ NEW SOFAR MESSAGES ["hi"]
    5 行（第一行 `hi` 在——那正是 `some?`+`header?` 那个 bug 切掉的那一行），**一个 `:old-contract` 都没有**，
    折出来的消息是 `["hi"]`；原文件没在这段输出里，但用例 `a-fork-normalizes-a-record-written-in-the-old-contract`
    逐字比过它。
+
+## 真机上那 5 份旧格式日志（2026-09-29，只读走查）
+
+命令（`dev/scratch_normalized_census.clj`，只读 `~/.clj-harness`）：
+
+```
+clojure -J-Dstdout.encoding=UTF-8 -M:dev -m scratch-normalized-census
+```
+
+输出最后一节（原样）：
+
+```
+== 旧格式（`~/.clj-harness/logs`）：读侧**翻译**它（每行带 `:old-contract <行号>`），写门仍拒
+  proj-run.jsonl                               读过了（22 行；判据：["21 行还是旧格式（没有 type/payload 信封）"]）
+  http-prov.jsonl                              读过了（21 行；判据：["19 行还是旧格式（没有 type/payload 信封）"]）
+  http-change.jsonl                            读过了（20 行；判据：["18 行还是旧格式（没有 type/payload 信封）"]）
+  http-veto.jsonl                              读过了（32 行；判据：["29 行还是旧格式（没有 type/payload 信封）"]）
+  http-approve.jsonl                           读过了（33 行；判据：["30 行还是旧格式（没有 type/payload 信封）"]）
+  .jsonl                                       读过了（134 行；判据：["134 行还是旧格式（没有 type/payload 信封）"]）
+```
+
+读数两件事：这 5 份**都读得动**了（宽读），而判据照旧说得出「N 行还是旧格式」——`N` 是文件里
+旧格式的**行数**（`proj-run` 22 行是翻译后的行数、21 是文件的行数）。

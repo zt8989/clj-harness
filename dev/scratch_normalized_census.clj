@@ -90,9 +90,13 @@
       (println (str "  例（" file "）位置读法判裸露的行："))
       (doseq [f (:faces d)] (println "    " (pr-str f))))
     (println)
-    (println "== 旧格式（`~/.clj-harness/logs`）：读侧在判据之前就按名字拒绝")
+    (println (str "== 旧格式（`~/.clj-harness/logs`）：读侧**翻译**它（每行带 `:old-contract <行号>`），"
+                     "写门仍拒"))
     (doseq [f (take 6 (jsons (str (System/getProperty "user.home") "/.clj-harness/logs") 3000000))]
       (println (format "  %-44s %s" (.getName f)
-                       (try (str "读过了（" (count (replay/read-records f)) " 行）")
+                       (try (let [rows (vec (replay/read-records f))]
+                              ;; 2026-09-29：宽读之后这一节要说的是**判据**，不再是「读不读得动」
+                              (str "读过了（" (count rows) " 行；判据："
+                                   (pr-str (:reasons (normalized/normalized? rows))) "）"))
                             (catch Throwable t (str (pr-str (:reason (ex-data t))) " " (ex-message t))))))))
   (shutdown-agents))

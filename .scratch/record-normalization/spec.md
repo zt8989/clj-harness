@@ -116,6 +116,18 @@ run / resume / compact **都拒**；只读的门不受影响；被拒的 run **�
   **写得不得**，出路是 fork——读侧改宽读、写门仍拒、fork 把翻译写出去。整条见文末
   「落地：旧格式迁移（2026-09-28）」。
 
+**真机上的第一次（2026-09-29，主人的会话）**：会话 `1413f25b-…` 被判「1 次工具调用没有 message 行
+答复」（那一次调用是 2026-09-28 23:20:17 被按停的），页面给出 fork；主人按了 fork，得到
+`3e18d952-…`。复验：**那条缺的行在新记录里**（`call_00_ET_IplQYLpuHcvoBxjynmwZ6778` 的 `message`
+行在 fork 里，父记录里没有），原记录一个字节没动 —— 票 03 那条路在真机上成立。
+
+**但同一条读数里露出另一件事，未查**：那次「按停」发生在 2026-09-28 23:20:17，**晚于**票 03 落地
+（`71f119d`，21:31），而 `harness.kernel.loop` 的停止分支本该为每一个没答复的调用写下那一行
+（`loop.clj:928` 的 `(write! (frames/cut-off-message id))`，走的是 `http.clj` 给的那道 `write!` →
+`log-message!`）。真记录里那条 `TOOL_CALL_RESULT` 帧在（"the run was cut off before this call
+returned"）、`message` 行不在。所以要么那个分支不是这么走的，要么那一笔写丢了 —— 票 03 说的
+「被停的调用由写手补上行」在真机上**至少漏过一次**，值得单独查（探针：那份记录第 2030–2042 行）。
+
 **判据数字**：`normalized` + `replay` + `fork` + `fork-http` + `sessions` + `trajectory` + `loop` +
 `stats` + `context` + `http` = **286 / 2047 / 0**（http 一套 189.7s）。新用例三条：缺行的那一份 fork 后
 **已重整化**且行在、被切的记录 fork 后**已重整化**、旧格式**按名字拒绝**（这一条 2026-09-28 换成了
