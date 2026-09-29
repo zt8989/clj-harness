@@ -22,37 +22,30 @@
 
 (def ^:private root (support/temp-dir "editing-mode-tools"))
 
-;; A SECOND project directory, because the mode is a property of the DIRECTORY a
-;; session is bound to -- two threads sharing one project share its mode, which is
-;; the point of putting :editing in the project-level file at all.
+;; TWO ROOTS, because a session is bound to a DIRECTORY and some of these cases are about
+;; what a BOUND session is served. The mode itself is no longer per project: :editing lives
+;; in this home's config.edn, so two threads read the same one
+;; (.scratch/config-merge/spec.md -- the project level is gone).
 (def ^:private other-root (support/temp-dir "editing-mode-tools-other"))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
 
-(defn- project-file [dir] (io/file dir ".harness" "harness.edn"))
 
 ;; Same discipline as editing_test: the user level lives outside this namespace,
 ;; so a leftover would silently change the NEXT namespace's toolset.
 (defn- wipe-harness-edn [f]
-  (io/delete-file user-file true)
-  (io/delete-file (project-file root) true)
-  (io/delete-file (project-file other-root) true)
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file (project-file root) true)
-  (io/delete-file (project-file other-root) true))
+  (support/wipe-session!))
 
 (use-fixtures :each wipe-harness-edn)
 
 (defn- set-mode!
-  "Bind THREAD-ID to DIR and have DIR's harness.edn select MODE. Read fresh per
-  ask, so a later call can move the same thread to the other mode -- which the
-  isolation test relies on."
+  "Bind THREAD-ID to DIR and have this home's config.edn select MODE. Read fresh per ask, so
+  a later call can move the mode -- there is one level now, so that write is the whole
+  home's mode and not DIR's."
   [thread-id dir mode]
   (project/bind! thread-id dir)
-  (let [f (project-file dir)]
-    (.mkdirs (.getParentFile f))
-    (spit f (str "{:editing {:mode " mode "}}") :encoding "UTF-8")))
+  (support/write-session! {:editing {:mode mode}}))
 
 (defn- spec-names
   ([thread-id] (mapv #(get-in % [:function :name]) (tools/specs thread-id))))
@@ -262,33 +255,11 @@
 
 ;; ---------------------------------------------------- session isolation
 
-(deftest two-sessions-with-different-modes-do-not-collide
-  ;; The mode resolves per thread, so the subtraction is per thread too. A
-  ;; process-wide mode would make one project's choice another project's -- and
-  ;; two projects disagreeing is the everyday case, not an exotic one.
-  (set-mode! "emt-a" root ":hashline")
-  (set-mode! "emt-b" other-root ":str-replace")
-  (.mkdirs (io/file root))
-  (.mkdirs (io/file other-root))
-  ;; The same relative path in each project: only the str-replace session will be
-  ;; allowed to touch its copy.
-  (spit (str root "/iso.txt") "x" :encoding "UTF-8")
-  (spit (str other-root "/iso.txt") "x" :encoding "UTF-8")
-  (testing "the hashline session has no edit; the str-replace session does"
-    (is (not (contains? (set (spec-names "emt-a")) "edit")))
-    (is (contains? (set (spec-names "emt-b")) "edit")))
-  (testing "so the SAME call through each thread is answered differently"
-    (let [{:keys [content error]} (call "emt-a" "edit" {:path "iso.txt"
-                                                        :old_string "x" :new_string "y"})]
-      (is (true? error))
-      (is (str/includes? content "not served")))
-    (let [{:keys [error]} (call "emt-b" "edit" {:path "iso.txt"
-                                                :old_string "x" :new_string "y"})]
-      (is (false? error) "the str-replace session ran the real edit path")
-      (is (= "y" (slurp (str other-root "/iso.txt") :encoding "UTF-8")))
-      (is (= "x" (slurp (str root "/iso.txt") :encoding "UTF-8"))
-          "and the refused session's file was never opened"))))
-
+;; `two-sessions-with-different-modes-do-not-collide` USED TO LIVE HERE, and it is deleted
+;; rather than rewritten: its whole premise was that the mode resolves per thread, which is
+;; what the project level bought. With ONE level -- this home's config.edn -- two sessions
+;; cannot hold two modes, so there is no property left to pin. What replaces it is the
+;; assertion above that a write to config.edn moves the mode for the session that reads it.
 (deftest the-mode-moves-with-the-config-without-a-restart
   (set-mode! "emt-move" root ":str-replace")
   (is (contains? (set (spec-names "emt-move")) "edit"))
@@ -347,11 +318,9 @@
   ;; silently equivalent to a config that says nothing -- here that would mean a
   ;; project that asked for anchors quietly getting string replacement.
   (project/bind! "emt-broken" root)
-  (let [f (project-file root)]
-    (.mkdirs (.getParentFile f))
-    (spit f "{:editing {:mode :nonsense}}" :encoding "UTF-8")
-    (is (thrown-with-msg? Exception #":hashline or :str-replace"
-                          (tools/specs "emt-broken")))
-    (testing "and the failure names the file, so it is fixable in place"
-      (let [m (try (tools/specs "emt-broken") nil (catch Exception e (ex-message e)))]
-        (is (str/includes? m (.getAbsolutePath f)))))))
+  (support/write-session! {:editing {:mode :nonsense}})
+  (is (thrown-with-msg? Exception #":hashline or :str-replace"
+                        (tools/specs "emt-broken")))
+  (testing "and the failure names the file, so it is fixable in place"
+    (let [m (try (tools/specs "emt-broken") nil (catch Exception e (ex-message e)))]
+      (is (str/includes? m (.getAbsolutePath (home/config-file)))))))

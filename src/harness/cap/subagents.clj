@@ -20,8 +20,9 @@
   definition was since deleted is a row with no definition, and both are ordinary.
 
   THE SETTINGS FORM WRITES, AND ONLY EVER THE `:subagents` BLOCK. `put-definition!`
-  and `remove-definition!` rewrite the user-level harness.edn with one generation of
-  backup (see `write-user-file!`), preserve every other top-level key byte for
+  and `remove-definition!` rewrite this home's config.edn with one generation of
+  backup (the writing is harness.cap.providers', see `change-session!`), preserving every
+  other key
   value, and validate the whole block BEFORE the file is opened -- so a refused
   entry leaves the home exactly as it was, which is the promise the form shows the
   server's own sentence for. THE NEXT DELEGATION IS WHAT PICKS IT UP: a range is
@@ -88,6 +89,9 @@
             [clojure.pprint :as pprint]
             [clojure.string :as str]
             [harness.cap.project :as project]
+            ;; The one write path (see `change-subagents!`): the file's shape check, the
+            ;; atomic write and the backup all live there rather than here.
+            [harness.cap.providers :as providers]
             [harness.infra.home :as home]
             [harness.kernel.hooks :as hooks]
             [harness.kernel.hooks.dispatch :as hook]
@@ -241,13 +245,13 @@
     (conj subagents d)))
 
 (defn- user-block
-  "The :subagents block the configuration home's harness.edn declares, and the path
-  it came from. ONLY THE USER LEVEL: what the settings form writes and what the
-  sidebar reads have to be the same statement, and a second level that could shadow
-  it would make the panel show a value the session does not use."
+  "The :subagents block this home's config.edn declares, and the path it came from.
+  ONE HOME, ONE STATEMENT: what the settings form writes and what the sidebar reads have
+  to be the same statement, which is exactly why there is nowhere else for it to come
+  from (there used to be a project level that could shadow it -- .scratch/config-merge)."
   []
-  (let [{:keys [user files]} (project/harness-edn-levels nil)]
-    {:block (:subagents user) :path (:user files)}))
+  (let [session (project/harness-config nil)]
+    {:block (:subagents session) :path (project/harness-config-path)}))
 
 (defn definitions
   "The subagents in force, in order, plus what went wrong reading them -- or nil.
@@ -277,7 +281,7 @@
 
          (not (map? block))
          {:subagents (built-in-definitions) :path path
-          :problem (str "harness.edn :subagents must be a map of name -> definition,"
+          :problem (str "config.edn's :session :subagents must be a map of name -> definition,"
                         " but the file says " (pr-str block))}
 
          :else
@@ -758,62 +762,21 @@
    ;; which names exist, and what each one is for.
    :describe    face})
 
-;; --------------------------------------------------------- harness.edn, written
+;; ------------------------------------------------------ where the write goes
 ;;
-;; THE SETTINGS FORM'S HALF, and the word that matters in it is ONLY. This file is
-;; hand-written and holds other people's keys -- :editing, :skills, :approval,
-;; :instructions, :mcp, whatever a home has -- so the write is the WHOLE map read
-;; back, one key replaced, and the whole map written again. Everything else comes
-;; out byte-for-value what it went in as.
+;; THE SETTINGS FORM'S HALF, and the word that matters in it is ONLY. config.edn is
+;; hand-written and holds other people's keys -- :editing, :skills, :approval, :instructions,
+;; :mcp, whatever a home has -- so this namespace's save changes ONE key (:session
+;; :subagents) and hands everything else back untouched. The writing itself is
+;; harness.cap.providers' (`change-session!`): the file's shape check, the atomic write and
+;; the one-generation config.edn.bak live THERE, and there is deliberately no second writer
+;; here -- two writers of one file are two rules that drift
+;; (.scratch/config-merge/spec.md ticket 05).
 ;;
-;; A REWRITE LOSES COMMENTS, and that is a real cost paid deliberately: EDN has no
-;; comment-preserving writer worth a dependency for a file this size, so the file
-;; says what happened at the top and the version it replaced sits beside it as
-;; harness.edn.bak -- the same bargain config.edn's form makes, for the same
-;; reason. Editing by hand stays fine, and the form reads this file back, so the
-;; two ways in do not fight.
-;;
-;; VALIDATE, THEN WRITE. Every refusal the form can show (a blank name, a baseline
-;; that is not one of the two, an exclusion naming no tool, an exclusion naming one
-;; of the two forbidden names, a name already taken) is decided BEFORE the file is
-;; opened -- so a refused save leaves the home byte-for-byte as it was, including a
-;; home that had no harness.edn at all.
-
-(def ^:private written-header
-  "The first lines of a harness.edn this process WROTE. Here rather than in a
-  helper shared with config.edn's writer because the sentence is about a different
-  file and a different key: this one only ever rewrites :subagents, and saying so
-  is the difference between a person trusting the other keys in their file and
-  going to check."
-  (str ";; THE SUBAGENT FORM WROTE THE :subagents BLOCK OF THIS FILE. The file is\n"
-       ";; rewritten whole when that form saves, so comments do not survive a write\n"
-       ";; from it. Every other key is carried through unchanged, and what this file\n"
-       ";; held before the write is beside it as harness.edn.bak, when there was\n"
-       ";; anything to keep. Editing by hand is still fine -- the form reads this\n"
-       ";; file back -- and the next save will reorder it again.\n\n"))
-
-(defn- user-file
-  "The USER-level harness.edn -- the one a home's own configuration lives in, which
-  is also the only level the settings form writes. Deliberately not the project's:
-  a form inside one session must not be able to change what a project means for
-  everybody who opens it."
-  []
-  (io/file (home/root) "harness.edn"))
-
-(defn- write-user-file!
-  "M -> the user-level harness.edn, written atomically, with ONE GENERATION of
-  backup -- and the same rule config.edn's writer keeps: a blank previous file is
-  not a backup, because it holds nothing a person could want back and a zero-byte
-  harness.edn.bak would suggest it did."
-  [m]
-  (let [f    (user-file)
-        bak  (io/file (home/root) "harness.edn.bak")
-        old  (when (.exists f) (slurp f :encoding "UTF-8"))
-        text (str written-header (with-out-str (pprint/pprint m)))]
-    (when (and old (not (str/blank? old)) (not= old text))
-      (spit bak old :encoding "UTF-8"))
-    (home/spit-atomically! f text)
-    f))
+;; VALIDATE, THEN WRITE. Every refusal the form can show (a blank name, a baseline that is
+;; not one of the two, an exclusion naming no tool, an exclusion naming one of the two
+;; forbidden names, a name already taken) is decided BEFORE the file is opened -- so a
+;; refused save leaves the home byte-for-byte as it was.
 
 (defn- check-block!
   "A whole :subagents block, judged entry by entry -- the same check the READER
@@ -830,7 +793,7 @@
   names it, which is the whole of what somebody needs in order to go and fix it."
   [block]
   (when-not (map? block)
-    (throw (ex-info (str "harness.edn's :subagents must be a map of name -> definition,"
+    (throw (ex-info (str "config.edn's :session :subagents must be a map of name -> definition,"
                          " but this would write " (pr-str block))
                     {:reason :not-a-map :field :subagents})))
   (doseq [[n entry] block] (check-entry! n entry))
@@ -850,9 +813,9 @@
   nothing': an empty home gets no harness.edn out of a refusal, and an existing one
   is not so much as opened for writing."
   [change]
-  (let [raw  (:user (project/harness-edn-levels nil))
+  (let [raw  (project/harness-config nil)
         next (check-block! (change (or (:subagents raw) {})))]
-    (write-user-file! (assoc raw :subagents next))
+    (providers/change-session! (fn [session] (assoc session :subagents next)))
     next))
 
 (defn- entry-from-wire

@@ -23,8 +23,6 @@
 
 (.mkdirs (io/file root "sub"))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
 (def ^:private file (io/file root "f.txt"))
 
 (defn- path
@@ -34,11 +32,9 @@
   (store/canonical (str file)))
 
 (defn- wipe [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
 
 (defn- clean-tables [f]
@@ -58,9 +54,7 @@
 (defn- use-mode!
   ([] (use-mode! :hashline {}))
   ([mode extra]
-   (.mkdirs (.getParentFile project-file))
-   (spit project-file (str "{:editing " (pr-str (merge {:mode mode} extra)) "}")
-         :encoding "UTF-8")
+   (support/write-session! {:editing (merge {:mode mode} extra)})
    (project/bind! tid root)))
 
 (defn- call [name args]

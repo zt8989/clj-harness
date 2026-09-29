@@ -26,14 +26,11 @@
 (.mkdirs (io/file root "src"))
 (.mkdirs (io/file root ".git"))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
 
 (defn- path [name] (store/canonical (str (io/file root name))))
 
 (defn- put! [name content]
   (let [f (io/file root name)]
-    (.mkdirs (.getParentFile f))
     (spit f content :encoding "UTF-8")))
 
 (defn- rm-rf
@@ -50,8 +47,7 @@
     (io/delete-file f true)))
 
 (defn- wipe [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+  (support/wipe-session!)
   ;; The SEARCH ROOT is cleared too, not just the store: this suite's subject is what
   ;; a search FINDS, and a file written by an earlier case is a file this one would
   ;; find.
@@ -64,8 +60,7 @@
   ;; ns-level mkdirs that had created it.
   (.mkdirs (io/file root ".git"))
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
 
 (defn- clean-tables [f]
@@ -86,9 +81,7 @@
 (defn- use-mode!
   ([] (use-mode! {}))
   ([extra]
-   (.mkdirs (.getParentFile project-file))
-   (spit project-file (str "{:editing " (pr-str (merge {:mode :hashline} extra)) "}")
-         :encoding "UTF-8")
+   (support/write-session! {:editing (merge {:mode :hashline} extra)})
    (project/bind! tid root)))
 
 (defn- call [name args]

@@ -39,21 +39,16 @@
 (io/delete-file root true)
 (.mkdirs (io/file root))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
 
 (defn- wipe [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
 
 (defn- use-mode! [thread-id mode]
   (project/bind! thread-id root)
-  (.mkdirs (.getParentFile project-file))
-  (spit project-file (str "{:editing {:mode " mode "}}") :encoding "UTF-8"))
+  (support/write-session! {:editing {:mode mode}}))
 
 (defn- call [thread-id name args]
   (tools/run! {:function {:name name :arguments (json/write-str args)}} thread-id))

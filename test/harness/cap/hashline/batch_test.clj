@@ -24,8 +24,6 @@
 (def ^:private root
   (support/temp-dir "hashline-batch"))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
 (def ^:private file (io/file root "f.txt"))
 (def ^:private other (io/file root "g.txt"))
 
@@ -36,11 +34,9 @@
   (store/canonical (str f)))
 
 (defn- wipe [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
 
 (defn- clean-tables [f]
@@ -60,8 +56,7 @@
 (def ^:private tid "bt")
 
 (defn- use-mode! []
-  (.mkdirs (.getParentFile project-file))
-  (spit project-file "{:editing {:mode :hashline}}" :encoding "UTF-8")
+  (support/write-session! {:editing {:mode :hashline}})
   (project/bind! tid root))
 
 (defn- call

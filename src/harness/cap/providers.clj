@@ -2204,6 +2204,24 @@
     (check-config next (config-path))
     (write-config! next)
     next))
+
+(defn change-session!
+  "CHANGE -- a function of the :session map -> the :session map to write. The whole config
+  is read, the new section put in its place, the result checked as a whole (`check-config`)
+  and written atomically with one generation of backup. Returns the new :session map.
+
+  THE ONE WRITE PATH FOR :session, and it exists for a reason worth keeping: the settings
+  form's subagents editor used to carry its OWN spit-and-backup for harness.edn, and two
+  writers of one file are two rules that drift (.scratch/config-merge/spec.md ticket 05).
+  Every other key in the file is carried through untouched -- this is a change to ONE
+  section, not a rewrite of a person's configuration."
+  [change]
+  (let [raw  (config)
+        next (change (or (:session raw) {}))
+        whole (assoc raw :session next)]
+    (check-config whole (config-path))
+    (write-config! whole)
+    next))
 (defn put-provider!
   "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the
   catalog entry that is now in config.edn's :providers.

@@ -25,6 +25,7 @@
   harness.test-runner lists the namespaces it runs, and this one has nothing to
   run."
   (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.cap.hooks :as cap-hooks]
@@ -84,6 +85,33 @@
    (str "{:default "   (or default-edn "{}")
         "\n :providers " (or providers-edn "{}") "}\n")))
 
+(defn write-session!
+  "M -- a map, or the EDN text of one -- MERGED into this home's config.edn :session.
+
+  MERGING RATHER THAN WRITING matters now that a session's configuration shares a file with
+  the provider catalog: a fixture that set an :editing mode by writing the whole file would
+  clobber the :default section another fixture wrote, and the test would then fail for a
+  reason that has nothing to do with what it is about.
+
+  TEXT OR A MAP, because the fixtures in the wild write strings ('{:editing {:mode
+  :str-replace}}') and making every one of them read as a map would be churn that hides the
+  change that matters."
+  [m]
+  (let [f (home/config-file)
+        session (if (string? m) (edn/read-string m) m)
+        current (if (.exists f) (edn/read-string (slurp f :encoding "UTF-8")) {})]
+    (spit f (pr-str (update current :session merge session)) :encoding "UTF-8")
+    f))
+
+(defn wipe-session!
+  "Take the :session section out of this home's config.edn, leaving every other section as
+  it was. The counterpart to `write-session!` for a fixture's before-and-after: the file
+  belongs to the whole test run."
+  []
+  (let [f (home/config-file)]
+    (when (.exists f)
+      (let [current (edn/read-string (slurp f :encoding "UTF-8"))]
+        (spit f (pr-str (dissoc current :session)) :encoding "UTF-8")))))
 (defn hooks-file
   "The user-level hooks.edn: the file a declaration is written into."
   []

@@ -103,27 +103,25 @@
 ;; ------------------------------------------------------------------- reading
 
 (defn- blocks
-  "The two :editing blocks as [{:level :path :block} ..], user first. Each level
-  is TAGGED with the file it came from, because every failure below has to name a
-  file: ':editing is the wrong shape' and 'that key is unknown' are only
-  actionable once the reader knows which of the two harness.edn files to open.
+  "The :editing block, as [{:level :path :block} ..] -- ONE entry today: this home's
+  config.edn, :session :editing. Every failure below names the file its value came from,
+  so the block is TAGGED with its path rather than handed over bare.
 
-  A block that is not a map is refused HERE, before anything merges: it is a
-  statement about the file, not a value that loses a precedence contest."
+  STILL A VECTOR OF LEVELS, though there is one level, because a second one is a shape this
+  home may bring back (.scratch/config-merge/spec.md decision 2): the day it does, this
+  grows one entry and nothing else moves. A block that is not a map is refused HERE, before
+  anything merges -- it is a statement about the file, not a value that loses a precedence
+  contest."
   [thread-id]
-  (let [{:keys [user project files]} (project/harness-edn-levels thread-id)]
-    (mapv (fn [level]
-            (let [path  (get files level)
-                  block (:editing (get {:user user :project project} level))]
-              (cond
-                (nil? block) {:level level :path path :block {}}
-                (map? block) {:level level :path path :block block}
-                :else (throw (ex-info (str "harness.edn :editing must be an EDN map, but the "
-                                           (name level) " level at " path
-                                           " says " (pr-str block))
-                                      {:path path :level level
-                                       :reason :editing-not-a-map})))))
-          [:user :project])))
+  (let [path  (project/harness-config-path)
+        block (:editing (project/harness-config thread-id))]
+    [(cond
+       (nil? block) {:level :config :path path :block {}}
+       (map? block) {:level :config :path path :block block}
+       :else (throw (ex-info (str "config.edn's :session :editing must be an EDN map, but it"
+                                  " says " (pr-str block))
+                             {:path path :level :config
+                              :reason :editing-not-a-map})))]))
 
 (defn- origin
   "Key -> {:level .. :path ..} for every key that was SAID, later levels
@@ -139,8 +137,8 @@
   (doseq [{:keys [level path block]} ls
           k                          (keys block)]
     (when-not (contains? defaults k)
-      (throw (ex-info (str "harness.edn :editing does not understand " (pr-str k)
-                           " (the " (name level) " level at " path "); it takes "
+      (throw (ex-info (str "config.edn's :session :editing does not understand " (pr-str k)
+                           " (in " path "); it takes "
                            (known-keys-phrase))
                       {:key k :path path :level level
                        :reason :unknown-editing-key})))))
@@ -151,8 +149,8 @@
     (let [spec (vocab k)]
       (when-not ((:ok spec) v)
         (let [{:keys [level path]} (origin k)]
-          (throw (ex-info (str "harness.edn :editing " k " must be " (:legal spec)
-                               ", but the " (name level) " level at " path
+          (throw (ex-info (str "config.edn's :session :editing " k " must be " (:legal spec)
+                               ", but " path
                                " says " (pr-str v))
                           {:key k :value v :path path :level level
                            :reason :bad-editing-value})))))))
@@ -160,21 +158,23 @@
 ;; ---------------------------------------------------------------- resolution
 
 (defn editing-mode
-  "The editing configuration THREAD-ID's session is served by: `defaults` with
-  the two harness.edn levels applied :editing-key by :editing-key, project
-  winning. An unbound session composes the user level alone.
+  "The editing configuration THREAD-ID's session is served by: `defaults` with this home's
+  config.edn, :session :editing, applied :editing-key by :editing-key.
 
-  Throws on a broken block, an unknown key, or an illegal effective value, each
-  naming the file it came from. A missing file is not a broken one: an unbound
-  session, or a home with no harness.edn at all, is the everyday case and
-  answers with the defaults.
+  ONE LEVEL. `:editing` composed KEY BY KEY rather than whole (that finer overlay is why
+  this fn exists at all, and it is kept), but the two harness.edn levels it composed are
+  gone -- see harness.cap.project/harness-config.
 
-  Re-read on every call, so harness.edn edits take effect on the next ask."
+  Throws on a broken block, an unknown key, or an illegal effective value, each naming the
+  file it came from. A MISSING SECTION IS NOT A BROKEN ONE: a home that says nothing about
+  :editing is the everyday case and answers with the defaults.
+
+  Re-read on every call, so an edit to config.edn takes effect on the next ask."
   ([] (editing-mode nil))
   ([thread-id]
    (let [ls     (blocks thread-id)
          origin (origin ls)
-         merged (merge defaults (:block (first ls)) (:block (second ls)))]
+         merged (merge defaults (:block (first ls)))]
      (check-known-keys! ls)
      (check-values! merged origin)
      merged)))
@@ -226,7 +226,7 @@
   (into {} (for [[mode {:keys [tools]}] families, n tools] [n mode])))
 
 (def ^:private config-key-phrase
-  ":editing {:mode %s} in harness.edn")
+  ":editing {:mode %s} in config.edn's :session")
 
 (def ^:private search-tool
   "The one tool inside a family that has a knob of its own, and the knob.

@@ -20,8 +20,6 @@
 (def ^:private root
   (support/temp-dir "hashline-replace"))
 
-(def ^:private user-file (io/file (home/root) "harness.edn"))
-(def ^:private project-file (io/file root ".harness" "harness.edn"))
 (def ^:private file (io/file root "f.txt"))
 
 (defn- path
@@ -36,15 +34,12 @@
   "Write the project's harness.edn, so the session's resolved :editing map is what
   the test says it is. Every edit reads it fresh, so this takes effect at once."
   [edn]
-  (.mkdirs (.getParentFile project-file))
-  (spit project-file (str "{:editing " (pr-str edn) "}") :encoding "UTF-8"))
+  (support/write-session! {:editing edn}))
 
 (defn- wipe [f]
-  (io/delete-file user-file true)
-  (io/delete-file project-file true)
+  (support/wipe-session!)
   (f)
-  (io/delete-file user-file true)
-  (io/delete-file project-file true))
+  (support/wipe-session!))
 
 
 (defn- clean-tables [f]
