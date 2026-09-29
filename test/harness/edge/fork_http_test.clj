@@ -347,6 +347,17 @@
           (is (some? (tool-row-for new-id "c1")) "and the call this record never answered has its row now"))
         (finally (stop))))))
 
+(defn- rows-until
+  "THREAD-ID's rows, WAITED FOR: a fork's lines land through the writer, which buffers, so a read
+  taken the instant the fork returns may see a file that is still arriving. Polls until PRED says
+  the rows have what the case is about (or gives up, so a real absence still fails)."
+  [thread-id pred]
+  (loop [n 0]
+    (let [rows (vec (replay/read-records (log-file thread-id)))]
+      (if (or (pred rows) (> n 50))
+        rows
+        (do (Thread/sleep 20) (recur (inc n)))))))
+
 (deftest a-fork-normalizes-a-record-written-in-the-old-contract
   ;; 主人 2026-09-28：「旧格式拒绝回答，要求 Fork」—— 所以 fork 必须读得动它。读者把 `kind` 那套翻成新
   ;; 信封（`input` 的每条 message 各成一行、其余事实按旧 `kind` 记名，每行带 `:old-contract` 记号），
@@ -368,12 +379,16 @@
               {:keys [status body]} (post port "/api/threads/src-old/fork" {})
               new-id (:threadId body)]
           (is (= 200 status))
-          (testing "the fork's record is in the CURRENT format, and reads"
+          (testing "the fork's record is in the CURRENT format -- the old rows came across as rows"
+            (let [rows (rows-until new-id #(some (fn [r] (= "client" (:source r))) %))]
+              (is (not-any? :old-contract rows) "nothing on it says 旧格式 any more")
+              (is (= ["老会话里的一句话"]
+                     (mapv :content (:messages (replay/sofar (log-file new-id)))))
+                  "and the conversation the old record carried is there")))
+          (testing "and the door answers for it: normalized, with nothing to report"
             (let [answer (fetch port (str "/api/threads/" new-id "/sofar"))]
               (is (true? (get-in answer [:body :normalized])))
-              (is (= ["老会话里的一句话"] (mapv :content (get-in answer [:body :messages]))))))
-          (testing "and nothing on it says 旧格式 any more"
-            (is (not-any? :old-contract (replay/read-records (log-file new-id)))))
+              (is (= [] (get-in answer [:body :normalizationReasons])))))
           (testing "the parent is untouched, byte for byte"
             (is (= parent (slurp (log-file "src-old") :encoding "UTF-8")))))
         (finally (stop))))))
