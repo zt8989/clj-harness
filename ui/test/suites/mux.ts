@@ -8,8 +8,26 @@
 import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
-import { declaredSet, familyOf } from "../../src/lib/mux";
+import { declaredSet, familyOf, subscribeTasks, TASK_FRAME_TYPE } from "../../src/lib/mux";
 import { downlinkUrl } from "../../src/lib/threads";
+
+/// A STAND-IN FOR THE BROWSER'S `WebSocket`, for the length of one case below. Registering a
+/// subscription is what opens a socket -- that is what makes a page hear anything at all -- and
+/// the case that uses this one is a question about the SET a socket would state, not about a
+/// connection. So the stand-in never leaves `CONNECTING`: nothing is sent, nothing is fetched,
+/// and no reconnect timer is ever armed. A REAL reconnect stays the walkthrough's question (the
+/// header above).
+class ConnectingSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  constructor(readonly url: string) {}
+  readonly readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: unknown) => void) | null = null;
+  onclose: (() => void) | null = null;
+  addEventListener(): void {}
+  removeEventListener(): void {}
+}
 
 const cases: Case[] = [
   {
@@ -68,6 +86,42 @@ const cases: Case[] = [
       expect(familyOf("turn/end")).toBe("fact");
       expect(familyOf("RUN_STARTED")).toBe("run");
       expect(familyOf("TEXT_MESSAGE_CONTENT")).toBe("run");
+      // AND THE FOURTH FAMILY IS NAMED TOO: a `{:type task ..}` payload is a whole pane
+      // (`TaskFrame`), and handing it to `@ag-ui/client` would be the same mistake the fact
+      // case above exists to stop -- it would be validated as a run and refused.
+      expect(familyOf(TASK_FRAME_TYPE)).toBe("task");
+    },
+  },
+  {
+    name: "a-thread-only-the-pane-follows-is-in-the-declaration",
+    run: async () => {
+      // THE BUG THIS PINS (ticket 01 of `.scratch/task-pane-push`, found in a real browser):
+      // the task pane's table was missing from `wantedThreads()`. The declaration is not only
+      // the first handshake -- it is what a REPLACED socket re-states (ADR 0003 decision 7) --
+      // so a thread the new handshake does not name is a thread the server stops sending to:
+      // the pane's row went on saying "so far" for a job that had already ended.
+      //
+      // NO SOCKET IS OPENED: the stand-in above never connects, so this stays a question about
+      // the set and costs nothing (see that class's own note).
+      const browser = globalThis.WebSocket;
+      globalThis.WebSocket = ConnectingSocket as unknown as typeof WebSocket;
+      try {
+        const pane = subscribeTasks("pane-thread-1", () => {});
+
+        // A PANE FOLLOWING A CONVERSATION IS WHY THE SERVER MUST GO ON SENDING TO IT, and the
+        // declaration is where that is said.
+        expect(declaredSet().map((entry) => entry.threadId)).toContain("pane-thread-1");
+
+        // AND A PANE THAT GOES AWAY LEAVES NOTHING OF ITSELF BEHIND.
+        pane.unsubscribe();
+        expect(declaredSet().map((entry) => entry.threadId)).not.toContain("pane-thread-1");
+      } finally {
+        // THE STAND-IN STAYS THIS MODULE'S SOCKET for the rest of the run: there is no seam to
+        // put the browser's constructor back into it, and no later suite wants one -- they read
+        // values and sources, not sockets (`right-pane`, `thread-messages`, `coalesce`). The
+        // platform's own constructor goes back where it was all the same.
+        globalThis.WebSocket = browser;
+      }
     },
   },
 ];

@@ -41,7 +41,7 @@ export const TaskPane: FC<{
   // going hidden and this element leaving the screen (`hooks/use-task-pane.ts`, and the
   // narrow-window walkthrough that found the third).
   const pane = useRef<HTMLElement | null>(null);
-  const { jobs, subagents } = useTaskPane(threadId, pane);
+  const { jobs, subagents, now } = useTaskPane(threadId, pane);
   return (
     <aside
       id={RIGHT_PANE_ID}
@@ -78,7 +78,7 @@ export const TaskPane: FC<{
             {t("rightPane.subagentsEmpty")}
           </p>
         ) : (
-          <SubagentRows rows={subagents} onOpen={onOpen} />
+          <SubagentRows rows={subagents} onOpen={onOpen} now={now} />
         )}
       </section>
 
@@ -93,7 +93,7 @@ export const TaskPane: FC<{
             {t("rightPane.jobsEmpty")}
           </p>
         ) : (
-          <JobRows jobs={jobs} threadId={threadId} />
+          <JobRows jobs={jobs} threadId={threadId} now={now} />
         )}
       </section>
     </aside>

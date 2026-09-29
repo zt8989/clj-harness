@@ -134,6 +134,31 @@
 (defonce ^:private exit-hook-installed
   (atom false))
 
+;; ---------------------------------------------------- what to tell when a job moves
+
+(defonce ^:private change-hook
+  ;; ONE FN, INSTALLED BY THE COMPOSITION ROOT, or nil. This namespace is a CAPABILITY --
+  ;; it does not know that an edge, a socket or a pane exists -- so the telling is a seam:
+  ;; `harness.edge.http/start!` points it at the session's downlink (ticket 01 of
+  ;; `.scratch/task-pane-push`). Nothing here reaches for a channel of its own.
+  (atom nil))
+
+(defn set-change-hook!
+  "Point the seam at F -- a fn of the session's THREAD-ID, called when one of that
+  session's jobs APPEARS or ENDS. Answers F, so a caller can hand it back."
+  [f]
+  (reset! change-hook f)
+  f)
+
+(defn- announce!
+  "Say that a job of JOB's session moved, if anybody is listening. A throwing hook must
+  not reach the caller: this runs on the pump's thread and on a stop's, and neither has
+  anything to do about a downlink that closed."
+  [job]
+  (when-some [f @change-hook]
+    (try (f (:thread-id job)) (catch Throwable _ nil)))
+  nil)
+
 (defn- path [thread-id job-id] [thread-id :jobs job-id])
 
 (defn- process-tag
@@ -287,13 +312,40 @@
   lands is the moment a reader can know how the command went, so it is the moment a
   `job_output {wait: true}` stops waiting -- whoever wrote the line, the pump or a
   `stop!`. Delivering here rather than in each caller is what keeps that promise in
-  one place."
+  one place.
+
+  AND IT STAMPS WHEN THE JOB ENDED (`:ended-at`), here rather than at either caller,
+  because 'this call is the one that wrote the last line' is exactly 'this call is the
+  one that ended the job' -- the pump and a `stop!` race for that claim, and the winner
+  is the one that knows. That clock is what the pane draws a finished row's duration
+  from (ticket 01 of `.scratch/task-pane-push`: a job row shows 开始时间 + 持续时间, and
+  before this it showed neither for a job that was over)."
   [job line]
   (locking (:writer job)
     (when-let [^Writer w (.getAndSet ^AtomicReference (:writer job) nil)]
       (try
         (.write w (str line "\n"))
         (.flush w)
+        ;; THE STAMP GOES ON AN ENTRY THAT IS STILL THERE, and that guard is the whole reason
+        ;; this is a checked swap rather than an `assoc-in`. `assoc-in` CREATES the path it is
+        ;; handed, so stamping blindly resurrects a job whose entry has gone -- and one of the
+        ;; ordinary ways an entry goes is a session being put away while a pump is still
+        ;; finishing (`stop-session!`, and every suite's per-test registry reset, which is how
+        ;; this was found: `jobs-test`'s `shutdown!` then met an entry that was not a job at
+        ;; all -- `{:ended-at ..}` with a nil `:writer` -- and died in `close-record!`).
+        ;;
+        ;; THE ANNOUNCING RIDES THE SAME GUARD: a pane is told about a job it can still be
+        ;; shown, and not about one whose entry has already gone.
+        (when (and (:thread-id job) (:id job))
+          (let [p     (path (:thread-id job) (:id job))
+                there (volatile! false)]
+            (swap! registry (fn [reg]
+                              (if (get-in reg p)
+                                (do (vreset! there true)
+                                    (assoc-in reg (conj p :ended-at)
+                                              (System/currentTimeMillis)))
+                                reg)))
+            (when @there (announce! job))))
         true
         (catch Exception _ nil)
         (finally
@@ -728,6 +780,10 @@
       ;; `prune-records!`).
       (sweep-once!)
       (let [job {:id job-id :handle handle :path p
+                 ;; THE SESSION IT BELONGS TO, kept ON the entry so the place a job's
+                 ;; ending is written -- `write-last-line!`, which is handed nothing but
+                 ;; the entry -- can stamp the ending and say who to tell.
+                 :thread-id thread-id
                  ;; THE COMMAND IS KEPT, not just run: `notice` hands the model back
                  ;; "which job" when it announces an ending, and an id alone (`j1`) says
                  ;; nothing about what the job was.
@@ -747,6 +803,9 @@
                  :ended (promise)}]
         (ensure-exit-hook!)
         (swap! registry assoc-in (path thread-id job-id) job)
+        ;; AND THE PANE MAY HEAR ABOUT IT BEFORE THE FIRST LINE OF OUTPUT (ticket 01 of
+        ;; `.scratch/task-pane-push`): 'a job exists' is a change to what the pane draws.
+        (announce! job)
         (pumping! thread-id job-id job)
         {:id job-id :path p})
       (catch Throwable t
@@ -1135,8 +1194,11 @@
   next move from a row -- while `job` and `job_kill` still name `job_output` instead
   (`.scratch/job-receipt-no-path`).
 
-  `:startedAt` IS EPOCH MILLISECONDS, the clock `start!` wrote onto the entry; it is
-  the beginning of the one number a reader wants about a job that is still going."
+  `:startedAt` IS EPOCH MILLISECONDS, the clock `start!` wrote onto the entry, and
+  `:endedAt` is the clock `write-last-line!` stamped when the record closed -- NIL
+  while the job is still going, which is not an absence anybody has to guess at: a
+  running job has no ending yet. Together they are the two instants a row draws
+  (开始时间 + 持续时间, ticket 01 of `.scratch/task-pane-push`)."
   [thread-id]
   (->> (vals (get-in @registry [thread-id :jobs]))
        (sort-by :id)
@@ -1145,6 +1207,7 @@
                 :command (:command job)
                 :status (status-of job)
                 :startedAt (:started-at job)
+                :endedAt (:ended-at job)
                 :path (:path job)}))))
 
 ;; ----------------------------------------------------------- the listing of RECORDS

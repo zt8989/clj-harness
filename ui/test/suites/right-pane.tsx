@@ -41,6 +41,7 @@ import type { SubagentListing } from "../../src/lib/subagents";
 import toggleSource from "../../src/components/right-pane-toggle.tsx?raw";
 import taskPaneSource from "../../src/components/task-pane.tsx?raw";
 import jobRowsSource from "../../src/components/task-pane-jobs.tsx?raw";
+import subagentRowsSource from "../../src/components/task-pane-subagents.tsx?raw";
 import taskPaneHookSource from "../../src/hooks/use-task-pane.ts?raw";
 import jobsLibSource from "../../src/lib/jobs.ts?raw";
 import taskPaneSubagentsSource from "../../src/components/task-pane-subagents.tsx?raw";
@@ -192,15 +193,32 @@ const cases: Case[] = [
       expect(jobsLibSource).toContain("threads/${encodeURIComponent(threadId)}/jobs");
       expect(jobsLibSource).toContain("RUNNING_STATUS");
       expect(jobRowsSource).toContain("isRunning(job)");
-      // THE TICK: a named cadence, ONE interval, and the THREE ways it stops -- the pane unmounting,
-      // the page going hidden, and the pane leaving the screen (a narrow window hides the column by
-      // CSS while the state can still say "open", which a walkthrough caught the pane polling
-      // through) -- each of which also aborts a read in flight. A SOURCE READ CAN PIN THE DECISIONS,
-      // NOT THE BEHAVIOUR: that a closed pane, a hidden page and a hidden column really leave nothing
-      // in flight is the browser walkthrough's half (this suite's header).
-      expect(taskPaneHookSource).toContain("export const TASK_PANE_POLL_MS = 1000");
-      expect(taskPaneHookSource).toContain("setInterval(read, TASK_PANE_POLL_MS)");
+      // THE POLL IS GONE AND A SUBSCRIPTION TOOK ITS PLACE (ticket 01 of
+      // `.scratch/task-pane-push`, and the rule in `docs/rules/panel-data.md`): the two routes
+      // are read ONCE (a snapshot) and every change after that arrives as a `task` frame on the
+      // session's socket. The pin that used to be here asserted the poll by name, which is what
+      // makes this reversal readable rather than silent.
+      expect(taskPaneHookSource).not.toContain("setInterval(read");
+      expect(taskPaneHookSource).toContain("subscribeTasks(threadId");
+      expect(taskPaneHookSource).toContain("void jobsFor(threadId, flight.signal)");
+      expect(taskPaneHookSource).toContain("unsubscribe?.()");
+
+      // THE ONE TIMER THAT SURVIVES IS THE LOCAL TICK, and it is the single exception the rule
+      // names: a duration that keeps moving cannot come from the server, so the client advances
+      // it -- and asks NOTHING for it, and STOPS when nothing is running.
+      expect(taskPaneHookSource).toContain("export const TASK_PANE_TICK_MS = 1000");
+      expect(taskPaneHookSource).toContain("setInterval(() => setNow(Date.now()), TASK_PANE_TICK_MS)");
+      expect(taskPaneHookSource).toContain("if (!running) return;");
       expect(taskPaneHookSource).toContain("clearInterval(timer)");
+
+      // THE TIMES ON A ROW (owner, 2026-09-27): 开始时间 always, 持续时间 always -- and the
+      // duration's two arms are the two clocks (`now` while it runs, `endedAt` once it is over).
+      expect(jobRowsSource).toContain("rightPane.jobStarted");
+      expect(jobRowsSource).toContain("running ? \"rightPane.jobElapsed\" : \"rightPane.jobTook\"");
+      expect(jobRowsSource).toContain("(running ? now : (job.endedAt ?? now)) - job.startedAt");
+      expect(subagentRowsSource).toContain("rightPane.subagentTook");
+      expect(subagentRowsSource).toContain("rightPane.subagentElapsed");
+      expect(subagentRowsSource).toContain("row.running ? now : row.finishedAt!");
       expect(taskPaneHookSource).toContain('document.addEventListener("visibilitychange"');
       expect(taskPaneHookSource).toContain("AbortController");
       expect(taskPaneHookSource).toContain("stop();");
@@ -333,6 +351,9 @@ const cases: Case[] = [
         command: "npm test --\n  --watch=false",
         status: "[exit 0]",
         startedAt: 1_000,
+        // THE ENDING CLOCK (ticket 01 of `.scratch/task-pane-push`): a finished row draws a
+        // duration from these two instants.
+        endedAt: 61_000,
         path: "C:\\home\\jobs\\t1\\j1-run.log",
       };
       const running: JobRow = {
@@ -340,6 +361,9 @@ const cases: Case[] = [
         command: "npm run dev",
         status: "[running]",
         startedAt: 1_000,
+        // STILL GOING: no ending yet, which is the nil a running row's duration is measured
+        // against the LOCAL tick instead.
+        endedAt: null,
         path: "C:\\home\\jobs\\t1\\j2-run.log",
       };
       // `now` IS AN ARGUMENT, exactly as `lib/relative-time.ts` takes one: a duration is a
@@ -355,9 +379,17 @@ const cases: Case[] = [
       // THE ENDING IS THE RECORD'S WORD, NOT A TRANSLATION OF IT: a row that said "succeeded"
       // here would be a second vocabulary over the one `job_output` hands the model.
       expect(textOf(done, "task-pane-job-status")).toBe("[exit 0]");
-      // A FINISHED JOB HAS NO CLOCK, and the ABSENCE is the assertion -- the slot simply is not
-      // in the markup.
-      expect(done).not.toContain('data-slot="task-pane-job-duration"');
+      // A FINISHED JOB NOW CARRIES BOTH CLOCKS (owner, 2026-09-27: 已完成的要显示开始时间、持续时间) --
+      // the start it began with, and the duration it took, measured from the ending the SERVER
+      // stamped when the record closed. The pin that used to be here asserted the opposite ("a
+      // finished job has no clock"), so this is the reversal, readable.
+      // 61 000 - 1 000 = 60 000 ms -> `1m 0s`, and 4 200 is irrelevant to it: a duration that is
+      // over is a fact, not a moving number.
+      expect(textOf(done, "task-pane-job-duration")).toBe("took 1m 0s");
+      expect(textOf(rows([finished], "zh"), "task-pane-job-duration")).toBe("耗时 1 分 0 秒");
+      // THE START IS A BUCKET, not a formatted instant (`lib/relative-time.ts`'s ladder): 4 200
+      // against a 1 000 start is under a minute, which the ladder draws as 刚刚.
+      expect(textOf(done, "task-pane-job-started")).toBe("started just now");
       // THE COMMAND IS ONE LINE: written over two, drawn as one (the newline becomes a space).
       expect(textOf(done, "task-pane-job-command")).toBe("npm test -- --watch=false");
       // THE ID IS MONO AND THE COMMAND IS CLIPPED -- the two things that keep a long command
@@ -388,6 +420,9 @@ const cases: Case[] = [
         command: "npm run dev",
         status: "[running]",
         startedAt: 1_000,
+        // STILL GOING: no ending yet, which is the nil a running row's duration is measured
+        // against the LOCAL tick instead.
+        endedAt: null,
         path: "C:\\home\\jobs\\t1\\j2-run.log",
       };
       const finished: JobRow = { ...running, id: "j1", status: "[exit 0]" };
@@ -443,7 +478,10 @@ const cases: Case[] = [
 
       // AND THE ROW KNOWS WHICH SESSION IT BELONGS TO: the pane hands down the ONE on
       // screen, so a press can never address another session's job.
-      expect(taskPaneSource).toContain("<JobRows jobs={jobs} threadId={threadId} />");
+      // THE ROWS ARE HANDED THE CLOCK THE HOOK OWNS (`now`), which is what a running row's
+      // duration is measured against -- see `hooks/use-task-pane.ts` on why that number is the
+      // client's to advance.
+      expect(taskPaneSource).toContain("<JobRows jobs={jobs} threadId={threadId} now={now} />");
     },
   },
   {
@@ -473,10 +511,10 @@ const cases: Case[] = [
         problem: null,
         path: "C:\\home\\harness.edn",
         runs: [
-          { threadId: "s-new", parent: "t1", subagent: "build", project: null, delegatedAt: 2_000, running: true },
-          { threadId: "s-gone", parent: "t1", subagent: "removed", project: null, delegatedAt: null, running: false },
-          { threadId: "s-other", parent: "t2", subagent: "explore", project: null, delegatedAt: 3_000, running: true },
-          { threadId: "s-old", parent: "t1", subagent: "explore", project: null, delegatedAt: 1_000, running: false },
+          { threadId: "s-new", parent: "t1", subagent: "build", project: null, delegatedAt: 2_000, finishedAt: null, running: true },
+          { threadId: "s-gone", parent: "t1", subagent: "removed", project: null, delegatedAt: null, finishedAt: null, running: false },
+          { threadId: "s-other", parent: "t2", subagent: "explore", project: null, delegatedAt: 3_000, finishedAt: null, running: true },
+          { threadId: "s-old", parent: "t1", subagent: "explore", project: null, delegatedAt: 1_000, finishedAt: 9_000, running: false },
         ],
       };
 
@@ -498,6 +536,7 @@ const cases: Case[] = [
       expect(rows[1]).toMatchObject({
         name: "removed",
         description: null,
+        finishedAt: null,
         running: false,
         delegatedAt: null,
       });
@@ -514,7 +553,7 @@ const cases: Case[] = [
       // `mirrorOf(row)` -- its own -- and the pane hands the page's `openMirror`, the same
       // writer the transcript's `agent` card writes through.
       expect(taskPaneSubagentsSource).toContain("onClick={() => onOpen(mirrorOf(row))}");
-      expect(taskPaneSource).toContain("<SubagentRows rows={subagents} onOpen={onOpen} />");
+      expect(taskPaneSource).toContain("<SubagentRows rows={subagents} onOpen={onOpen} now={now} />");
       expect(appSource).toContain("onOpen={openMirror}");
       // THE SECOND READ: one route, the same one `lib/subagents.ts` reads, sharing the
       // tick's ONE controller (`hooks/use-task-pane.ts`) rather than starting a timer.
@@ -542,13 +581,17 @@ const cases: Case[] = [
         name: "explore",
         description: "find every namespace",
         delegatedAt: 1_000,
+        finishedAt: null,
         running: true,
       };
       const gone: SubagentTaskRow = {
         threadId: "s2",
         name: "removed",
         description: null,
+        // AN EARLIER PROCESS'S DELEGATION: a start nobody recorded and an end nobody watched,
+        // which is the row that draws no times at all rather than inventing them.
         delegatedAt: null,
+        finishedAt: null,
         running: false,
       };
 

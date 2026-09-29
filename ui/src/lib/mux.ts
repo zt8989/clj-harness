@@ -77,13 +77,40 @@ const FACT_TYPES = new Set([
   "step/end",
 ]);
 
+/// THE FOURTH FAMILY: THE TASK PANE'S ANSWER, pushed (ticket 01 of `.scratch/task-pane-push`).
+///
+/// WHAT IT IS. The right-hand pane draws what a session has going on -- its background jobs and
+/// its delegations -- and it used to POLL both routes once a second. This frame is the
+/// incremental half that replaced the poll: a job appearing or ending, a delegation starting or
+/// ending, and the whole pane payload arrives here.
+///
+/// WHY NOT A `FactFrame`. A fact carries the RECORD's line number and can be replayed by cursor,
+/// because a fact IS a line of the conversation's record. A job's ending is written in the JOB's
+/// own record and a delegation's end is a memory of the server's process: there is no line to
+/// number and nothing to replay, so this frame is a WHOLE PAYLOAD PER CHANGE -- the same shape
+/// `events.host` sends the sidebar, for the same reason.
+export type TaskFrame = {
+  threadId: string;
+  type: "task";
+  /// THE SESSION'S JOBS, as `GET /api/threads/<id>/jobs` answers them (`lib/jobs.ts`).
+  jobs?: unknown;
+  /// THE DELEGATIONS OF THIS SESSION, as `GET /api/subagents` answers them narrowed to it
+  /// (`lib/subagents-runs.ts`).
+  delegations?: unknown;
+};
+
+/// The task frame's one type name, exported so a suite can name the contract instead of
+/// re-writing the spelling.
+export const TASK_FRAME_TYPE = "task";
+
 /// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
 /// without a socket (`test/suites/mux.ts`), and so `onmessage` states it once. The `default` is
 /// deliberate: anything that is not one of the two named families is a RUN frame, which is
 /// AG-UI's own (upper-case) vocabulary.
-export function familyOf(type: string): "window" | "fact" | "run" {
+export function familyOf(type: string): "window" | "fact" | "task" | "run" {
   if (WINDOW_TYPES.has(type)) return "window";
   if (FACT_TYPES.has(type)) return "fact";
+  if (type === TASK_FRAME_TYPE) return "task";
   return "run";
 }
 
@@ -135,6 +162,22 @@ const runCursors = new Map<string, number>();
 /// (driving nothing) still wants them.
 const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
 
+/// THE TASK PANE'S SUBSCRIBERS, by conversation -- the fourth family's table (see
+/// `TaskFrame`). A separate map for the same reason the fact family has one: a frame for a
+/// conversation nobody is watching the pane of reaches nobody.
+const taskSubscriptions = new Map<string, Set<(task: TaskFrame) => void>>();
+
+
+/// WHO HAS TO BE TOLD WHEN THE SOCKET IS BACK -- and why anybody has to be.
+///
+/// A window is repaired by its own tail page and a run by its cursor: both are re-declared and
+/// the server hands back what was missed (`runSince`/`factSince`, ADR 0003 decision 7). THE TASK
+/// PANE HAS NO CURSOR (`TaskFrame` above), so a change that happened while the socket was down is
+/// in no frame this page will ever be handed -- a fresh answer is the only repair, and this is
+/// the door `open` knocks on to ask for one. `subscribeTasks` registers the reader; stopping
+/// takes it away.
+const openListeners = new Set<() => void>();
+
 /// HOW FAR EACH CONVERSATION'S FACT STREAM HAS BEEN READ -- the `:seq` of the last fact this
 /// page saw, WHICH IS A RECORD LINE NUMBER (`harness.edge.mux/facts-after`), not a counter the
 /// sender keeps. A reconnecting socket re-declares it (`factSince`), and it is a SEPARATE number
@@ -159,6 +202,14 @@ function deliver(frame: MuxFrame & RunFrame): void {
   const family = familyOf(frame.type);
   if (family === "window") {
     subscriptions.get(frame.threadId)?.handlers.onFrame(frame);
+    return;
+  }
+  if (family === "task") {
+    // NO CURSOR AND NO REMEMBERING: the frame IS the whole answer, so the last one wins and a
+    // page that missed one asks again when it reopens (the pane's own snapshot read).
+    for (const onTask of taskSubscriptions.get(frame.threadId) ?? []) {
+      onTask(frame as unknown as TaskFrame);
+    }
     return;
   }
   if (family === "fact") {
@@ -222,10 +273,14 @@ let token = "";
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 /// Whether the page WANTS a downlink at all. A page with nothing to follow keeps none.
 let wanted = false;
+/// WHETHER A SOCKET HAS ALREADY OPENED ON THIS PAGE. The FIRST open is not a gap: the pane takes
+/// its opening read as it subscribes, and there is nothing behind the socket to repair yet.
+/// Every open after it is a gap of unknown length, which is what `openListeners` is for.
+let everOpen = false;
 
 /// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows, a run it
-/// drives, OR ONE WHOSE FACTS IT WANTS. The server filters EVERY family by this set, so a
-/// thread has to be in it however this page came to hold it.
+/// drives, OR ONE WHOSE FACTS IT WANTS, OR ONE A PANE IS DRAWING. The server filters EVERY
+/// family by this set, so a thread has to be in it however this page came to hold it.
 ///
 /// THE FACTS BELONG HERE, and their absence used to be a hole with a real edge: a page whose
 /// only claim on a conversation was the run it had just driven stopped being told about that
@@ -233,27 +288,44 @@ let wanted = false;
 /// BEFORE the `turn/end` that closes the turn (`.scratch/step-events`). A host holding a window
 /// never noticed, because its window kept the thread declared; a freshly minted session has no
 /// window yet, so its `turn/end` was simply missed.
+///
+/// AND SO DOES THE TASK PANE'S TABLE (ticket 01 of `.scratch/task-pane-push`): it was missing
+/// here for the same reason and cost the same kind of frame. The declaration is also what a
+/// REPLACED socket re-states (ADR 0003 decision 7), so the reconnect sent a set that did not
+/// name the session the pane was drawing, the server dropped that watch with the old socket,
+/// and the frame that ENDS a job had nowhere to go -- the row said "so far" for a job that was
+/// over. A task frame carries no cursor (`TaskFrame`), so nothing would have brought it back.
 function wantedThreads(): string[] {
   return [
     ...new Set<string>([
       ...subscriptions.keys(),
       ...runSubscriptions.keys(),
       ...factSubscriptions.keys(),
+      ...taskSubscriptions.keys(),
     ]),
   ];
 }
 
 /// IS ANYBODY STILL CLAIMING THIS CONVERSATION? -- the question every door's close has to ask
-/// before it tells the server to stop sending. Window, run and facts are THREE SEPARATE CLAIMS on
-/// one conversation, and a door that drops only its own must not take the others' with it.
+/// before it tells the server to stop sending. Window, run, facts AND THE TASK PANE are FOUR
+/// SEPARATE CLAIMS on one conversation, and a door that drops only its own must not take the
+/// others' with it.
 ///
 /// THE RUN'S OWN DOOR IS THE ONE THAT MADE THIS NECESSARY: the agent lets go of a run the moment
 /// its stream ends, and `turn/end` is pushed ONE KERNEL EVENT LATER -- so a page whose only other
 /// claim was its fact subscription lost the fact that closes the turn it had just watched
 /// (`.scratch/step-events`).
+///
+/// AND THE PANE IS THE CLAIM THAT MADE THE LIST MATTER (ticket 01 of `.scratch/task-pane-push`):
+/// a session this page had just minted was a run and a pane with no window yet, so the run's door
+/// -- asking about windows and facts only -- took the pane's watch down with it, and the pane went
+/// on drawing a job from a frame that never arrived.
 function stillWanted(threadId: string): boolean {
   return (
-    subscriptions.has(threadId) || runSubscriptions.has(threadId) || factSubscriptions.has(threadId)
+    subscriptions.has(threadId) ||
+    runSubscriptions.has(threadId) ||
+    factSubscriptions.has(threadId) ||
+    taskSubscriptions.has(threadId)
   );
 }
 
@@ -294,6 +366,11 @@ function open(): void {
     // the URL cannot: a subscription added while the socket was still CONNECTING, when the
     // POST below had nowhere to go.
     declare({ subscribe: declaredSet() });
+    // AND THE READERS A CURSOR CANNOT REPAIR ARE TOLD TO ASK AGAIN (`openListeners`): the
+    // declaration above re-stated the whole set, so the watch is in place before the answer this
+    // read comes from.
+    if (everOpen) for (const listener of openListeners) listener();
+    everOpen = true;
   };
   ws.onmessage = (event) => {
     let frame: MuxFrame & RunFrame;
@@ -384,6 +461,9 @@ export function subscribeMux(
     // the closer that still owns the entry may remove it.
     if (subscriptions.get(threadId)?.handlers !== handlers) return;
     subscriptions.delete(threadId);
+    // AND THE THREAD IS ONLY UNSUBSCRIBED WHEN NO OTHER CLAIM IS LEFT: window, run, facts and
+    // the pane share this one watch (`stillWanted`), so this family leaving is not the
+    // conversation leaving.
     if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     // THE SOCKET STAYS OPEN with nothing subscribed. One idle connection per page is the
     // budget this module exists to keep; closing and reopening it on every switch would be
@@ -416,6 +496,8 @@ export function subscribeRun(
       const current = runSubscriptions.get(threadId);
       if (current === undefined || !current.delete(onEvent)) return;
       if (current.size === 0) runSubscriptions.delete(threadId);
+      // AND THE SAME QUESTION THE WINDOW'S CLOSER ASKS, for the same reason: the last claim out
+      // turns off the light (`stillWanted`). THIS is the door the pane's frames went out through.
       if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },
     declared,
@@ -446,8 +528,50 @@ export function subscribeFacts(
       const current = factSubscriptions.get(threadId);
       if (current === undefined || !current.delete(onFact)) return;
       if (current.size === 0) factSubscriptions.delete(threadId);
-      // AND THE DECLARATION GOES WHEN THE LAST CLAIM DOES: window, run and facts are three
-      // claims on one conversation, and dropping this one must not take the other two's.
+      // AND THE DECLARATION GOES WHEN THE LAST CLAIM DOES: window, run, facts and the pane are
+      // four claims on one conversation, and dropping this one must not take the other three's.
+      if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
+    },
+  };
+}
+
+/// FOLLOW THE TASK PANE'S FACTS for THREAD-ID: every pushed pane payload is handed to ON_TASK.
+/// Answers the way to stop, and the opening snapshot is the caller's to ask for (the pane reads
+/// both routes once when it mounts) -- a subscription with no snapshot would be a pane that is
+/// empty until something happens.
+export function subscribeTasks(
+  threadId: string,
+  onTask: (task: TaskFrame) => void,
+  /// ASKED WHEN THE SOCKET HAS BEEN AWAY AND IS BACK (`openListeners`). A task frame carries no
+  /// cursor, so this is the family's only repair before the next change; the pane hands over its
+  /// own idempotent snapshot read. Optional: a reader that can wait for the next push does not
+  /// need it.
+  onOpen?: () => void,
+): { unsubscribe: () => void } {
+  const set = taskSubscriptions.get(threadId) ?? new Set<(task: TaskFrame) => void>();
+  set.add(onTask);
+  taskSubscriptions.set(threadId, set);
+  // AND THIS READER IS ONE A CURSOR CANNOT REPAIR: a task frame has no line number, so the socket
+  // coming back is a gap only a fresh answer closes (`openListeners`). Registering here is also
+  // what puts this thread in the declaration -- `wantedThreads` above, the other half of the same
+  // bug.
+  if (onOpen !== undefined) openListeners.add(onOpen);
+  // THE SUBSCRIPTION IS A SERVER-SIDE SET TOO (`POST /api/events.mux/subscribe`), and the
+  // declaration is what puts this connection on the session's list: `ensure` opens the socket
+  // and `declareThread` states this thread on it. WHETHER THAT THREAD SURVIVES A REPLACED SOCKET
+  // is not decided here (`wantedThreads`), and neither is whether another family's teardown may
+  // turn the watch off (`stillWanted`) -- both are answered once, above, for every family.
+  ensure();
+  void declareThread(threadId);
+  return {
+    unsubscribe: () => {
+      const current = taskSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onTask)) return;
+      if (current.size === 0) taskSubscriptions.delete(threadId);
+      // AND THE TWO THINGS STOPPING HAS TO UNDO, both of them about the CONNECTION rather than
+      // this reader: nobody is told to read again (`openListeners`), and the server is asked to
+      // stop sending only when no family is left (`stillWanted`).
+      if (onOpen !== undefined) openListeners.delete(onOpen);
       if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },
   };

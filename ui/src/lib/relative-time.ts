@@ -68,3 +68,13 @@ export function relativeAge(sentAt: number, now: number): RelativeAge {
   if (elapsed <= RECENT_MAX) return { kind: "days", count: Math.floor(elapsed / DAY) };
   return { kind: "date" };
 }
+
+/// WHICH CATALOG KEY A BUCKET IS WORDED WITH. Here rather than in the component that first
+/// needed it, because a SECOND row now words a start time (`components/task-pane-jobs.tsx`,
+/// ticket 01 of `.scratch/task-pane-push`) and two maps would be two answers to 'how do we say
+/// five minutes ago'.
+export const AGO_KEY = {
+  minutes: "session.minutesAgo",
+  hours: "session.hoursAgo",
+  days: "session.daysAgo",
+} as const;

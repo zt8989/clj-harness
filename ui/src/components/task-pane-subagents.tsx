@@ -23,21 +23,15 @@ import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
 import { type SubagentView } from "@/components/subagent-view-context";
-import { formatTime } from "@/lib/format";
+import { formatMillis, formatTime } from "@/lib/format";
 import { oneLine } from "@/lib/jobs";
 import { asLanguage } from "@/lib/language";
-import { relativeAge } from "@/lib/relative-time";
+import { AGO_KEY, relativeAge } from "@/lib/relative-time";
 import { mirrorOf, type SubagentTaskRow } from "@/lib/subagents-runs";
 
 /// THE SHELL'S OWN WORDS FOR THE RELATIVE BUCKETS -- the same three keys the session rows
 /// read (`thread-list.aui.tsx`), so a delegation's clock and a session's clock cannot drift
 /// into two vocabularies. The buckets themselves are `lib/relative-time.ts`'s.
-const AGO_KEY = {
-  minutes: "session.minutesAgo",
-  hours: "session.hoursAgo",
-  days: "session.daysAgo",
-} as const;
-
 /// Draw ROWS as the pane's top section, each one a door. Empty is the caller's business
 /// (`components/task-pane.tsx` draws the empty sentence), so this is only ever asked for
 /// rows.
@@ -47,6 +41,9 @@ export const SubagentRows: FC<{
   now?: number;
 }> = ({ rows, onOpen, now = Date.now() }) => {
   const { t, i18n } = useTranslation();
+  // A DURATION IS THE `format` FACE'S, the same one the jobs row speaks through: the words for
+  // "1 分 20 秒" live with the other measurements, not in this file.
+  const { t: tFormat } = useTranslation("format");
   const locale = asLanguage(i18n.language);
 
   /// WHEN THIS DELEGATION STARTED, as a person reads it: a bucket, not a formatted date
@@ -103,6 +100,21 @@ export const SubagentRows: FC<{
                   className="shrink-0"
                 >
                   {t("rightPane.subagentStarted", { time: started(row.delegatedAt) })}
+                </span>
+              )}
+              {/* HOW LONG IT TOOK, OR HAS BEEN TAKING (ticket 01 of `.scratch/task-pane-push`):
+                  a finished delegation's is FIXED (`finishedAt` is the server's clock for
+                  watching it end), a running one's MOVES on the pane's local tick. A delegation
+                  an earlier process left behind has no `finishedAt` -- it draws the start and NO
+                  duration, because a guess at how long it ran is not a fact anybody has. */}
+              {(row.running || row.finishedAt !== null) && (
+                <span data-slot="task-pane-subagent-duration" className="shrink-0 tabular-nums">
+                  {t(row.running ? "rightPane.subagentElapsed" : "rightPane.subagentTook", {
+                    time: formatMillis(
+                      Math.max(0, (row.running ? now : row.finishedAt!) - (row.delegatedAt ?? now)),
+                      tFormat,
+                    ),
+                  })}
                 </span>
               )}
             </div>

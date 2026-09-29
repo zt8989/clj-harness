@@ -11,10 +11,12 @@
 //     line (`[exit 0]` / `[stopped]`) or the server's `[running]` while it runs, and --
 //     ONLY for a job that is still going -- how long it has been going.
 //
-// A FINISHED JOB HAS NO CLOCK, and that is not an omission: "how long has it been going"
-// is a question only a running job is the answer to, and a duration frozen at the moment
-// the pane last looked would be a number that quietly stops being true. The ending is the
-// whole answer to "how long did it take" -- it happened.
+// A FINISHED JOB NOW HAS BOTH CLOCKS (ticket 01 of `.scratch/task-pane-push`): the start it
+// began with, and the ending the SERVER stamped when the record closed (`endedAt`), so the
+// row draws the duration rather than leaving the reader to work it out. What used to be here
+// said a finished job had no clock at all, and the reason it gave was sound for a page that
+// only had `startedAt`: a duration frozen at the moment the pane last looked would quietly
+// stop being true. An ENDING is not that -- it happened, once, and the server wrote it down.
 //
 // THE CLOCK IS THE SERVER'S `startedAt` (`start!` writes it), not a time this side started
 // counting: a pane opened onto a job that has already been running for a minute must show
@@ -53,7 +55,9 @@ import { useTranslation } from "react-i18next";
 import { SquareIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { formatMillis } from "@/lib/format";
+import { asLanguage } from "@/lib/language";
+import { formatMillis, formatTime } from "@/lib/format";
+import { relativeAge, AGO_KEY } from "@/lib/relative-time";
 import { isRunning, oneLine, stopJob, type JobRow } from "@/lib/jobs";
 
 /// ONE ROW, drawn as a component because A PRESS BELONGS TO A ROW: `j1` pressed is not
@@ -64,9 +68,22 @@ const JobRowItem: FC<{ job: JobRow; threadId: string; now: number }> = ({ job, t
   // The failure's words are the `errors` face's, the same translator the composer's stop
   // hands its own call (`components/session-run-stop.tsx`).
   const { t: tErrors } = useTranslation("errors");
+  const { i18n } = useTranslation();
+  const locale = asLanguage(i18n.language);
   const [pressing, setPressing] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const running = isRunning(job);
+
+  /// WHEN IT STARTED, as a person reads it -- a bucket with the exact instant in the `title`,
+  /// the same reading `task-pane-subagents.tsx` gives a delegation's start.
+  const started = (startedAt: number): string => {
+    const age = relativeAge(startedAt, now);
+    if (age.kind === "justNow") return t("session.justNow");
+    if (age.kind === "date") {
+      return new Date(startedAt).toLocaleDateString(locale, { month: "numeric", day: "numeric" });
+    }
+    return t(AGO_KEY[age.kind], { count: age.count });
+  };
 
   // THE PRESS ENDS WHEN THE ROW DOES. The tick is what carries `[stopped]` back (the server
   // wrote it before it answered), so the moment this row stops being a running one is the
@@ -114,13 +131,27 @@ const JobRowItem: FC<{ job: JobRow; threadId: string; now: number }> = ({ job, t
           <span data-slot="task-pane-job-status" className="shrink-0 font-mono">
             {job.status}
           </span>
-          {running && (
-            <span data-slot="task-pane-job-duration" className="shrink-0 tabular-nums">
-              {t("rightPane.jobElapsed", {
-                time: formatMillis(Math.max(0, now - job.startedAt), tFormat),
-              })}
-            </span>
-          )}
+          {/* WHEN IT STARTED, always -- a finished job that only said "exit 0" left the reader
+              asking when (owner, 2026-09-27: 已完成的要显示开始时间). */}
+          <span
+            data-slot="task-pane-job-started"
+            title={formatTime(job.startedAt, locale)}
+            className="shrink-0"
+          >
+            {t("rightPane.jobStarted", { time: started(job.startedAt) })}
+          </span>
+          {/* AND HOW LONG IT TOOK, OR HAS BEEN TAKING. A finished job's is FIXED -- it happened,
+              and `endedAt` is the clock the server stamped when the record closed; a running
+              job's MOVES, and the moving half is the ONE timer this pane has (the header's note:
+              the tick draws and asks nothing). */}
+          <span data-slot="task-pane-job-duration" className="shrink-0 tabular-nums">
+            {t(running ? "rightPane.jobElapsed" : "rightPane.jobTook", {
+              time: formatMillis(
+                Math.max(0, (running ? now : (job.endedAt ?? now)) - job.startedAt),
+                tFormat,
+              ),
+            })}
+          </span>
         </div>
         {failure !== null && (
           <p role="status" data-slot="task-pane-job-stop-refusal" className="text-destructive text-xs">

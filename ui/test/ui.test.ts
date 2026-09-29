@@ -489,7 +489,12 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 ///
 /// ...170 -> 171: the client's half of `a dropped socket is repaired` -- how far the page got, and
 /// that the step frames are in that count (ticket 04 of `.scratch/step-events`).
-const EXPECTED_CASES = 173;
+///
+/// ...173 -> 174: the `mux` suite's case for ticket 01 of `.scratch/task-pane-push` -- a thread
+/// only the task pane follows is in the declared set (and out of it again when the pane stops).
+/// It is a value question about a RECONNECT: the declaration is what a replaced socket
+/// re-states, and a family missing from it is a family the server stops sending to.
+const EXPECTED_CASES = 174;
 
 let total = 0;
 for (const suite of SUITES) {
