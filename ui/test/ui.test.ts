@@ -58,6 +58,7 @@ import { rightPaneSuite } from "./suites/right-pane";
 import { threadMessagesSuite } from "./suites/thread-messages";
 import { timeoutSuite } from "./suites/llm-timeout";
 import { normalizationSuite } from "./suites/normalization";
+import { composerTodosSuite } from "./suites/composer-todos";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -75,7 +76,7 @@ import { normalizationSuite } from "./suites/normalization";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -497,7 +498,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 ///
 /// ...174 -> 175: the `stats` suite's case for the ring that went black (2026-09-29) -- a push
 /// whose `context` reports no `parts` must not delete the split the snapshot had.
-const EXPECTED_CASES = 175;
+/// ...175 -> 183: the `composer-todos` suite -- the strip above the composer, whose eight
+/// cases pin the folded line's words in both languages, the three shapes of the detail, and
+/// (as source, since this run has no DOM) the fold, the two facts it re-asks on, and the fact
+/// that nothing on a timer asks it.
+const EXPECTED_CASES = 183;
 
 let total = 0;
 for (const suite of SUITES) {

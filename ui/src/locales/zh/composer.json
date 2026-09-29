@@ -35,5 +35,15 @@
   },
   "run": {
     "stop": "停止这一场"
+  },
+  "todos": {
+    "done_other": "{{count}} 已完成",
+    "inProgress_other": "{{count}} 进行中",
+    "pending_other": "{{count}} 待处理",
+    "state": {
+      "completed": "已完成",
+      "inProgress": "进行中",
+      "pending": "待处理"
+    }
   }
 }

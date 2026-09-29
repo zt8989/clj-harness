@@ -68,3 +68,54 @@
 3. 列表清空（`todo_write []`）⇒ 横条**不画**。
 4. 换会话 ⇒ 横条换成本会话那份；没写过的那场什么都没有。
 5. 切语言 ⇒ 折着那行跟着变（明细里的原文不变）。
+
+## 落地（2026-09-29）
+
+三张票一起落地（票文件按约定删除，决定与验证记在这里）。这一票的 worktree 从 Windows 工作区搬来 WSL，
+并 rebase 到当时的 `main`（`418a7ed`）。
+
+### 票 01：一条读口子
+
+- `src/harness/edge/http.clj`：`thread-verbs` 那个闭合集合加 `"todos"`，dispatch 加 `[:get "todos"]`，
+  新函数 `todos-get` 答 `{:threadId <stem> :todos (todos/items-for stem)}`——**只读、不 locate、不 404、不写审计**，
+  `harness.cap.todos` 是它唯一的实现。
+- 测试进 `test/harness/edge/http_test.clj`：`the-todos-route-answers-the-row-a-model-wrote`
+  （写过后逐字段读到、没写过的答空 200、没听过的 stem 答空 200、读两次同一答案且行与日志不变、POST/PUT/DELETE 405）。
+
+### 票 02：那条横条
+
+- `ui/src/lib/todos.ts`：`todosFor(threadId)`，形状照 `lib/stats.ts`，读不到当 `[]`、不抛。
+- `ui/src/components/composer-todos.tsx`：`ComposerTodos`（接线）、`ComposerTodosView`（折/开，纯、可渲染）、
+  `TodoRows`（明细，纯）。挂在 `ComposerFrame` 里、输入框之前。
+- 折着只列非零项（已完成 · 进行中 · 待处理）；明细每行一个图标加原文，状态词只走 `sr-only`；
+  `in_progress` 是 `LoaderCircle` + `animate-spin` + `motion-reduce:animate-none`；明细自己滚（`max-h-40 overflow-y-auto`）。
+- 文案进 `locales/{en,zh}/composer.json` 的 `todos` 一节（英文 `_one`/`_other`）。
+
+### 票 03：什么时候重问
+
+- 挂载与换会话各一次 GET；之后 `lib/mux.ts` 的 `subscribeFacts` 在 `model/start` 与 `turn/end` 上重问。
+  **无新协议、无新帧、服务端一行未改**；没有定时器。
+- `turn/end` 之后**不补一拍**：任务列表是工具执行时同步写库的，排在 `turn/end` 后面写不下东西
+  （与统计条那条 400ms 补问不同，理由写在组件注释里）。
+
+### 验证
+
+- `cd ui && npm run typecheck` 绿、`npm run build` 绿。
+- `npx vitest run -t composer-todos`：**8/8 绿**。
+- `npm test` 全量：183 条里 170 绿、13 红——**红的是本机的环境红**（下节），本套 8 条不在红里。
+- 后端 `clojure -M:test -m harness.test-runner`：`harness.cap.todos-test` **20 tests / 76 assertions / 0 失败**；
+  `harness.edge.http-test` 118 条跑完，新增那条**不在失败名单里**（其余失败见下节）。
+- 真机走查（MCP 浏览器驱动；本机没有 Playwright，`.scratch/composer-todo-strip/walkthrough.mjs`
+  与 `script.json` 留着，脚本本身没在本机跑）：横条当场长出（`2 done · 1 in progress · 2 pending`）→ 点开是五行
+  原文 + 三形状（进行中那颗带 `animate-spin motion-reduce:animate-none`）→ 收回 → 刷新回来仍是折着的
+  （答案来自服务端行）→ 第二条消息把行改成 `3 done · 1 in progress · 1 pending`（**没有刷新**）→
+  空转 5 秒 `/todos` 请求数不动（无定时器）→ `todo_write []` 后整条消失。截图在 `evidence/`。
+
+### 机器差异（不是本改动的红）
+
+这台 WSL 上**另一个 agent 的测试进程同时在跑**，`harness.edge.http-test` 与 `npm test` 都撞上
+`SQLITE_BUSY: database file is locked`——库是每进程隔离的临时库，锁来自一个进程内 http-kit 线程并发写
+加上 CPU 被抢（load ≈ 5–10）。`http-test` 1545s 跑完全程、86 failures / 14 errors，全部是那串锁与它的连带；
+它第一条红是已知 flake `a-running-session-reads-what-has-arrived-and-nothing-is-written`。
+`npm test` 的红同样是 3 条 120s 超时 + 被超时连累的 `mux` 一条 + `SQLITE_BUSY`，`main` 基线在这台机器上同样红。
+新增的用例两边都不在红名单里。
