@@ -39,6 +39,27 @@ cd .. && clojure -M:run                 # http://localhost:8080 既是页面也�
 - 没有 `index.html` 就只服务 `/api`（`GET /` 的 404 会写明该跑什么命令）。
 - REPL 形态：`clojure '-J-Dfile.encoding=UTF-8' -M:repl`。
 
+**一条命令把那三步串起来**（建页面 → 验编译 → 后台起，并且确认它真的起来了）：
+
+```bash
+node scripts/run.mjs --port 8081          # 起来后打印地址、日志路径、以及怎么停它
+node scripts/run.mjs --port 8081 --detach # 同上，但新后端**生下来就脱离**调用者：
+                                          # 在 clj-harness 会话里跑也不会随那个会话被收走
+node scripts/run.mjs --stop --port 8081   # 停掉 :8081 上的后端
+node scripts/run.mjs --restart --port 8081
+                                          # 先停后起（要显式端口：0 是「让 OS 挑」，
+                                          # 挑出来的号码下次不是它）
+node scripts/run.mjs --restart --port 8081 --detach --grace 30
+                                          # 把重启交给一个脱离的进程，脚本立刻返回；
+                                          # 重启自己所在的那个会话的宿主时用这一发
+```
+
+- `--stop` / `--restart` 认的是**地址**而不是 pid：谁在听 `:PORT` 就停谁（现问现算），
+  没有要照看的 pid 文件。
+- `--detach` 用 `setsid -f` 把新进程**孤儿式**地生下来（PPID 1）。跑脚本的 clj-harness 会话
+  退出时会收掉自己整棵后代树（`harness.infra.shell/reap!` 走的是 `.descendants`），
+  `--detach` 起的不在那棵树里；自己终端里跑也照样长住，两条路都对。
+
 **分开起 + 热更新**（改 `ui/src` 立刻见效）：
 
 ```bash
@@ -46,7 +67,7 @@ clojure -M:run --port 0   # 启动横幅会打印真正绑到的端口，以及�
 cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
 ```
 
-停止：`Ctrl+C`，或 `Get-Process clojure,node | Stop-Process`。
+停止：`Ctrl+C`，或 `node scripts/run.mjs --stop --port <端口>`，或 `Get-Process clojure,node | Stop-Process`。
 
 验证：`clojure -M:test -m harness.test-runner`（后端；只跑几个命名空间就把名字接在后面）、
 `cd ui && npm test`（前端 vitest）。**别自己拼 `(isolate!)` + `run-tests`**——家目录隔离、判据、
