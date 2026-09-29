@@ -437,6 +437,7 @@
                 :reasoning-effort), or a provider DESCRIBED inline
     :providers  the vendor catalog, {name entry}, laid over the built-in table
     :ui         the interface's own settings (today just :language)
+    :security   the paths this home declares sensitive -- a file tool parks on them
 
   ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
   starts on, and which language it speaks are all facts about THIS home, so a person
@@ -447,8 +448,21 @@
   for it deliberately: a language is not a knob a session starts from, so folding it
   into :default would make that section's own description start to lie. It rides the
   same file because it is the same home's configuration, not because it is a provider.
-  See harness.infra.language for what it means and how it is resolved."
-  #{:default :providers :ui})
+  See harness.infra.language for what it means and how it is resolved.
+
+  :security IS THE SECOND DEPARTURE, AND A BIGGER ONE: it is not about a model, a session
+  or an interface at all -- it is THIS HOME'S SAFETY NET, the paths a file tool must park a
+  human on even when they sit inside the project fence. It rides this file because it is the
+  same home's configuration, and because the settings panel ALREADY writes this file: a list
+  the panel cannot write is not a list a person keeps up to date. Which calls it affects is
+  harness.cap.project's business, not this one's."
+  #{:default :providers :ui :security})
+
+(def ^:private security-keys
+  "The keys config.edn's :security section may carry. One today, and a NAMED SET rather
+  than a bare check for the reason :ui's keys are one: a typo in a safety list must fail
+  by name rather than sit there guarding nothing."
+  #{:sensitive-paths})
 
 (defn- check-config
   "A parsed config.edn -> the same map, or a named failure about its SHAPE.
@@ -458,7 +472,7 @@
   so the answer cannot differ between the two."
   [raw path]
   (when-not (map? raw)
-    (fail (str path " must be a map of the sections (:default, :providers and :ui), not "
+    (fail (str path " must be a map of the sections (:default, :providers, :ui and :security), not "
                (pr-str (type raw)))
           {:path path}))
   (let [unknown (sortable (remove config-sections (keys raw)))]
@@ -466,8 +480,9 @@
       (fail (str path " carries " (pr-str unknown) " at its top level; it is made of"
                  " sections -- :default (the three knobs a session starts from:"
                  " :provider / :model / :reasoning-effort), :providers (the vendors,"
-                 " {name entry}) and :ui (the interface's own settings, today just"
-                 " :language). The knobs used to sit at the top level themselves:"
+                 " {name entry}), :ui (the interface's own settings, today just"
+                 " :language) and :security (the paths this home declares sensitive, which"
+                 " park a human). The knobs used to sit at the top level themselves:"
                  " start the server once and it moves them under :default for you,"
                  " or move them yourself.")
             {:path path :unknown unknown})))
@@ -488,6 +503,24 @@
                    " this harness speaks; it is one of ("
                    (str/join " / " (sort language/supported)) ")")
               {:path path :language tag}))))
+  ;; :security -- ONE KEY, AND IT IS A LIST OF PATHS. Checked here, with the rest of the
+  ;; file, rather than at the point of use: this is the shape check `config` runs on every
+  ;; read, so a malformed list fails on the next call BY NAME -- while the same list read
+  ;; as empty by a lenient reader would be a guard that switched itself off, which is the
+  ;; one failure mode a safety net may not have.
+  (when-let [security (:security raw)]
+    (let [unknown-security (sortable (remove security-keys (keys security)))]
+      (when (seq unknown-security)
+        (fail (str path "'s :security carries " (pr-str unknown-security) "; it is made of"
+                   " one key -- :sensitive-paths, the paths this home calls sensitive (a"
+                   " file tool whose target is one of them parks for a human)")
+              {:path path :unknown unknown-security})))
+    (let [paths (:sensitive-paths security)]
+      (when-not (or (nil? paths) (and (sequential? paths) (every? string? paths)))
+        (fail (str path "'s :security :sensitive-paths is " (pr-str paths)
+                   ", not a list of paths; write :sensitive-paths [\"~/.ssh/\" ..], or"
+                   " leave the key out to use the built-in list")
+              {:path path :value paths}))))
   raw)
 
 (defn config
@@ -519,6 +552,96 @@
   []
   (check-config (or (edn/read-string (home/config)) {})
                 (.getAbsolutePath (home/config-file))))
+
+;; --------------------------------------------- this home's sensitive paths
+;;
+;; THE FOURTH SECTION'S VALUE, and the only thing in this file that is not about a model
+;; or an interface: a list of PATHS a file tool must park a human on even when they sit
+;; inside the project fence. Which calls those are, and what parking means, is
+;; harness.cap.project's business -- this namespace owns the FILE: the built-in list, the
+;; read, and the write.
+;;
+;; A BUILT-IN LIST, and its entries mean exactly what a config.edn entry means. That keeps
+;; the rule the built-in provider table already keeps -- a home that says nothing gets
+;; something that works -- and it keeps the other half too: a home that says something gets
+;; EXACTLY that, whole. The two are told apart and said out loud (`sensitive-paths-config`)
+;; rather than merged, because 'which of these did I write myself' is the first question
+;; anyone asks of a list that gates their own credentials.
+
+(def default-sensitive-paths
+  "The paths this harness calls sensitive when a home names none of its own. Every entry is
+  a place a machine keeps a credential: the cloud and infrastructure CLIs, key material and
+  keychains, container runtime configuration, and the credential files of the package
+  managers and of version control.
+
+  A LIST OF PLACES, NOT A CLAIM THAT ANY OF THEM EXISTS. A macOS keychain named on a Linux
+  box matches nothing -- a path that does not come up, rather than a failure -- and nothing
+  here is checked at boot. It is read at the moment of a call, like every other value in
+  this file.
+
+  `~` MEANS THE OPERATING SYSTEM'S HOME (harness.infra.home/user-home), NOT THE
+  CONFIGURATION HOME. These are the HOST's conventions; relocating CLJ_HARNESS_HOME must
+  not move a person's private keys out from under the guard."
+  ["~/.config/gcloud/"
+   "~/.azure/"
+   "~/.aws/"
+   "~/.terraform.d/credentials.tfrc.json"
+   "~/.kube/config"
+   "~/.ssh/"
+   "~/.gnupg/"
+   "~/.gpg/"
+   "~/Library/Keychains/"
+   "~/.docker/config.json"
+   "~/.docker/daemon.json"
+   "~/.netrc"
+   "~/.npmrc"
+   "~/.pypirc"
+   "~/.gem/credentials"
+   "~/.config/gh/hosts.yml"
+   "~/.git-credentials"])
+
+(defn expand-home
+  "PATH with a leading `~` replaced by this machine's home directory -- a bare `~`, or
+  one followed by a slash, and nothing else. `~user` is left alone: that shorthand needs
+  the password file to resolve, and a path this harness cannot expand is better kept as
+  written than guessed at."
+  [path]
+  (str/replace-first path #"^~(?=/|$)" (fn [_] (home/user-home))))
+
+(defn- configured-sensitive-paths
+  "The `:security :sensitive-paths` value in force, as [paths source] -- SOURCE being
+  :config when this home wrote a list and :default when it wrote none.
+
+  READ FRESH, like every other value in this file, and SHAPE-CHECKED -- but by
+  check-config, which `config` runs over the whole file: a malformed value has already
+  failed by name by the time it gets here, so there is exactly ONE shape rule for this
+  key rather than a checker and a lenient reader that disagree."
+  []
+  (let [paths (get-in (config) [:security :sensitive-paths])]
+    (if (nil? paths)
+      [default-sensitive-paths :default]
+      [(mapv identity paths) :config])))
+
+(defn sensitive-paths-config
+  "What this home's sensitive list IS, for a caller that has to SHOW it:
+
+    {:paths [~/.ssh/ ..] :source :default|:config :defaults [..]}
+
+  :paths is the list AS WRITTEN -- `~` and all -- because that is what a person edits and
+  what the file would hold; the expanded form is a machine fact, and it is `sensitive-paths`
+  that answers it. :defaults rides along so 'restore the built-in list' is the client's own
+  action rather than a second request, and so the panel can say what the built-in list IS
+  instead of describing it."
+  []
+  (let [[paths source] (configured-sensitive-paths)]
+    {:paths paths :source source :defaults default-sensitive-paths}))
+
+(defn sensitive-paths
+  "The paths a file tool must park a human on for THIS HOME, `~` expanded, in the order
+  they are written. WHICH calls those are, and why the fence needs this second and tighter
+  rule at all, is harness.cap.project's business."
+  []
+  (mapv expand-home (:paths (sensitive-paths-config))))
 
 (def builtin-raw
   "The providers this harness knows out of the box, so a config.edn naming one
@@ -1874,10 +1997,11 @@
   moment they open this file is which sections exist and that leaving them empty is a
   working state. A write from the settings form replaces these comments with its own
   header, which the file then says out loud."
-  (str ";; The three sections of this file, all of which the settings panel writes:\n"
+  (str ";; The four sections of this file, all of which the settings panel writes:\n"
        ";;   :default    the three knobs a session starts from\n"
        ";;   :providers  the vendors, {name entry}\n"
        ";;   :ui         the interface's own settings (today just :language)\n"
+       ";;   :security   the paths this home declares sensitive -- a file tool parks on them\n"
        ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
        ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
        "\n{}\n"))
@@ -1995,6 +2119,29 @@
       (write-config! next)
       next)))
 
+
+(defn set-sensitive-paths!
+  "PATHS (a vector of path strings, or the value the wire carried) -> the config map now
+  written, with `:security :sensitive-paths` set to it.
+
+  VALIDATED BEFORE ANYTHING IS WRITTEN, the rule every writer here keeps: a value that is
+  not a list of strings is refused by name and the file is left exactly as it was. The
+  WHOLE config is checked too (`check-config`), so a `:security` a typo broke fails here
+  rather than being written.
+
+  AN EMPTY LIST IS A DECISION, NOT A MISTAKE: it says 'this home guards nothing', and it is
+  how a person turns the built-in list off without editing this namespace. There is
+  deliberately no 'clear' back to the defaults for the same reason :ui has none -- writing
+  the defaults IS the way back, and the panel has them in hand (`sensitive-paths-config`)."
+  [paths]
+  (when-not (and (sequential? paths) (every? string? paths))
+    (fail (str ":sensitive-paths is " (pr-str paths) ", not a list of paths; send a JSON"
+               " array of strings, e.g. [\"~/.ssh/\", \"~/.aws/\"]")
+          {:value paths}))
+  (let [next (assoc-in (config) [:security :sensitive-paths] (mapv identity paths))]
+    (check-config next (config-path))
+    (write-config! next)
+    next))
 (defn put-provider!
   "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the
   catalog entry that is now in config.edn's :providers.

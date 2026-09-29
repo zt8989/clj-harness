@@ -307,8 +307,9 @@ thread-id → {:added {name tool}   ; presence：本会话贡献的定义
 
 所以一个没声明任何 hook 的会话，行为与 hook 存在之前逐字节相同。
 
-悬置的**原因**算一次、随 parked 记录走（`:tool-declares` / `:session-asks` / `:out-of-bounds`），
-因为人（和读日志的人）需要知道这是工具自己声明的、本会话要求的、还是撞了项目围栏。
+悬置的**原因**算一次、随 parked 记录走（`:tool-declares` / `:session-asks` / `:out-of-bounds` /
+`:sensitive-path`），因为人（和读日志的人）需要知道这是工具自己声明的、本会话要求的、撞了项目围栏的，
+还是撞了这一家点名的敏感路径。
 
 审批状态全在进程内存（`parked-registry`：interrupt-id → 记录），重启即失；
 拿一个本进程没 park 过的 interruptId 来 resume 会被**明确拒绝**，不猜。

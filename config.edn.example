@@ -4,7 +4,7 @@
 ;; it as config.edn.bak. Editing by hand is still fine -- the form reads this file
 ;; back -- and the next write from the form will reorder it again.
 ;;
-;; THE ONE CONFIG FILE. Its top level is exactly three sections:
+;; THE ONE CONFIG FILE. Its top level is exactly four sections:
 ;;
 ;;   :default    the three knobs a session starts from (or a provider DESCRIBED
 ;;               inline -- the escape hatch, below)
@@ -12,8 +12,12 @@
 ;;               which models each one serves
 ;;   :ui         the interface's own settings -- today just :language, the language
 ;;               this harness speaks (see the note below)
+;;   :security   the paths this home calls sensitive: a file tool aimed at one of them
+;;               parks for your approval, even when the path is inside the project
 ;;
-;; THREE SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which
+;; FOUR SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which
+;; vendors this machine can reach, which one it starts on, which language it
+;; speaks, and which paths it will not let a tool read without asking:
 ;; vendors this machine can reach, which one it starts on, and which language it
 ;; speaks -- and a person changing any of them should not have to open three files.
 ;; (What used to be providers.edn is the :providers section. A home that still has
@@ -28,6 +32,8 @@
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
 
  :ui {:language :en}                        ; English (en) or Chinese (zh)
+ :security {:sensitive-paths ["~/.ssh/" "~/.aws/" "~/.config/gh/hosts.yml"]}
+
  :providers
  {:openrouter
   {:protocol :openai-completions
@@ -143,3 +149,24 @@
 ;;              harness.infra.language). A KEY OR A VALUE THIS SECTION DOES NOT
 ;;              KNOW IS a named failure -- a typo here must not sit there doing
 ;;              nothing.
+;;
+;; :security -- THE PATHS THIS HOME CALLS SENSITIVE, and the only section that is not
+;; about a model or an interface at all. A file tool (read, write, edit, glob, grep)
+;; aimed at one of them PARKS for a human first -- INCLUDING when the path is inside the
+;; project, which is the case a project bound at your home directory makes. It is a list
+;; of PATHS, and the criterion is OVERLAP: a path inside one of them, or a directory that
+;; CONTAINS one (a grep over a directory reads what is under it).
+;;
+;; ABSENT IS THE USUAL CASE AND NOT A GAP: when this home names no list, the built-in one
+;; stands (harness.cap.providers/default-sensitive-paths -- the cloud CLIs, key material
+;; and keychains, container configuration, and the credential files of the package
+;; managers and of git). Writing a list REPLACES it whole, and `[]` says this home guards
+;; nothing, which is a decision rather than a mistake.
+;;
+;; TO SEE WHICH OF THE TWO IS IN FORCE ask GET /api/security, or open the settings panel
+;; -- which writes this section for you, so the list can be kept up to date without
+;; editing this file by hand.
+;;
+;; `~` MEANS YOUR OPERATING SYSTEM'S HOME, not ~/.clj-harness: these are the host's
+;; conventions, and relocating CLJ_HARNESS_HOME does not move your keys out from under
+;; the guard -- see harness.cap.providers/default-sensitive-paths.

@@ -118,6 +118,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/settings` | GET | 只读的生效配置：三个旋钮与**各来自哪一档**、家目录路径与它是哪条规则给的、哪几份文件在、有没有 key（只有有没有、来源与**凭据名**） | 无（只读） |
 | `/api/language` | GET | 这个家说的语言（`en` / `zh`），由 `harness.infra.language` 按 `config.edn` 的 `:ui :language` → 系统语言 → 终端语言 → 英语解析。**不带 threadId**：语言是这个家的事实，不是会话的 | 无（只读） |
 | `/api/language` | POST | 选这个家说的语言：写 `config.edn` 的 `:ui :language`（先校验整份配置、再原子写、留 `.bak`），回传**解析后**的值；不认的值是 400 加服务端那句话，一个字节不写 | 无 |
+| `/api/security` | GET | 这一家点名的**敏感路径**：写下来的原样（`~/.ssh/`，不展开）、是这一家写的还是内置的、以及内置清单本身（好让面板能「恢复默认」）。**不带 threadId**：这是这个家的事实，不是会话的 | 无（只读） |
+| `/api/security` | POST | 换**整份**敏感路径清单：先校验整份配置、再原子写 `config.edn` 的 `:security`（留 `.bak`），回传**读回来**的清单；`[]` 是「什么都不守」，不认的值是 400 加服务端那句话，一个字节不写 | 无 |
 | `/api/providers` | GET | 目录现成一份给设置表单：每条带**来源**（内置 / 你的 / 你的补丁）、endpoint、它声明的 model、凭据名与密钥事实，另带可选协议、思考档与 `:default` 现状 | 无（只读） |
 | `/api/providers` | POST | **新建或改写一条** provider：先校验整份新配置，再原子落盘（密钥写进 `.env` 的一行） | 无（见下） |
 | `/api/providers/<id>/remove` | POST | 从 `:providers` 里去掉一条；`:default` 正指着它就先拒（那会把家变成每轮都跑不起来） | 无 |

@@ -4,6 +4,18 @@
     "field": "Interface language",
     "hint": "The language this harness speaks — written to config.edn, and the same one the model is told to answer in. The harness's own sentences (tool results, errors) are not translated."
   },
+  "security": {
+    "title": "Sensitive paths",
+    "hint": "Paths this home calls sensitive — cloud and infrastructure credentials, key material, container and package-manager credentials. A file tool aimed at one of them (read, write, edit, glob, grep) parks for your approval, even inside the project. They live in config.edn's :security: what is listed here is the whole rule, and an empty list says this home guards nothing.",
+    "fromConfig": "This list is this home's own (config.edn's :security :sensitive-paths).",
+    "fromDefault": "These are the built-in paths — this home has written none of its own.",
+    "empty": "This home guards no path: the built-in list is off.",
+    "loading": "Reading the sensitive paths…",
+    "add": "Add",
+    "placeholder": "~/.ssh/ or /an/absolute/path",
+    "remove": "Remove {{path}}",
+    "restore": "Restore the built-in list"
+  },
   "page": {
     "general": "General",
     "models": "Models",

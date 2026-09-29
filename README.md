@@ -78,7 +78,7 @@ cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
 运行期配置与产物都住在**一个目录**里，默认 `~/.clj-harness/`（换位置设 `CLJ_HARNESS_HOME`）：
 
 ```
-config.edn    唯一一份配置：:default（三个旋钮）+ :providers（厂商目录），每轮重读
+config.edn    唯一一份配置：:default（三个旋钮）+ :providers（厂商）+ :ui（语言）+ :security（敏感路径），每轮重读
 harness.edn   用户级 harness 配置（可选）：编辑模式、围栏、技能根、指令文件
 hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）
 mcp.edn       MCP 服务器声明（可选；不存在 = 一个都没声明）

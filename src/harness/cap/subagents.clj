@@ -571,6 +571,7 @@
     :tool-declares   "the tool declares that it needs one"
     :session-asks    "this session asks for one before that tool runs"
     :out-of-bounds   "the path it names is outside the project"
+    :sensitive-path  "the path it names is one this home declares sensitive"
     :elicitation     "the tool stopped to ask a question"
     (str "reason: " (name (or reason :unspecified)))))
 
