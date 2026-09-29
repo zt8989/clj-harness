@@ -193,7 +193,7 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 ### 基座：两份工具表，按会话的编辑模式二选一
 
 基座**不是一个固定清单**：文件编辑有两套实现，一次只会有一套装在本会话的工具表里，由
-`harness.edn` 的 `:editing {:mode …}` 决定（见 [home-and-storage](home-and-storage.md#配置根一个根三层优先级)）。
+`config.edn` 的 `:editing {:mode …}` 决定（见 [home-and-storage](home-and-storage.md#配置根一个根三层优先级)）。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|

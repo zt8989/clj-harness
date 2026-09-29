@@ -71,7 +71,7 @@ export function useTaskPane(
   const [now, setNow] = useState<number>(() => Date.now());
   /// THE DEFINITIONS LAST READ, kept because a pushed frame carries RUNS and not definitions:
   /// a delegation's row draws the definition's description, so the join needs both, and the
-  /// snapshot read is what supplies the second half. A hand-edited harness.edn is therefore
+  /// snapshot read is what supplies the second half. A hand-edited config.edn is therefore
   /// picked up by the next snapshot (a remount, a session switch, the page coming back) rather
   /// than by the next push -- which is what the definitions ARE: configuration, not state.
   const definitions = useRef<readonly SubagentDefinition[]>([]);

@@ -4,7 +4,7 @@
 //
 // One call answers BOTH screens -- the sidebar's panel and the settings page --
 // and that is the server's arrangement rather than a saving here: the definitions
-// come from harness.edn and the run records come from the store plus the server's
+// come from config.edn and the run records come from the store plus the server's
 // own live table, and only the side that owns those files can join them. A client
 // that read the file itself would need to know where a home keeps its
 // configuration, which is not a thing a page should learn.
@@ -77,13 +77,13 @@ export type SubagentRun = {
 /// The whole answer: what the subagents are, and what has been delegated.
 export type SubagentListing = {
   subagents: readonly SubagentDefinition[];
-  /// The first thing in harness.edn's :subagents block that could not be honoured,
+  /// The first thing in config.edn's :session :subagents block that could not be honoured,
   /// or null. THE PRESENCE OF THIS IS NOT A FAILURE: a home with a typo in that
   /// block still runs, and the sentence is here so a screen can say which file to
   /// open. A file that cannot be parsed at all is the other case and arrives as a
   /// refusal instead.
   problem: string | null;
-  /// The user-level harness.edn these definitions come from (or would be written
+  /// The user-level config.edn these definitions come from (or would be written
   /// to), so a save can say where it landed.
   path: string | null;
   runs: readonly SubagentRun[];
@@ -117,7 +117,7 @@ export type SubagentDraft = {
   exclude: readonly string[];
 };
 
-/// Create or replace ONE definition in the home's harness.edn.
+/// Create or replace ONE definition in the home's config.edn.
 ///
 /// `replace` IS THE REQUEST'S OWN STATEMENT ABOUT WHICH SCREEN SENT IT, and it is
 /// not decoration: the edit view is changing a row it is showing, and the
@@ -142,7 +142,7 @@ export async function putSubagent(
   return res.json();
 }
 
-/// Take one definition out of the home's harness.edn. A built-in is refused by name
+/// Take one definition out of the home's config.edn. A built-in is refused by name
 /// (there is nothing in the file to remove), and a name this home does not have is
 /// refused too -- guessing at which subagent a stale row meant would delete the
 /// wrong one.

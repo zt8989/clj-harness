@@ -107,7 +107,7 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
 | **窗口**（`entries` / `baseSeq` / `hasMore` / `cursor`，以及 generation） | **连接与浏览器**（一条 feed 一条连接；服务端不记谁订了什么） | 铁律 3 的另一半：游标随连接走，进程除了活着的连接不持有任何订阅状态 |
 | 项目 / 会话归属 / 归档 / 认领（`session_claims`）/ 任务清单（`todos`） | **sqlite**（`harness.infra.db`） | 会被**改写**的状态 |
 | 行锚点、已展示集合、撤销记录 | **sqlite**（`harness.infra.db`，四张 `hashline_*` 表） | 会被**改写**的状态；且会话长命，重启后日志里的锚点还得能用 |
-| 文件编辑模式（`harness.edn` 的 `:editing`） | **文件**（每次调用现读） | 手编、改了不重启；按会话解析，两种模式各有完整用例 |
+| 文件编辑模式（`config.edn` 的 `:editing`） | **文件**（每次调用现读） | 手编、改了不重启；按会话解析，两种模式各有完整用例 |
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录：`message` / `event` 两类行，其中**不含推理帧**——同一段思考在模型那条 `message` 行的 `reasoning_content` 上（[ADR 0009](../adr/0009-the-record-holds-a-thought-once.md)） |
 | 配置 | **文件**（每轮现读） | 手编、改了不重启 |
 | 开场块（指令文件、技能清单） | **不存**：每轮现读现拼 | 配置与技能根是真相源，缓存一份就会「改了没生效」 |

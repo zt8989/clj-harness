@@ -170,9 +170,9 @@
     "create": "创建子agent",
     "cancel": "取消",
     "remove": "删除",
-    "removeTitle": "把这条从 harness.edn 里拿掉。改动前的文件留在它旁边。",
-    "errorNote": "什么都没写——harness.edn 与改之前一模一样。",
-    "problemLead": "harness.edn 的 :subagents 块里有认不下来的东西：",
+    "removeTitle": "把这条从 config.edn 的 :session 里拿掉。改动前的文件留在它旁边。",
+    "errorNote": "什么都没写——config.edn 的 :session 与改之前一模一样。",
+    "problemLead": "config.edn 的 :session :subagents 块里有认不下来的东西：",
     "problemTail": " 这个会话用的还是那两个内置的。"
   }
 }

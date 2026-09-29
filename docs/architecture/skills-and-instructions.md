@@ -71,7 +71,7 @@
 hook 决定——两半不可能交错，因为 role 不同。）
 
 **位置解析是纯函数**：`skills/roots` 与 `preamble/instruction-files` 都是 `(配置值, 项目目录)` 入参，
-**不查绑定、不读 harness.edn**。这不是洁癖，是断环——围栏必须知道技能根（见「与围栏的关系」），
+**不查绑定、不读 config.edn**。这不是洁癖，是断环——围栏必须知道技能根（见「与围栏的关系」），
 所以 `harness.cap.project` require 它们，反过来 require 就是环（Clojure 在 `require` 时就报）。
 调用方手里本来就有这两样：围栏有绑定，`skill` 工具体有 thread-id，于是 `harness.cap.project/skill-roots`
 与 `preamble-files` 做那一次配对——只有它同时看得见配置读取、绑定、以及两个纯函数消费方。
@@ -118,7 +118,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
   - **不在**、**是目录**、**只有空白** → 跳过（`:missing` / `:not-a-file` / `:empty`）。三者都是日常
     ——多数项目没有 AGENTS.md，占位文件什么都没说——都不值得为它停一次 run。
   - **在但读不出来**（权限、非 UTF-8）→ **指名失败**，带上绝对路径，run 不开始。它是这场会话自己的
-    配置，与 `config.edn` / `harness.edn` 同一族；静默跳过等于让会话按一套**没人写过的规矩**在跑，
+    配置，与 `config.edn` / `config.edn` 同一族；静默跳过等于让会话按一套**没人写过的规矩**在跑，
     而这是一场会话唯一绝不能默认做的事。
 - 解码是**严格 UTF-8**，畸形字节是失败而不是替换字符：`slurp` 的默认解码器会把 U+FFFD 塞进一个二进制
   文件，然后把一套没人写过的指令交给模型——那比不启动更坏。
@@ -160,7 +160,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
 两份历史，尾巴上多出来的每条发一个 `:context/injected` 事件，边把它转成 `CUSTOM` 帧——「模型被交给了什么、
 它自己没要」这件事从此不再沉默（见下）。
 
-**正文从根现读**（每轮现解析），与 config.edn / harness.edn 同一条纪律：改一份技能，
+**正文从根现读**（每轮现解析），与 config.edn / config.edn 同一条纪律：改一份技能，
 下一轮就生效。代价写清楚：**正文因此不冻结在会话里**——技能在会话中途从根里消失时，注入位换成一句
 点名说明（「没有叫 X 的技能在任何根里……它读不到，也不该被假定」），**绝不静默少一段指令**。
 一个**打错的**名字拿到同一句话：什么都没加载，和加载到一个「无话可说」的技能，不能长得一样。
@@ -257,7 +257,7 @@ context"），一直没有触发源；**本特征就是它的子系统**。
 
 ## 配置：`:skills` 与 `:instructions`
 
-两个键都在 `harness.edn`（用户级 `~/.clj-harness/harness.edn`，项目级 `<项目>/.harness/harness.edn`）：
+两个键都在 `config.edn`（用户级 `~/.clj-harness/config.edn`，项目级 `<项目>/config.edn 的 :session`）：
 
 ```edn
 {:skills       {:roots ["/abs/path/to/skills" "relative/to/project"]}

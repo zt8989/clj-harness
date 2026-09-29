@@ -39,7 +39,7 @@
 │                     :providers（厂商 endpoint + 它的 model 表）；每轮重读。
 │                     没有就在**开机时**由组合根写一份空骨架（`ensure-config!`），
 │                     读侧从不创建它
-├── harness.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
+├── config.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
 ├── .env              一家厂商一把钥匙：`<ID>_API_KEY`（如 `ACME_GATEWAY_API_KEY`），
 │                     外加全局 `HARNESS_API_KEY` 兜底与三个搜索键（Brave/Exa/Tavily）
@@ -130,14 +130,14 @@
 
 | 文件 | 合并方式 | 含义 |
 |---|---|---|
-| `harness.edn` | 顶层浅合并，项目级**整键替换** | 项目写了 `:approval` 就整个换掉用户的 |
+| `config.edn` | 顶层浅合并，项目级**整键替换** | 项目写了 `:approval` 就整个换掉用户的 |
 | `hooks.edn` | 逐**点**替换 | 项目写 `:pre-tool-use` 就整个换掉用户的那些声明 |
-| `mcp.edn` | 逐**表**替换（`:servers` 是它唯一的键） | 项目声明自己的服务器集合 |
+| `config.edn` 的 `:mcp` | 逐**表**替换（`:servers` 是它唯一的键） | 项目声明自己的服务器集合 |
 
 **都不深合并、都不做并集**，理由相同：「实际会跑什么」应该在一个文件里读得出来，
 而不是从两个文件怎么嵌套里推。代价照旧的接受：项目只想加一条声明，得把它要的那些一起写出来。
 
-**`harness.edn` 还有一个方向更远的替换：`:skills {:roots ..}` 与 `:instructions {:files ..}`
+**`config.edn` 还有一个方向更远的替换：`:skills {:roots ..}` 与 `:instructions {:files ..}`
 整表替换的是那两个半边的「内置默认」**——不是用户级对项目级，而是「配置说了什么」对「宿主约定位置」。
 写 `{:instructions {:files ["AGENTS.md"]}}` 的会话只读项目那一份，`<user-home>/AGENTS.md` 整个退出画面。
 空向量 `[]` 是合法的，意思就是「什么都不读」。两个键的段本身必须是 map：`{:skills 42}` 在问它要 `:roots`
@@ -159,7 +159,7 @@
 | 进库 | 留在文件 |
 |---|---|
 | 会被**改写**的状态：项目、会话归属、归档、认领、hashline 的锚点、任务清单 | 只追加的记录：会话 jsonl |
-| | 手编的配置：`config.edn` / `harness.edn` |
+| | 手编的配置：`config.edn` / `config.edn` |
 
 判别标准**不是「改得勤不勤」，是「能不能被改写」**。推论：
 
@@ -394,7 +394,7 @@ stem 什么都指不到、或指向两个 workspace 里同名的两份日志 →
 
 ## 配置不搬进库，而且看得见
 
-`config.edn` / `harness.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
+`config.edn` / `config.edn` / `hooks.edn` **不搬进库**：它们是手编的配置，库装的是
 会被**改写**的状态。两边各自现读，所以改配置不需要重启，打开库也不会去读配置文件。
 
 **一份配置一个文件**：厂商目录与默认档是 `config.edn` 的两节（见 [providers](providers.md)）。

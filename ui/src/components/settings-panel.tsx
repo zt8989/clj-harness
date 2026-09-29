@@ -1285,7 +1285,7 @@ const ModelsPage: FC<{
 /// What the subagent form holds while it is open.
 type SubagentEdit = {
   /// The name in the field. DISABLED while editing rather than merely ignored: the
-  /// name IS the row in harness.edn, so a "rename" is not an edit at all -- it is a
+  /// name IS the row in config.edn's :session, so a "rename" is not an edit at all -- it is a
   /// different subagent -- and the server refuses a name already in force rather than
   /// quietly taking it over.
   name: string;
@@ -1335,7 +1335,7 @@ const exclusionsOf = (text: string): string[] =>
     .map((part) => part.trim())
     .filter((part) => part !== "");
 
-/// THE FORM FOR ONE SUBAGENT, and the only thing in the app that writes harness.edn.
+/// THE FORM FOR ONE SUBAGENT, and the only thing in the app that writes config.edn's :session.
 ///
 /// A REFUSAL LEAVES THE FORM OPEN AND THE FILE ALONE, which is the whole promise it
 /// makes. The server validates the entire block before it opens the file (see
@@ -1344,7 +1344,7 @@ const exclusionsOf = (text: string): string[] =>
 /// get the previous version back.
 const SubagentForm: FC<{
   edit: SubagentEdit;
-  /// The user-level harness.edn these definitions live in, so the note can NAME the
+  /// The user-level config.edn's :session these definitions live in, so the note can NAME the
   /// file rather than describe it. The server always answers an absolute path, even
   /// for a home that has no such file yet -- which is exactly when the name matters.
   file: string;
@@ -1478,7 +1478,7 @@ const SubagentForm: FC<{
       {/* WHERE THIS LANDS, IN WORDS, ON EVERY OPEN FORM -- because the two things a
           person cannot see from inside a dialog are that a built-in has no row of its
           own to change and that the file is rewritten whole. Both are said, and the
-          file is named, so "I broke my harness.edn" has an answer before it is asked. */}
+          file is named, so "I broke my config.edn's :session" has an answer before it is asked. */}
       <p
         data-slot="settings-subagent-where"
         className="text-muted-foreground text-xs break-words"
@@ -1533,7 +1533,7 @@ const SubagentForm: FC<{
 ///
 /// IT READS ITS OWN ENDPOINT AND RELOADS ITSELF, unlike the two pages above. Those
 /// share `GET /api/settings` and the provider catalog because they are two readings of
-/// ONE file, config.edn; this page's file is harness.edn, and a page that refreshed
+/// ONE file, config.edn; this page's file is config.edn's :session, and a page that refreshed
 /// somebody else's reading would be claiming a relationship that is not there. What
 /// they do share is the discipline: read fresh, show the server's sentence, never
 /// cache.
@@ -1622,7 +1622,7 @@ const SubagentsPage: FC = () => {
         <>
           {/* THE PROBLEM IS PART OF THE ANSWER, NOT AN ERROR STATE -- the same
               distinction the sidebar's block draws, for the same reason: a typo in
-              harness.edn leaves a harness that still runs (the reader is tolerant and
+              config.edn's :session leaves a harness that still runs (the reader is tolerant and
               the built-ins survive it), so the request answered 200 and this is one
               more thing the page has to say. Until the block is fixed it cannot be
               SAVED over either, which is what the refusal on a save attempt names. */}
@@ -1652,12 +1652,12 @@ const SubagentsPage: FC = () => {
 /// question about this session.
 ///
 /// MCP IS NOT A SETTING, and it is here anyway. Nothing on this page writes
-/// `mcp.edn` -- what a server IS comes from the files, and this only shows the
+/// config.edn's `:mcp` -- what a server IS comes from the files, and this only shows the
 /// ledger and switches servers on or off FOR THIS SESSION. It sits beside the
 /// others because it is one of the things a person asks about "what is this
 /// session running on", which is what this dialog is for.
 ///
-/// SUBAGENTS IS THE FOURTH PAGE, and the only one whose file is harness.edn. It is a
+/// SUBAGENTS IS THE FOURTH PAGE, and the only one whose file is config.edn's :session. It is a
 /// page rather than a section of General because "where do I change what a session can
 /// hand work to" deserves the same answer as every other question about this session,
 /// and because a list of definitions plus a form that rewrites a file is not a row in
@@ -1856,7 +1856,7 @@ export const SettingsPanel: FC<{
             {page === "mcp" && (
               <section data-slot="settings-mcp" className="flex flex-col gap-3">
                 <SectionTitle>{t("mcp.heading")}</SectionTitle>
-                {/* `mcp.edn` is a filename, not copy: it stays literal and stays in
+                {/* config.edn's `:mcp` is a filename, not copy: it stays literal and stays in
                     `<code>`, and the sentence is split into the runs around it (the
                     same reason the Default-tier intro gives). */}
                 <p className="text-muted-foreground text-xs">

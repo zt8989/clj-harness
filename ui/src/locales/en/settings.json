@@ -173,9 +173,9 @@
     "create": "Create subagent",
     "cancel": "Cancel",
     "remove": "Remove",
-    "removeTitle": "Takes this entry out of harness.edn. What the file held before is kept beside it.",
-    "errorNote": "Nothing was written — harness.edn is exactly as it was.",
-    "problemLead": "harness.edn's :subagents block says something that could not be honoured: ",
+    "removeTitle": "Takes this entry out of config.edn's :session. What the file held before is kept beside it.",
+    "errorNote": "Nothing was written — config.edn's :session is exactly as it was.",
+    "problemLead": "config.edn's :session :subagents block says something that could not be honoured: ",
     "problemTail": " The built-ins are still what this session uses."
   }
 }

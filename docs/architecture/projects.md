@@ -63,7 +63,7 @@
 
 允许集：
 
-1. **项目目录本身**——除非项目的 `harness.edn` 写了 `:approval {:strict true}`（项目内也要审批）；
+1. **项目目录本身**——除非项目的 `config.edn` 写了 `:approval {:strict true}`（项目内也要审批）；
 2. **配置家**（读自己的 `config.edn` / `.env` 是围栏刻意留的自留地，
    **strict 不收紧它**——配置家是 harness 自己的地盘，不是项目的）；
 3. **本机的临时目录**（`java.io.tmpdir` 与 POSIX `/tmp`，canonical 后去重），与配置家**同级、
@@ -101,11 +101,11 @@
 
 ## 项目级配置
 
-`.harness/harness.edn` 两级装配（用户级 + 项目级），逐键替换、每次现读、坏文件指名硬失败——
+`config.edn` 的 `:session` 两级装配（用户级 + 项目级），逐键替换、每次现读、坏文件指名硬失败——
 详细规则见 [home-and-storage](home-and-storage.md#配置文件的两级装配)。
 
 `.harness/` 下的 `mcp/`、`hooks/` 子目录**留给各自的消费者**；
-`harness-config` 只认 `harness.edn` 一个文件（`hooks.edn` 由 `harness.kernel.hooks` 自己读）。
+`harness-config` 只认 `config.edn` 一个文件（`hooks.edn` 由 `harness.kernel.hooks` 自己读）。
 
 **技能与指令不在 `.harness/` 下。** 它们的项目级位置是**宿主自己的约定**——`<项目>/.agents/skills/`
 与 `<项目>/AGENTS.md`——因为同一个技能目录要同时服务于在场的每个 agent，而不只是 clj-harness；
@@ -117,7 +117,7 @@
 以及两个刻意的纯函数消费方。
 
 **注意这里源是混的**，而这是 home 的边界不是意外：**绑定来自库，配置来自文件**。
-状态被改写，配置被手编——所以改 `harness.edn` 仍然不需要重启，而这次调用任何一步都不写库。
+状态被改写，配置被手编——所以改 `config.edn` 仍然不需要重启，而这次调用任何一步都不写库。
 
 ## 事件源：CwdChanged
 

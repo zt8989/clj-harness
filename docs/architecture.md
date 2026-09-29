@@ -72,7 +72,7 @@
 |---|---|
 | `cap.tools` | **二十个内建工具的「脸」**（`read` / `write` / `edit` / `replace` / `insert` / `undo_last_replace` / `grep` / `glob` / `bash` / `job` / `job_kill` / `job_list` / `job_output` / `eval` / `skill` / `todo_write` / `todo_read` / `web_fetch` / `web_search` / `ask`）：每个工具的名字、说明与参数，以及它们的 `install!`。**干活的不在这里**——文件编辑在 `cap.hashline/*`、找文件在 `cap.glob`、清单在 `cap.todos`、出网在 `cap.web`、后台命令在 `cap.jobs`（**起**它的是 `job`，读它的是 `job_output`，停它的是 `job_kill`，**列**它的是 `job_list`）；批的计划器与编辑模式的收窄策略也从这里装上 |
 | `cap.jobs` | **后台作业与命令的记录**：写下一条命令说了什么、读它、停掉它、**按会话列出来**（**起**它的是 `job`——**模型**那一侧四个动词各做一件事：起 / 读 / 停 / 列，不是一个动词带一个模式开关；**模型**的「列」是 `job_list`（没有参数，读的是**记录**——这一会话目录里的每一个文件，含前面几次运行留下的与前台溢出的 `c*`，一行一份文件），**人**的「列」是 `edge.http` 的 `GET /api/threads/<stem>/jobs`（读的是**这张注册表**而不是记录，所以没有作业、或作业随上一个进程死掉都是 `[]`，不是 404））。**记录是一份文件**——`<配置家>/jobs/<会话>/<句柄>-<进程戳>.log`，命令每打一行就追加并 flush 一行，末行是 `[exit N]` 或 `[stopped]`（没有那一行就是还在跑）；**这个是状态本身**，本模块不另立一套 running/completed/killed 枚举。文件在两种情形下被写：前台 `bash` 的答案**超过 `answer-budget-bytes` 字节**时把整份落下来（答案只带尾部 + 省略量 + 路径），后台作业则从一开始就落。**模型读它有两条路**：`job_output` 读完一条（状态行 + 一段窗口 + 可以 `wait` 到终态，`offset` 是记录自己的行号），`job_list` 答「这一会话有什么」（没有参数、不寻址）——`job` 与 `job_kill` 的答案报的就是它，**不是记录的路径**（**回执不报路径**，而**读的那一处报**：答案装不下整份记录时，`job_output` 把记录的路径写进结尾那一行，`bash` 溢出那条截断行也一样带着它——记录本身是一份文件，落在围栏的自由路径上，`bash` / `read` / `grep` 读得了它。`.scratch/job-receipt-no-path`）。另有**它自己会说话**：一条没人等的作业结束时，它的结局会在**下一次模型调用前**作为 `<job-ended id="…">[exit N]</job-ended>` + `<command>…</command>` + 一行「用 `job_output` 读它」注入历史（`before-llm` 的第二半；**人**从任务视图停的那一条多一个 `by="user"` 属性、末句改说「是人停的」，标签仍是 `job-ended`），**两样事实 + 它跑的那条命令 + 一句读法、与记录多大无关**（命令多大它就多大），说一次、不推送（`job_output` / `job_kill` 已经交到模型手里的结局不重复，模型自己 `tail` 过的不算——这条代价照旧）。它落在**配置家**而不是会话的 jsonl 那棵树里，因为 `bash` / `read` / `grep` 已经能读一份文件，而配置家是围栏的自由路径（读它不挂审批）；**它不是会话历史**：不进 jsonl、不进库、不加审计行——但它**活过写它的那个进程**（文件留下来才是「回头再看昨天那一次」这件事有解的原因；名字里那截进程戳是为了让下一次运行别写到上一次的头上），整棵树按字节封顶，超了从最旧的一份开始删。**进程内存里留下的只有作业本身**：句柄、进程、它跑的那条命令（通知要用它说出「是哪个作业」）、注册表条目（重启后 `job_output` / `job_kill` 答「未知作业」，而文件还在盘上）。注册表按会话分家、进程内，**条目只在进程退出时离开它**（`job_kill` 停的是作业、写的是记录末行，条目留下来答终态；`listing` 只读它），而**停有两个发起人**：`:by :model`（默认，`job_kill`）认领 `:told?`——它的答案就是那次告知；`:by :user`（`POST /api/threads/<stem>/jobs`，人从任务视图按的那颗 ■）不认领，只记 `:stopped-by`，让 `take-notices!` 在**下一通调用**把那句 `by="user"` 的通知说出来。`stop!`（`job_kill` 走的也是它）**不删记录**——删了就等于把已经交出去的答案变成死链。也不随 run 结束而死 |
-| `cap.editing` | **两套编辑实现的名字与账**：解析 `harness.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
+| `cap.editing` | **两套编辑实现的名字与账**：解析 `config.edn` 的 `:editing`、决定本会话被服务哪一套、每个模式服务哪些工具名，以及「不服务」时那句话术 |
 | `cap.hashline/*` | 按锚点编辑的全部实现：`anchors` / `store` / `serve` / `reading` / `edit` / `replace` / `insert` / `undo` / `write` / `grep` / `files`（锚点分配、落盘、diff、拒绝、批、撤销、搜索） |
 | `cap.glob` | **按名字找文件**：答案是 rg 两次列举的**交集**（`rg --glob` 的优先级高于 `.gitignore`，直接交给它会列出 `node_modules`），顺序按路径不按 mtime。列的是**路径**，所以它不属于任何编辑家族、两种模式都服务它 |
 | `cap.todos` | **本会话的任务清单**：校验、整份替换，以及把它读回来的那段渲染（`todo_read` 的答案），落在 `infra.db` 的 `todos` 表（一行一个会话，清单整存整取）。判据是「能被整份改写的是状态」 |
@@ -80,11 +80,11 @@
 | `cap.web.search` | **三家搜索厂商各自的线**（Brave / Exa / Tavily：请求形状、键放在哪个头、响应形状）。厂商由**哪个键在**决定，顺序写在那一张表里；`cap.web` 不知道任何厂商的存在 |
 | `cap.hooks` | hook 的**来源**：读配置家的 `hooks.edn` 再叠上绑定项目的 `.harness/hooks.edn`（两级浅合并），以 `install!` 交给内核 |
 | `cap.system-prompt` | **system 消息的组装**：`prompt.md` 的冻结开头 + `SystemPrompt` 点上各声明追加的文本；内核自己那两条行（工程目录 / 这台机器）由它的 `install!` 装上。**不并进 `cap.preamble` 是 require 环**：`cap.project` 已 require `cap.preamble`，而这些行要它，也要 `kernel.hooks.dispatch` |
-| `cap.project` | 项目与会话绑定、路径重根、围栏、`harness.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：人的 `/name` 要的技能正文 + 作业结束的通知两半，一处组装） |
+| `cap.project` | 项目与会话绑定、路径重根、围栏、`config.edn` 两级装配，以及 `skill-roots` / `preamble-files`（配置 + 绑定的配对）与 `before-llm`（每轮 LLM 前的**会话注入**：人的 `/name` 要的技能正文 + 作业结束的通知两半，一处组装） |
 | `cap.skills` | **技能**：默认根**与它们的层**、目录名即身份、`SKILL.md` 的窄 frontmatter、坏技能是诊断、正文的**派生注入**（只剩人的 `/name` 那一半——模型那条路是 `skill` 工具自己的结果，没有东西可派生）、以及**技能列表**（`/` 弹出的那张表）的数据 |
 | `cap.preamble` | **user 侧开场块**：指令文件的读与失败语义、清单与指令的**顺序**（唯一决定它的地方） |
 | `cap.providers` | provider 目录（厂商 → model 表）、三档解析、api-key、只读的生效配置（`settings`） |
-| `cap.mcp` | **外部服务器作为工具来源**：读两级 `mcp.edn`、按（项目身份 × server × 声明形状）缓存连接、两种 transport（stdio 子进程 / HTTP）、把 `tools/list` 桥成工具表里的行、elicitation（服务器反过来问人）与会话级启停。工具是**动态来源**（`:tools-for`），所以它经 `install!` 装上而不是写死在表里 |
+| `cap.mcp` | **外部服务器作为工具来源**：读两级 `config.edn` 的 `:mcp`、按（项目身份 × server × 声明形状）缓存连接、两种 transport（stdio 子进程 / HTTP）、把 `tools/list` 桥成工具表里的行、elicitation（服务器反过来问人）与会话级启停。工具是**动态来源**（`:tools-for`），所以它经 `install!` 装上而不是写死在表里 |
 | `cap.git` | 会话目录作为 git 工作树：读当前分支、列本地分支、切分支。**读一次状态 2 个进程**——一条 `status --porcelain=v2 --branch` 一次答出「是不是仓库 / 在哪个分支 / 路上有什么」，再一条列本地分支（那个格式不给分支列表）；**一次成功切换 5 个**。两者各自降了一半（4 → 2、9 → 5）。切只有 `checkout`，**永不 --force**——脏树与被别处占用的分支由 git 自己拒绝，原话回传（含点出文件名的那几行）。分支名先对 `git branch` 的列表校验再插值，且本机 git 是 2.23（`switch`/`init -b` 都还没有） |
 
 ### `harness.edge` —— 适配：把内核翻译成别人的协议
@@ -147,7 +147,7 @@ UI 套件驱动的是**真后端**（真 HTTP、真 `@ag-ui/client`），只是 
   中间不回到模型。**不改任何工具的定义**（初版的 `then_run` 参数已撤销，理由见 spec 的复议段）。
   代码里**一行都没有**：没有 `call!` 这个入口，内层调用的相位事件没有去处。
   **它的说明也不在 `prompt.md` 里，而且这是设计**：名册由 wire 上的 `:tools` 自描述，技法（怎么把工具
-  串起来用）才需要一块地方说——那块地方是 `SystemPrompt` 点上的一条内建行，开关在 `harness.edn`
+  串起来用）才需要一块地方说——那块地方是 `SystemPrompt` 点上的一条内建行，开关在 `config.edn`
   （票 04），所以 `prompt.md` 到那时仍是一个字都不提本特征。
 
 - **编辑合并**：计划见 `.scratch/edit-merge/`（spec + 6 张票，2026-09-17 立）。

@@ -12,7 +12,7 @@
 ## 声明：两级，两个文件
 
 ```edn
-;; ~/.clj-harness/mcp.edn（用户级）与 <project>/.harness/mcp.edn（项目级）
+;; ~/.clj-harness/config.edn 的 :mcp（用户级）与 <project>/.harness/config.edn 的 :mcp（项目级）
 {:servers {"workshop" {:command "node" :args ["/abs/path/server.js"]
                        :env {"SOME_TOKEN" ".."} :timeout 60000}
            "depot"    {:url "https://example.com/mcp"}}}
@@ -45,14 +45,14 @@
 - **`:command` 与 `:url` 二选一**，两个都给或都不给都指名失败。所以 transport 是声明**读出来的**，
   不是一个额外的字段——**URL 永远不会被当成命令去 spawn**，反之亦然。
 - **项目级整表替换用户级的 `:servers`**（`:servers` 是文件唯一的顶层键）。与 `hooks.edn` 逐点替换、
-  `harness.edn` 逐键替换同一条纪律。代价是接受过的：项目想要「用户级那台 + 自己一台」，两台都写上。
+  `config.edn` 逐键替换同一条纪律。代价是接受过的：项目想要「用户级那台 + 自己一台」，两台都写上。
 - **server 名必须匹配 `^[A-Za-z0-9_-]+$` 且不含 `__`**：`mcp__<server>__<tool>` 要能唯一反解回一个服务器，
   否则两个服务器的同名工具会撞进一个名字里，而模型看不见「撞了」。
 - **`:env` 的值永不入任何日志行、永不进任何端点响应。** 与 api-key 同一条纪律：账本说一个服务器
   **被配置了**，从不说**配的是什么**。`GET /api/mcp` 与 `mcp/server` 审计行都不带它。
-- 每次现读（config.edn 纪律）：改 `mcp.edn` 下一次用它生效，不重启。
+- 每次现读（config.edn 纪律）：改 `config.edn` 的 `:mcp` 下一次用它生效，不重启。
 
-可复制的完整起点与更多例子在仓库根目录的 [`mcp.edn.example`](../../mcp.edn.example)。
+可复制的完整起点与更多例子在仓库根目录的 [`config.edn 的 :mcp.example`](../../config.edn 的 :mcp.example)。
 
 ## 连接
 
@@ -76,7 +76,7 @@
 
 - 会话开始后 **2.5 秒**的首次调用里，两台已声明的服务器已经齐了——95 个工具＝16 内建 +
   playwright 25 + agentmemory 54，前 5 次调用都是这张表；
-- 会话开始约 **32 秒**时，**那个会话自己写了一次 `~/.clj-harness/mcp.edn`**；
+- 会话开始约 **32 秒**时，**那个会话自己写了一次 `~/.clj-harness/config.edn 的 :mcp`**；
 - **0.9 秒后**的下一次调用就带着第 3 台（zvec_grep 的 1 个工具，共 96 个）发出去——那一次调用命中的
   token 从 `252544` 掉到 **`14720`**，再下一次恢复到 `255872`。
 

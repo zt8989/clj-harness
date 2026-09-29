@@ -4,7 +4,7 @@
 ;; it as config.edn.bak. Editing by hand is still fine -- the form reads this file
 ;; back -- and the next write from the form will reorder it again.
 ;;
-;; THE ONE CONFIG FILE. Its top level is exactly four sections:
+;; THE ONE CONFIG FILE. Its top level is exactly six sections:
 ;;
 ;;   :default    the three knobs a session starts from (or a provider DESCRIBED
 ;;               inline -- the escape hatch, below)
@@ -14,10 +14,16 @@
 ;;               this harness speaks (see the note below)
 ;;   :security   the paths this home calls sensitive: a file tool aimed at one of them
 ;;               parks for your approval, even when the path is inside the project
+;;   :session    how a session runs: editing / compaction / llm / approval / skills /
+;;               instructions / subagents -- what harness.edn used to hold, keys unchanged
+;;   :mcp        the outside programs whose tools join this session: {:servers {..}}
 ;;
-;; FOUR SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which
-;; vendors this machine can reach, which one it starts on, which language it
-;; speaks, and which paths it will not let a tool read without asking:
+;; SIX SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which vendors
+;; this machine can reach, which one it starts on, which language it speaks, which paths it
+;; will not let a tool read without asking, how a session edits and compacts, and which
+;; outside programs it hands tools to. harness.edn and mcp.edn used to be two more files
+;; (.scratch/config-merge); a home that still has one is migrated at boot, and the file is
+;; moved beside it as `<name>.bak`.
 ;; vendors this machine can reach, which one it starts on, and which language it
 ;; speaks -- and a person changing any of them should not have to open three files.
 ;; (What used to be providers.edn is the :providers section. A home that still has
@@ -33,6 +39,95 @@
 
  :ui {:language :en}                        ; English (en) or Chinese (zh)
  :security {:sensitive-paths ["~/.ssh/" "~/.aws/" "~/.config/gh/hosts.yml"]}
+
+ :session
+ { :editing
+  {;; Which file-editing implementation this session is served. One per session,
+   ;; never both: the two hand the model different workspaces (a per-line anchor
+   ;; versus an exact old_string), and a model that can see both reaches for
+   ;; whichever it recognises first.
+   ;;
+   ;;   :hashline     read returns `anchor│content` rows; replace / insert address
+   ;;                 those anchors; the answer to an edit carries the changed
+   ;;                 region WITH its current anchors, so the next edit needs no
+   ;;                 re-read. THE DEFAULT.
+   ;;   :str-replace  the original `edit`: an exact old_string, refused when it is
+   ;;                 absent or not unique.
+   ;;
+   ;; Switching is one line and loses nothing -- both are first-class and both
+   ;; have complete test coverage.
+   :mode :hashline
+
+   ;; The `grep` tool (ripgrep, every hit back as an anchored row). false
+   ;; takes the tool out of the session's toolset; nothing replaces it, and `bash`
+   ;; is there if you need a search.
+   :grep true
+
+   ;; Require `path` on replace / insert, and check it against the anchor's owner.
+   ;; Off by default: an anchor already names exactly one file in one session, so
+   ;; the path is redundant unless a caller wants it said out loud.
+   :require-path false
+
+   ;; Refuse the slips an edit's payload can carry (a pasted row, an embedded
+   ;; newline, a whole JSON array in one element) instead of fixing them. false --
+   ;; the default -- fixes them and SAYS what it fixed.
+   :strict-input false
+
+   ;; What to do when a replacement re-includes the line just outside its range:
+   ;;   :on      strip it and report it (default)
+   ;;   :strict  refuse the edit and say which lines to drop
+   ;;   :off     apply it literally
+   :boundary-dedup :on
+
+   ;; How many untouched lines an edit's answer shows either side of the change
+   ;; (0-10).
+   :diff-context-lines 1}
+
+ ;; Context compaction. `:threshold-ratio` is the pressure (a fraction of the window) at
+ ;; which a run compacts BEFORE its request goes out; `:retain-ratio` is the newest slice
+ ;; kept VERBATIM. Retain must stay STRICTLY below threshold. `:overflow-retries` bounds the
+ ;; retry after a vendor has refused a request for LENGTH (`0` disables it): the recovery
+ ;; compacts more aggressively, and retries only when the model view really got shorter.
+ ;; BEFORE a summary, an oversized TOOL RESULT is elided for free (`harness.edge.prune`): head
+ ;; and tail kept, no model call, and the pressure is measured again -- under the threshold, the
+ ;; summary is skipped. Those cut points are constants in that namespace, not knobs here.
+ :compaction
+ {:threshold-ratio  0.7
+  :retain-ratio     0.16
+  :overflow-retries 1}
+
+ ;; THE IDLE GUARD. A model call that says nothing for `:idle-timeout-ms` (default 30 s) is
+ ;; treated as a dead connection: the response body is closed, the call is abandoned, and --
+ ;; when it had not yet produced a single frame -- tried again, up to `:idle-timeout-retries`
+ ;; times. THE DEADLINE IS GENEROUS ON PURPOSE (it was 500 ms until 2026-09-29): half a second
+ ;; cut off vendors that were merely slow to their first byte, and the answer that arrived
+ ;; afterwards poisoned the attempt that followed. `0` for either knob turns it off (no
+ ;; deadline / no retry), which is what a session talking to a vendor that never answers -- or
+ ;; one that thinks for minutes before its first token -- wants. The retries are PER CALL and
+ ;; reset on every call, so a long turn is not spending one budget across its rounds. See
+ ;; .scratch/llm-idle-timeout/spec.md; the two knobs are read by harness.edge.llm-timeout.
+ ;;
+ ;; A timeout is shown in the conversation as a custom frame and is NEVER written to the
+ ;; record: it is a fact about a call in flight, not part of the conversation.
+ :llm
+ {:idle-timeout-ms      30000
+  :idle-timeout-retries 3}
+
+  ;; The project fence. When a session is bound to a project directory, a file
+  ;; tool whose path resolves outside the project directory AND the configuration
+  ;; home parks for human approval before it runs.
+  :approval
+  {;; Extra paths to treat as inside the fence. Relative paths resolve against
+   ;; the project root.
+   :allow []
+
+   ;; true takes the project directory ITSELF out of the allowed set: every file
+   ;; tool parks, even for files in the project. The configuration home is never
+   ;; tightened.
+   :strict false}}
+
+ :mcp  {:servers {}}
+
 
  :providers
  {:openrouter

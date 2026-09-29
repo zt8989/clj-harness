@@ -78,10 +78,9 @@ cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
 运行期配置与产物都住在**一个目录**里，默认 `~/.clj-harness/`（换位置设 `CLJ_HARNESS_HOME`）：
 
 ```
-config.edn    唯一一份配置：:default（三个旋钮）+ :providers（厂商）+ :ui（语言）+ :security（敏感路径），每轮重读
-harness.edn   用户级 harness 配置（可选）：编辑模式、围栏、技能根、指令文件
-hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）
-mcp.edn       MCP 服务器声明（可选；不存在 = 一个都没声明）
+config.edn    唯一一份配置，六段：:default（三个旋钮）+ :providers（厂商）+ :ui（语言）
+              + :security（敏感路径）+ :session（编辑/压缩/围栏/技能/指令/子agent）+ :mcp（MCP 服务器），每轮重读
+hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）——唯一留在外面的那份
 .env          密钥：一家厂商一把 <ID>_API_KEY，全局 HARNESS_API_KEY 兜底；优先于真实环境变量
 harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点 / 任务清单
 projects/<项目>/*.jsonl  会话日志，按项目分目录
@@ -119,18 +118,18 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 ### 其余旋钮
 
 ```clojure
-;; ~/.clj-harness/harness.edn；项目级在 <项目>/.harness/harness.edn，整键替换用户级
+;; ~/.clj-harness/config.edn；项目级在 <项目>/config.edn 的 :session，整键替换用户级
 {:editing      {:mode :hashline}                 ; 默认按锚点；:str-replace 是原版 edit
  :instructions {:files ["AGENTS.md"]}            ; 整表替换默认值；相对路径按项目根解析
  :skills       {:roots ["/abs/skills" ".agents/skills"]}}
 ```
 
-`:editing` 是**唯一逐键**合成的块，全部键与默认值都在 `harness.edn.example`。
+`:editing` 是**唯一逐键**合成的块，全部键与默认值都在 `config.edn.example`。
 
 - **hook**（`hooks.edn`）：一个 hook 点上一行声明，`:command`（经 shell）或 `:run`（进程内函数，
   只有配置家与本会话能写）。payload 走 stdin JSON，退出码 **0 放行 / 2 阻断**（stderr 回喂模型），
   超时与崩溃都不炸 run。见 [`docs/architecture/hooks.md`](docs/architecture/hooks.md)。
-- **MCP**（`mcp.edn`）：`{:servers {"workshop" {:command "node" :args ["…"]} "depot" {:url "https://…"}}}`，
+- **MCP**（`config.edn` 的 `:mcp`）：`{:servers {"workshop" {:command "node" :args ["…"]} "depot" {:url "https://…"}}}`，
   工具以 `mcp__<server>__<tool>` 进表，与内建工具走同一个执行缝；连不上不拖死任何人。见
   [`docs/architecture/mcp.md`](docs/architecture/mcp.md)。
 
