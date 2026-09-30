@@ -28,13 +28,38 @@
          :unplaced (:unplaced ev)
          :seen     acc}
         (= :drained (:type ev))
-        (do (when-some [done (:done ev)] (deliver done true)) (recur acc))
+        (do (loop/answer-drain! ev) (recur acc))
         :else (recur (conj acc ev)))
       {:history nil :added nil :unplaced nil :seen acc})))
 
 (defn- drive
   ([provider messages] (drive provider messages nil))
   ([provider messages opts] (drain-chan (loop/run-chan provider messages opts))))
+
+(deftest a-consumer-that-answers-the-barrier-is-not-made-to-wait-for-it
+  ;; THE OBLIGATION `loop/run-chan`'S DOCSTRING STATES, as a COST rather than as a promise --
+  ;; which is the only way it can be a test: a consumer that answers the kernel's drain
+  ;; barrier finishes a run in the time the run takes, and a consumer that never answers waits
+  ;; out the deadline on EVERY barrier. Measured 2026-09-30 by `dev/scratch_drain_barrier.clj`,
+  ;; one scripted turn with no tools: 151ms answered against 5,182ms not. Seven readers had
+  ;; forgotten, and that wait -- not any shell, server or network -- was most of what made a
+  ;; full backend run 22 minutes (`harness.approval-test` 224s, `harness.session-tools-test`
+  ;; 122s, `harness.edge.ag-ui-test` 35s).
+  ;;
+  ;; THE BUDGET IS THE ASSERTION, and it is derived rather than picked:
+  ;; `harness.kernel.loop/drained!` waits AT MOST 5000ms per barrier, so anything comfortably
+  ;; under that can only mean the barrier was answered. 3000ms sits far below the deadline and
+  ;; far above the work this run does, and the gap between the two is what a machine would
+  ;; have to fall through to make this flaky.
+  (let [t0      (System/currentTimeMillis)
+        drained (drain-chan (loop/run-chan (fake/scripted [{:content "answered"}]) []
+                                           {:thread-id "t-drain-answered"}))
+        elapsed (- (System/currentTimeMillis) t0)]
+    (is (= :run/end (:type (last (:seen drained)))) "the run really ran to its end")
+    (is (< elapsed 3000)
+        (str "the barrier was answered rather than waited out (" elapsed
+             "ms; a consumer that answers costs the run's own time, one that does not costs "
+             "the deadline)"))))
 
 (defn- interrupt-id
   "The interrupt id of a park run's terminal event."

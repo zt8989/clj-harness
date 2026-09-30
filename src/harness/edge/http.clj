@@ -2009,9 +2009,10 @@
                           ;; THE KERNEL ASKS WHETHER THE DRAIN HAS CAUGHT UP, and this is where the
                           ;; answer comes from: everything put on the channel BEFORE this event has
                           ;; been dealt with -- this loop is the one that deals with them, in order --
-                          ;; so the promise the kernel is waiting on is delivered here.
-                          (when (= :drained (:type ev))
-                            (when-some [done (:done ev)] (deliver done true)))
+                          ;; so the promise the kernel is waiting on is settled here
+                          ;; (`harness.kernel.loop/answer-drain!`, which is the one spelling of the
+                          ;; consumer's half of that barrier).
+                          (loop/answer-drain! ev)
                           (when-let [[kind payload] (lifecycle-record ev)]
                             ;; THE MODEL FAMILY GOES OUT HERE (ADR 0006 decision 4), stamped with the
                             ;; line's own number -- which `log!` now ANSWERS, because the write is
@@ -2638,9 +2639,9 @@
                       ;; Tool-lifecycle and model-call events are audit lines rather
                       ;; than wire frames, keyed by toolCallId.
                       ;; THE KERNEL'S QUESTION IS ANSWERED ON THIS ROUTE TOO: everything put on this
-                      ;; channel before it has been dealt with, and the promise is how it learns that.
-                      (when (= :drained (:type ev))
-                        (when-some [done (:done ev)] (deliver done true)))
+                      ;; channel before it has been dealt with, and the promise is how it learns that
+                      ;; (`harness.kernel.loop/answer-drain!`).
+                      (loop/answer-drain! ev)
                       (when-let [[kind payload] (lifecycle-record ev)]
                         (log! thread-id run-id kind payload))
                       ;; AND THE WIRE FRAMES GO ON THE RECORD, in the subagent's own

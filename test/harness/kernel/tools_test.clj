@@ -1076,7 +1076,9 @@
                                    [] {:thread-id tid})
                 seen (loop [acc []]
                        (if-let [ev (async/<!! ch)]
-                         (if (= :run/done (:type ev)) acc (recur (conj acc ev)))
+                         (if (= :run/done (:type ev))
+                           acc
+                           (do (loop/answer-drain! ev) (recur (conj acc ev))))
                          acc))
                 results (filter #(= :tool/result (:type %)) seen)]
             (is (= 2 (count results)))

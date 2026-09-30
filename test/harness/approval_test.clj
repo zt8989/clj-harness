@@ -24,11 +24,15 @@
 (def ^:private dir (support/temp-dir "approval"))
 
 (defn- drain [ch]
+  ;; THE CONSUMER'S ONE OBLIGATION BESIDES READING: answer the kernel's drain barrier
+  ;; (`loop/answer-drain!`). Without it the kernel waits out the barrier's whole deadline
+  ;; on every run -- measured 2026-09-30 at 5,001ms of a 5,166ms run, which was most of
+  ;; what this namespace's 224s in the full suite ever was.
   (loop [acc []]
     (if-let [ev (async/<!! ch)]
       (if (= :run/done (:type ev))
         {:history (:history ev) :seen acc}
-        (recur (conj acc ev)))
+        (do (loop/answer-drain! ev) (recur (conj acc ev))))
       {:history nil :seen acc})))
 
 (def ^:private lifecycle #{:tool/pre-execute :tool/execute :tool/post-execute})
