@@ -319,13 +319,15 @@
 ;; for four days). The fix for THAT bug is in `harness.cap.hashline.anchors`; what
 ;; is here is the guarantee that the next one cannot be invisible.
 ;;
-;; THE NUMBERS ARE HEADROOM, NOT TARGETS. Healthy on this developer machine
-;; (2026-09-20): the whole suite ~110s, its slowest namespace ~16s
-;; (`harness.kernel.tools-test`, the one that hung). 300s is that namespace times
-;; nineteen, 1800s is the whole suite times sixteen -- and BOTH ARE FOR A STUCK RUN
-;; ONLY: a limit that fires on a merely slow machine gets raised until it is no
-;; limit at all, which is why they are read from the environment and why the
-;; refusal below is loud.
+;; THE NUMBERS ARE HEADROOM, NOT TARGETS, AND THE HEADROOM IS RE-MEASURED RATHER THAN
+;; REMEMBERED. Healthy on this developer machine: ~110s for the whole suite and ~16s for its
+;; slowest namespace on 2026-09-20, and -- measured again on 2026-09-30, same machine, four
+;; cores -- ~960s for the whole suite and ~210s for its slowest namespace
+;; (`harness.edge.http-test`). The run budget is the suite times two; the namespace budget is
+;; its slowest namespace times one and a half, which is thin, and the section in
+;; docs/rules/testing.md says what to do about that and what NOT to do. BOTH ARE FOR A STUCK
+;; RUN ONLY: a limit that fires on a merely slow machine gets raised until it is no limit at
+;; all, which is why they are read from the environment and why the refusal below is loud.
 
 (def ^:private default-namespace-limit-ms (* 5 60 1000))
 (def ^:private default-run-limit-ms (* 30 60 1000))
