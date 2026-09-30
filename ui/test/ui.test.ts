@@ -523,7 +523,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// height, and the empty suggestions row is display:none instead of eating a `gap-4`. Both are
 /// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
 /// removes was measured in a real browser.
-const EXPECTED_CASES = 188;
+///
+/// ...188 -> 189: the `thread-messages` suite's case for the park that LOST ITS PLACE (owner's
+/// report, 2026-09-30, sessions `b92dfd61` / `62f30024`). A page following a run merges pages
+/// into a window it holds, and `lib/window.ts`'s `merged` updates what it knows in place while
+/// APPENDING what is new -- so thinking that only the folded record carries arrived AFTER the
+/// question it belongs to, and upstream's `findLast(m => m.role === "assistant")` then found no
+/// park at all: the card drew nowhere and `submitInterruptResponses` refused by name. The case
+/// pins the order `lib/thread-messages.ts` now guarantees, and that a conversation with no park
+/// (or one already in that order) is passed through untouched.
+const EXPECTED_CASES = 189;
 
 let total = 0;
 for (const suite of SUITES) {
