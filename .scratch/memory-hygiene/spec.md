@@ -96,3 +96,11 @@
   另一半是键：`:put-away!` 那道缝（`harness.edge.sessions`）现在顺手 `stream/forget-kept!`，所以会话被放掉 /
   被扫除时它的那行 `kept` 跟着走——旧进程里 18 场会话的 11.19 MB 就是这么留下来的。现状落在
   `docs/architecture/edge.md`（记录流那一节）与 `CONTEXT.md`（记录流那一条）。**票 04 未做。**
+- **票 04 已落地（同一天），因此也从 `issues/` 删掉。** 一轮从「每个会话两条连接」变成「**一次 pass 一条连接** +
+  每个会话一次 `stat`」：会话表与 `projection_offsets` 一条 JOIN 读出来（`listed-sessions`），**同一个文件、同样的
+  长度就什么都不做**（不查询、不建连接、不写）；`:sessions` 因此改数「这一轮真的碰了的会话」。**量出来的**：
+  `harness.infra.db` 多了一个 `connections-made` 计数器，判据用例在一个 5 场会话、什么都没变的 home 上断言
+  **一个来回正好 1 条连接**（旧写法是 1 + 2×5 = 11 条）。**决策 4 那句「连接纪律得单独说清」因此说清了**：投影只在
+  一次 pass 里持一条连接，跨 tick 不留句柄（写仍走 `infra.db` 自己的门，因为「一次事务持锁多久」是另一件事）。
+  时钟**开了回来**（`edge.http/start!` 里 `projection/start!` 与它的 `:require` 都回来了），现状落在
+  `docs/architecture/home-and-storage.md`（「投影的两张内容表」一节 + 「库与文件的边界」那句）与 ADR 0008 的现状注记。

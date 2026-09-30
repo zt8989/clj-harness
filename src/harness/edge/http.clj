@@ -103,6 +103,7 @@
             [harness.edge.host :as host]
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
+            [harness.edge.projection :as projection]
             [harness.edge.compaction :as compaction]
             [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
@@ -6590,20 +6591,23 @@
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
-                   ;; THE CONTENT PROJECTION (ADR 0008) IS PAUSED -- `harness.edge.projection/start!`
-                   ;; used to stand here (2026-09-29). Why, and at what price it comes back, is
-                   ;; `.scratch/memory-hygiene/`: its spec carries the readings and the ruling, ticket 04
-                   ;; the way back. A round walks EVERY session and every round's every lookup
-                   ;; opens its own sqlite connection (plus a migration pass) -- interval 2000 ms vs a
-                   ;; measured 3,914 ms round, 46% of this process's CPU -- and no reader in the tree
-                   ;; asks for `messages` / `tool_calls` yet, so nothing is lost while it is off.
-                   ;; ADR 0008's three claims are untouched: the record is still the only truth, the
-                   ;; projection is still read-only, and `harness.edge.projection/rebuild!` still makes
-                   ;; it whole, from the record alone.
-                   ;; PUT IT BACK ONLY AFTER ticket 04 makes a round cheap (touch only the sessions
-                   ;; whose log grew; ONE connection per round -- the discipline decision 4 left
-                   ;; unstated). Putting it back is this require plus this call, and nothing else.
-                   ]]
+                   ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
+                   ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
+                   ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
+                   ;; turned off) and 04 (what made it worth turning back on). What it cost then: a
+                   ;; round walked EVERY session, and every conversation's every lookup opened its OWN
+                   ;; sqlite connection (plus a migration pass) -- two per conversation per tick,
+                   ;; 3,914 ms against a 2,000 ms interval, 46% of this process's CPU. What it costs
+                   ;; now: ONE connection for the whole round (`db/with-connection`, the listing and the
+                   ;; offsets in one query) and one `stat` per conversation -- a session whose file is
+                   ;; the same one at the same length produces no query, no connection and no write at
+                   ;; all. THAT IS THE DISCIPLINE DECISION 4 LEFT UNSTATED: the projection holds a
+                   ;; connection for the length of a round and never a handle across ticks (`fsync!`
+                   ;; and every write still go through `harness.infra.db`'s own doors).
+                   ;;
+                   ;; IT STILL HAS A TEARDOWN, unlike the writer: a process that stops serving stops
+                   ;; copying, and the next one resumes at the offset it left (`projection_offsets`).
+                   (projection/start!)]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.infra.stream`), and the
     ;; carry-back that must precede a session's first line is ITS step -- so the

@@ -76,8 +76,12 @@
     (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})])
     (projection/project!)
     (let [first-pass (messages-of sid)]
-      (testing "a second pass over a log with nothing new reads no rows"
-        (is (= {:sessions 1 :rows 0 :bytes 0 :skipped 0} (projection/project!))))
+      (testing "a second pass over a log with nothing new reads no rows AND TOUCHES NO SESSION"
+        ;; `:sessions` COUNTS WHAT THE ROUND HAD SOMETHING TO DO FOR, which is what 'only the ones that
+        ;; changed' means (`.scratch/memory-hygiene/` ticket 04). It used to count every conversation the
+        ;; round could read, so 'nothing to do' and 'one conversation read' were the same answer -- and
+        ;; every one of those reads cost two store connections.
+        (is (= {:sessions 0 :rows 0 :bytes 0 :skipped 0} (projection/project!))))
       (is (= first-pass (messages-of sid))))
     (testing "and a line appended later is picked up ONCE, at its own offset"
       (let [f (home/log-file (io/file (home/projects-dir) "unbound") sid)]
@@ -171,3 +175,33 @@
         (projection/rebuild!)
         (is (= before (messages-of sid)))
         (is (= calls (calls-of sid)))))))
+
+;; --------------------------------------------------------------- what a round costs
+
+(deftest a-round-touches-only-what-changed-and-asks-the-store-once
+  ;; THE NUMBER THAT TURNED THIS CLOCK OFF (`.scratch/memory-hygiene/` ticket 04): a round used to
+  ;; build TWO store connections PER CONVERSATION per tick -- one to ask the offset, then one to ask
+  ;; it again while reading -- and every one of those opens the file and walks the migration chain.
+  ;; Measured on a live process: 3,914 ms a round against a 2,000 ms interval, 46% of its CPU, for a
+  ;; home where nothing had changed.
+  (let [ids (mapv #(str "pj-cost-" %) (range 5))]
+    (doseq [sid ids]
+      (write-log! sid [(message-line "r1" 1 "client" "user" {:role "user" :content "hi"})]))
+    (projection/project!)
+    (let [before (db/connections-made)
+          answer (projection/project!)
+          spent  (- (db/connections-made) before)]
+      (testing "nothing changed, so no conversation is touched"
+        (is (= 0 (:sessions answer))))
+      (testing "and the round's cost is ONE connection, whatever the number of conversations"
+        (is (= 1 spent)
+            (str "one, for the round's own listing -- five conversations listed, " spent " spent."
+                 " A round used to build two per conversation."))))
+    (testing "and a conversation whose log GREW is the one it touches"
+      (let [f (home/log-file (io/file (home/projects-dir) "unbound") (first ids))]
+        (spit f (message-line "r1" 2 "model" "assistant" {:role "assistant" :content "more"})
+              :append true :encoding "UTF-8")
+        (let [answer (projection/project!)]
+          (is (= 1 (:sessions answer)) "one conversation had new bytes")
+          (is (= 1 (:rows answer)))
+          (is (= 0 (:sessions (projection/project!))) "and the round after it touches none"))))))

@@ -172,33 +172,46 @@
   [session-id]
   (try (replay/find-log (home/projects-dir) session-id) (catch Throwable _ nil)))
 
-(defn- log-of
-  "The file to read for SESSION-ID. THE STORED PATH FIRST, so an idle pass costs one `exists` per
-  session instead of a walk of the log tree per session; the walk is what a session that has never been
-  projected (or whose file moved, which is the same thing: the old path is gone) pays once."
-  [session-id]
-  (let [stored (stored-offset session-id)]
-    (if-some [p (:path stored)]
-      (let [f (io/file p)]
-        (if (.exists f) f (find-log session-id)))
-      (find-log session-id))))
+(defn- log-for
+  "The file to read for a LISTED session -- the row `listed-sessions` already handed over (id, stored
+  path, offsets), so there is NO SECOND STORE READ here. THE STORED PATH FIRST: one `exists`, no walk of
+  the log tree; the walk is what a session that has never been projected (or whose file moved, which is
+  the same thing -- the old path is gone) pays once."
+  [session-id stored-path]
+  (if-some [p stored-path]
+    (let [f (io/file p)]
+      (if (.exists f) f (find-log session-id)))
+    (find-log session-id)))
+
+(defn- nothing-new?
+  "Whether LISTED's log holds nothing this projection has not already copied: THE SAME FILE, THE SAME
+  LENGTH. One `stat` and a comparison -- NO QUERY, NO CONNECTION, and that is the whole point of
+  carrying the offset beside the session's id (`.scratch/memory-hygiene/` ticket 04). A SHORTER file
+  is not this projection's continuation (a replaced log), so it is never 'unchanged'."
+  [^File log {:keys [path byte-offset]}]
+  (and (some? log)
+       (some? path)
+       (= (.getAbsolutePath log) (str path))
+       (= (.length log) (long (or byte-offset 0)))))
 
 (defn- read-session!
   "Read SESSION-ID's new bytes and decide what they mean -- NO DATABASE, NO WRITE. Answers the work
   `write-session!` will commit, or nil when the file cannot be read at all (a log deleted between the
   `exists` above and this call is an ordinary race, not an incident)."
-  [session-id ^File log]
+  [session-id ^File log listed]
   (let [path      (.getAbsolutePath log)
-        stored    (stored-offset session-id)
+        ;; THE OFFSET IS ALREADY IN HAND (`listed-sessions` read it with the session), so this is not
+        ;; a second store read: that is the per-session connection this pass used to pay.
+        stored    listed
         size      (.length log)
         ;; A DIFFERENT FILE, OR A SHORTER ONE, IS NOT THIS PROJECTION'S CONTINUATION: the offset
-        ;; describes a stream of bytes, and a log that moved elsewhere or was replaced by a shorter one
-        ;; is a different stream. Starting over is the honest answer -- rows the old stream wrote would
-        ;; be wrong to keep.
-        reset?    (or (nil? stored)
-                      (not= path (:path stored))
+        ;; describes a stream of bytes, and a log that moved elsewhere or was replaced by a shorter
+        ;; one is a different stream. Starting over is the honest answer -- rows the old stream wrote
+        ;; would be wrong to keep.
+        reset?    (or (nil? (:path stored))
+                      (not= path (str (:path stored)))
                       (< (long size) (long (or (:byte-offset stored) 0))))
-        from      (if reset? 0 (long (:byte-offset stored)))
+        from      (if reset? 0 (long (or (:byte-offset stored) 0)))
         from-line (if reset? 0 (long (or (:line-offset stored) 0)))
         [rows to skipped] (new-rows log from from-line)]
     (when (pos? skipped)
@@ -254,28 +267,49 @@
 
 ;; ------------------------------------------------------------------ the pass, and what it is for
 
-(defn sessions-to-project
-  "The session ids this home knows, in a stable order. THE STORE DECIDES WHICH CONVERSATIONS EXIST --
-  its `sessions` table is that statement, and a log sitting in the tree that no row names is not one --
-  so the projection indexes the store's sessions rather than the disk."
-  []
-  (mapv :id (db/select "SELECT id FROM sessions ORDER BY id")))
+(defn- listed-sessions
+  "The conversations this home knows AND what this projection has already copied of each, in ONE query
+  on the round's own connection: `{:id … :path … :byte-offset … :line-offset …}`, with path/offsets nil
+  for a session that has never been projected. THE STORE DECIDES WHICH CONVERSATIONS EXIST -- a log
+  sitting in the tree that no row names is not one -- and the offsets ride along because asking per
+  session is exactly what made this clock expensive: two store connections PER CONVERSATION per tick,
+  every one of them opening the file and walking the migration chain (`.scratch/memory-hygiene/`
+  ticket 04, measured at 3,914 ms a round against a 2,000 ms interval)."
+  [^java.sql.Connection c]
+  (db/query c "SELECT s.id AS id, o.path AS path, o.byte_offset AS byte_offset,
+                      o.line_offset AS line_offset
+                 FROM sessions s
+                 LEFT JOIN projection_offsets o ON o.session_id = s.id
+                ORDER BY s.id"))
 
-(defn project!
+(defn project! []
   "One pass: feed every session's new bytes into the store. Answers the totals.
 
-  IT IS SAFE TO CALL AS OFTEN AS ANYONE LIKES. A pass over a session with nothing new reads one
-  `length` and writes nothing, and the rows it does write land IN CHUNKS (`rows-per-commit`), because
-  what a run notices is not how many transactions a pass spends but HOW LONG ONE HOLDS THE WRITE
-  LOCK. Measured here: with one transaction per pass, `harness.edge.http-test` went red on cases
-  whose deadline is five seconds -- the same five seconds as the store's busy timeout." []
-  (let [work (vec (keep (fn [session-id]
-                           (when-some [log (log-of session-id)]
-                             ;; A LOG THAT WENT AWAY between the `exists` and the read is an ordinary
-                             ;; race (a test wipes one, a person deletes one): the session is still the
-                             ;; store's, and the next pass sees whatever is there then.
-                             (try (read-session! session-id log) (catch Throwable _ nil))))
-                         (sessions-to-project)))]
+  IT IS SAFE TO CALL AS OFTEN AS ANYONE LIKES, AND IT IS CHEAP BECAUSE IT TOUCHES WHAT CHANGED
+  (`.scratch/memory-hygiene/` ticket 04): ONE connection for the whole round (`db/with-connection` -- the
+  listing and the offsets come from that one query), then per conversation a `stat` and a comparison --
+  a session whose file is the same one at the same length produces NO query, NO connection and NO write
+  at all. That used to be two connections PER conversation per tick (one to ask the offset, one to ask
+  it again), which is why the clock was turned off in ticket 01.
+
+  THE ROWS IT DOES WRITE LAND IN CHUNKS (`rows-per-commit`), because what a run notices is not how many
+  transactions a pass spends but HOW LONG ONE HOLDS THE WRITE LOCK. Measured here: with one transaction
+  per pass, `harness.edge.http-test` went red on cases whose deadline is five seconds -- the same five
+  seconds as the store's busy timeout.
+
+  `:sessions` COUNTS WHAT THIS ROUND TOUCHED -- conversations with new bytes, which is what 'only the
+  ones that changed' means. It used to count every conversation that could be read."
+  (let [work (db/with-connection
+               (fn [c]
+                 (vec (keep (fn [listed]
+                              (let [log (log-for (:id listed) (:path listed))]
+                                (when (and (some? log) (not (nothing-new? log listed)))
+                                  ;; A LOG THAT WENT AWAY between the `exists` and the read is an
+                                  ;; ordinary race (a test wipes one, a person deletes one): the session
+                                  ;; is still the store's, and the next pass sees whatever is there then.
+                                  (try (read-session! (:id listed) log listed)
+                                       (catch Throwable _ nil)))))
+                            (listed-sessions c)))))]
     ;; EACH SESSION COMMITS ITSELF, IN CHUNKS (see `write-session!`): a pass that took one lock for
     ;; everything it had to write is exactly the long transaction the chunks exist to avoid.
     (doseq [w work] (write-session! w))
@@ -284,23 +318,23 @@
      :skipped  (reduce + 0 (map :skipped work))
      :bytes    (reduce + 0 (map :bytes work))}))
 
-(defn lag
+(defn lag []
   "HOW FAR BEHIND THE COPY IS, per session and in total, in bytes (ADR 0008 decision 5): the record's
   own length minus the offset projected. A session with no log is not behind -- there is nothing to
   read -- and one that has never been projected is behind by its whole file, which is the truth rather
   than a special case."
-  []
-  (let [rows (into {}
-                   (keep (fn [session-id]
-                           (when-some [log (log-of session-id)]
-                             (let [stored (stored-offset session-id)
-                                   size   (.length log)
-                                   from   (long (or (:byte-offset stored) 0))]
-                               [session-id {:path      (.getAbsolutePath log)
-                                            :bytes     size
-                                            :projected from
-                                            :lag       (max 0 (- size from))}]))))
-                   (sessions-to-project))]
+  (let [rows (db/with-connection
+               (fn [c]
+                 (into {}
+                       (keep (fn [listed]
+                               (when-some [log (log-for (:id listed) (:path listed))]
+                                 (let [size (.length log)
+                                       from (long (or (:byte-offset listed) 0))]
+                                   [(:id listed) {:path      (.getAbsolutePath log)
+                                                  :bytes     size
+                                                  :projected from
+                                                  :lag       (max 0 (- size from))}])))
+                             (listed-sessions c)))))]
     {:total    (reduce + 0 (map :lag (vals rows)))
      :sessions rows}))
 

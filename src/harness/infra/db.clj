@@ -231,6 +231,19 @@
 (defonce ^:private opened-stores
   (atom #{}))
 
+(defonce ^:private connections-built
+  ;; HOW MANY TIMES THIS PROCESS HAS BUILT A STORE CONNECTION. A COUNTER RATHER THAN AN EVENT, because
+  ;; the question it answers is a COST one -- 'does this clock's round grow with the number of
+  ;; conversations?' (`.scratch/memory-hygiene/` ticket 04: it built two connections PER conversation
+  ;; per tick -- 3,914 ms against a 2,000 ms interval) -- and a number is what a case can compare
+  ;; before and after. Every connection this process makes goes through `connect-and-migrate!`.
+  (atom 0))
+
+(defn connections-made []
+  "How many store connections this process has built since it started. FOR A COST STORY: nothing
+  decides anything by it, and a caller that wants a delta snapshots it on both sides."
+  @connections-built)
+
 (defn store-paths-opened
   "Every store FILE this process has resolved and opened, as absolute paths --
   which is the one thing a test run has to be able to prove about itself.
@@ -1187,7 +1200,8 @@
   back, including a migration step that throws: a leaked handle keeps its file
   locked, and the caller's next move is to try again."
   [^File f steps created?]
-  (let [c (.createConnection (store-config) (store-url f))]
+  (let [c (do (swap! connections-built inc)
+              (.createConnection (store-config) (store-url f)))]
     (try
       (migrate-connection! c f steps created?)
       c
