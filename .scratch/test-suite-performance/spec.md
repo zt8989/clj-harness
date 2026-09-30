@@ -162,8 +162,8 @@ top-15 合计 74.7s（57.5%）。除两条 git 用例的夹具 spawn，其余都
 
 **修的是夹具的 spawn 次数**：`init-repo!` 原先八个 `shell/run`（八次 `bash -lc` = 八个登录 profile），
 合成一条 `&&` 链——仍是八条 git 命令，省掉的是 profile。那两条用例 43.5s → 29.1s。
-（`test/harness/cap/git_test.clj` 的 `build-repo!` 是同一形状、每个 namespace 一次，同一条修法可再省
-约 6s，未做——那不是这张票的账。）
+（同一个形状还剩两处：`test/harness/cap/git_test.clj` 的 `build-repo!`（每 namespace 一次，约 6s），
+以及这两条用例仍建三个仓库而 `cap/git_test.clj` 已有「模板 + 拷贝」的写法——都落在票 **06**。）
 
 **夹具本身：同一窗口内交替量**（`dev/scratch_git_fixture_cost.clj`，让负载抵消）——同一个仓库，
 老写法八次 `shell/run` vs 新写法一条 `&&` 链：
@@ -190,9 +190,11 @@ round 3:  old 7264ms   new 1542ms   saved 5722ms
 为什么），没响就不调。改动后 `http-test` 是 120s，仍是这条线的工作下界，不是可以点掉的等待。
 
 **证据脚本**：`dev/scratch_http_time.clj`（逐条耗时）、`dev/scratch_mux_cost.clj`（一次真 run 与一次
-spawn 的实测成本）。
+spawn 的实测成本）、`dev/scratch_git_fixture_cost.clj`（一个仓库老写法 vs 新写法，同一窗口交替量）、
+`dev/scratch_http_client_cost.clj`（一次真 run 的客户端各阶段：机件 ~55ms，剩下 ~195ms 是 run 本身）。
 
 ## 还没做的（已量化，见 issues/）
 
-`tools/specs` 带线程时 127ms/次；`shell-test` 的 ~20s 固定超时；整轮 22% 的 CPU 占用指向跨命名空间
-并行；前端 80.5s 的串行是设计使然。
+`tools/specs` 带线程时 127ms/次（票 02）；`shell-test` 的 ~20s 固定超时（票 03）；整轮 22% 的 CPU 占用
+指向跨命名空间并行（票 04）；前端 80.5s 的串行是设计使然（票 05）；还剩两处 git 夹具的 spawn（票 06）；
+runner 的逐条计时开关（票 07）。**产品那一侧**：一次 `/api/git` 读 ≈1.6s —— 见 `.scratch/git-read-cost/`。
