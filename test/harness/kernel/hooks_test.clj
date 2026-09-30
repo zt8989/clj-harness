@@ -104,8 +104,13 @@
       ;; The absence of this cell is the base protocol: exit codes decide, and
       ;; stdout is read only for a JSON answer. :content says stdout IS the result.
       (is (= :content (:stdout p)))
-      (testing "no other point claims it"
-        (is (empty? (filter :stdout (remove #(= "SystemPrompt" (:name %)) hooks/points))))))))
+      (testing "and the ones that do carry it are NAMED here"
+        ;; It was SystemPrompt alone until a project's words could ride the SUMMARY request
+        ;; the way SystemPrompt's ride the system message (`harness.kernel.hooks/points`
+        ;; says so on PreCompact). Spelled out as a set rather than 'only SystemPrompt', so
+        ;; the next one has to come here and say what its stdout means.
+        (is (= #{"SystemPrompt" "PreCompact"}
+               (set (map :name (filter :stdout hooks/points)))))))))
 
 (deftest the-points-with-a-match-target-are-the-tool-and-file-ones
   (is (= #{:pre-tool-use :permission-request :permission-denied

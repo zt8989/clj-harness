@@ -40,20 +40,41 @@ function ednPath(p: string): string {
   return p.replace(/\\/g, "\\\\");
 }
 
-/// Declare it in the server's own configuration home. Written fresh because
-/// `mcp.edn` is read on the way to every request, which is what lets a test set
-/// a feature up mid-run.
+/// Declare it in the server's own configuration home. Read on the way to every request,
+/// which is what lets a case set a server up mid-run.
+///
+/// WHERE A DECLARATION LIVES NOW: config.edn's `:mcp` section. It was `mcp.edn` until
+/// `.scratch/config-merge` folded that file into config.edn -- and this helper went on
+/// writing the old name, which does not read as 'a file nobody opens' from the outside:
+/// the server never starts, the run ends with no question on it, and the failure looks
+/// like an assertion about a question. Same symptom `ednPath` above exists to prevent.
+let configBeforeDeclaring: string | null = null;
+
 function declareFakeServer(): void {
-  fs.writeFileSync(
-    path.join(homeDir(), "mcp.edn"),
-    `{:servers {"fake" {:command "node ${ednPath(FAKE_SERVER)}"}}}`,
-    "utf8",
-  );
+  const file = path.join(homeDir(), "config.edn");
+  const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "{}";
+  configBeforeDeclaring = before;
+  if (before.includes(":mcp")) {
+    // TWO :mcp SECTIONS WOULD BE AN EDN MAP WITH A DUPLICATE KEY, which the reader does not
+    // accept. The home this suite runs against never declares one, so this is not a case
+    // that happens -- it is the precondition written down instead of assumed.
+    throw new Error("this home's config.edn already declares :mcp; merge, do not splice");
+  }
+  // SPLICED BEFORE THE CLOSING BRACE rather than written whole: the file already says
+  // which provider this home runs on, and the server itself may have added a language.
+  // A declaration is one more section, not a new file.
+  const decl = `:mcp {:servers {"fake" {:command "node ${ednPath(FAKE_SERVER)}"}}}`;
+  const trimmed = before.trimEnd();
+  const merged = trimmed.endsWith("}") ? `${trimmed.slice(0, -1)} ${decl}}\n` : `{${decl}}\n`;
+  fs.writeFileSync(file, merged, "utf8");
 }
 
 function undeclare(): void {
-  const file = path.join(homeDir(), "mcp.edn");
-  if (fs.existsSync(file)) fs.rmSync(file);
+  // PUT BACK WHAT WAS THERE, not 'delete the file': config.edn is the home's whole
+  // configuration now, and removing it would take the seeded provider with it.
+  if (configBeforeDeclaring === null) return;
+  fs.writeFileSync(path.join(homeDir(), "config.edn"), configBeforeDeclaring, "utf8");
+  configBeforeDeclaring = null;
 }
 
 const ASK_SCHEMA = {

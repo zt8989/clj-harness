@@ -111,11 +111,14 @@
     :payload #{:error} :matches nil :gate? false :on-error :proceed}
    {:name "Notification" :when "the harness has something to tell the user"
     :payload #{:message} :matches nil :gate? false :on-error :proceed}
-   ;; THE ONE POINT WHOSE STDOUT IS THE THING ITSELF. Everywhere else a
+   ;; THE POINT WHOSE STDOUT IS THE THING ITSELF, for the SYSTEM MESSAGE. Everywhere else a
    ;; declaration answers with an exit code (and, at PermissionRequest, an answer
    ;; on stdout); here the matched declarations all run and every non-empty stdout
    ;; is text appended to the system message. That single difference is the
    ;; `:stdout :content` cell above and nothing else -- the seam is the same one.
+   ;; IT IS NO LONGER THE ONLY ONE: PreCompact below carries the same cell for the SUMMARY
+   ;; request. The cell says what stdout MEANS ('it is the result, not a report'); which
+   ;; request the result is appended to belongs to each point's own row.
    {:name "SystemPrompt" :when "a run's system message is being assembled, before the model sees it"
     :payload #{} :matches nil :gate? true :on-error :block :stdout :content}
    {:name "InstructionsLoaded" :when "an instruction file is folded into the run's context"

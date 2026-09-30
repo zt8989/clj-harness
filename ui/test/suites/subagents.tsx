@@ -146,13 +146,13 @@ const cases: Case[] = [
       expect(body.subagents.every((s) => s.description.length > 0)).toBe(true);
       expect(body.subagents.every((s) => Array.isArray(s.exclude))).toBe(true);
 
-      // THE PROBLEM IS PART OF A 200, not an error state: a home whose harness.edn has
+      // THE PROBLEM IS PART OF A 200, not an error state: a home whose config.edn has
       // a typo in its :subagents block still runs, and nil here is the assertion that
       // this home's file is not the case that proves it.
       expect(body.problem).toBeNull();
       // The file a save would write, named -- the form's note prints it, and a null
       // here would print an empty name at the one moment it matters most.
-      expect(body.path?.endsWith("harness.edn")).toBe(true);
+      expect(body.path?.endsWith("config.edn")).toBe(true);
       expect(Array.isArray(body.runs)).toBe(true);
     },
   },

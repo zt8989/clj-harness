@@ -59,18 +59,18 @@
                (first))]
     (when f (.getAbsolutePath ^java.io.File f))))
 
-;; ...and the ONE session that is deliberately the other editing mode. Everything
-;; else here runs unbound, which since ticket 12 means anchor editing.
+;; THE MODE IS THIS HOME'S, NOT THE PROJECT'S (`.scratch/config-merge`: the project level is
+;; gone). One config.edn carries `:session :editing` for EVERY thread in the process, so a
+;; case that writes a mode and does not take it out again changes what the NEXT case is
+;; served -- and most of the cases here are about the DEFAULT (anchor) toolset.
+;;
+;; SO THIS FIXTURE'S JOB IS THE TAKE-IT-OUT, on both sides of every case. A case that wants
+;; the other editor writes it itself (`bind-mode!` below does that, and the two cases that
+;; need it say so where they need it).
 (use-fixtures :each
   (fn [f]
-    ;; The mode is THIS HOME's now, not the project's: the fixture writes the session
-    ;; section and takes it out again, because config.edn is shared by the whole run.
-    (support/write-session! "{:editing {:mode :str-replace}}")
-    (project/bind! "tt-strrep-toolset" dir)
-    (project/bind! "tt-edit" dir)
+    (support/wipe-session!)
     (f)
-    (project/bind! "tt-strrep-toolset" nil)
-    (project/bind! "tt-edit" nil)
     (support/wipe-session!)))
 
 (defn- tmp [name] (str dir "/" name))
@@ -92,9 +92,13 @@
         (str/split-lines content)))
 
 (defn- bind-mode!
-  "Bind THREAD-ID to DIR with MODE selected project-side. Used by the cases that
-  are about one mode's BEHAVIOUR -- `edit`'s, above all -- so they say which mode
-  they mean instead of inheriting whatever the default happens to be this month."
+  "Bind THREAD-ID to DIR and write MODE into this home's `:session :editing`. Used by the
+  cases that are about one mode's BEHAVIOUR -- `edit`'s, above all -- so they say which
+  mode they mean instead of inheriting whatever the default happens to be this month.
+
+  THE MODE IS THE HOME'S, NOT THE PROJECT'S (`.scratch/config-merge`): writing it here
+  changes what EVERY thread in the process is served, so a case that calls this owes the
+  next one a `wipe-session!` -- the namespace's :each fixture pays that either way."
   [thread-id dir mode]
   (project/bind! thread-id dir)
   (support/write-session! (str "{:editing {:mode " mode "}}")))
@@ -135,6 +139,10 @@
         (is (true? error))
         (is (str/includes? content "2 times"))))
     (testing "and in the DEFAULT mode the same call is refused by name instead"
+      ;; THE MODE IS THIS HOME'S, so 'no thread-id' is not 'the default' while a mode is
+      ;; written -- and this case's first half wrote :str-replace. Take it out to get the
+      ;; default (anchor) session this half is about.
+      (support/wipe-session!)
       ;; The flip, seen from the tool that lost its place in the default toolset.
       (run-default "write" {:path p :content "alpha beta gamma"})
       (let [{:keys [content error]} (run-default "edit" {:path p :old_string "beta"
@@ -281,11 +289,17 @@
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
-    (let [names (mapv #(get-in % [:function :name])
-                      (tools/specs "tt-strrep-toolset"))]
-      (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_list" "job_output"
-              "read" "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
-             names)))))
+    ;; THE MODE IS THIS HOME'S, so the two halves of this case cannot hold AT ONCE: this one
+    ;; writes what it is asking about. (The :each fixture takes it out again either way; the
+    ;; point is that the assertion is about what is in force here, not about what leaked in.)
+    (support/write-session! "{:editing {:mode :str-replace}}")
+    (try
+      (let [names (mapv #(get-in % [:function :name])
+                        (tools/specs "tt-strrep-toolset"))]
+        (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_list" "job_output"
+                "read" "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
+               names)))
+      (finally (support/wipe-session!)))))
 
 (deftest a-bound-session-roots-relative-paths-at-its-project
   (let [pdir (support/temp-dir "tools-project")]
