@@ -448,7 +448,13 @@ const ThreadWelcome: FC = () => {
 
 const ThreadSuggestions: FC = () => {
   return (
-    <div className="aui-thread-welcome-suggestions flex w-full flex-wrap items-center justify-center gap-2 px-4">
+    // LOCAL (`.scratch/composer-new-session-bar`): `empty:hidden`, because an EMPTY one of these
+    // is not nothing. The footer around it is `flex flex-col gap-4`, so this div costs 16px of
+    // gap the moment it exists -- and it exists whenever the composer is empty, whether or not
+    // the server ever sent a suggestion. The first typed character unmounts it and the block
+    // re-centres (8px, measured); `display: none` on the empty case is what stops that, and it
+    // keeps the row when there IS something to draw.
+    <div className="aui-thread-welcome-suggestions flex w-full flex-wrap items-center justify-center gap-2 px-4 empty:hidden">
       <ThreadPrimitive.Suggestions>
         {() => <ThreadSuggestionItem />}
       </ThreadPrimitive.Suggestions>
