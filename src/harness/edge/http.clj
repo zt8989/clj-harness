@@ -3824,7 +3824,7 @@
                                                (compaction/config stem))))))
 
 (defn- trajectory-get
-  "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
+  "GET /api/threads/<stem>/trajectory -- one session's LEDGER as the MODEL saw it,
   folded from its RECORD (harness.edge.trajectory): the system message that was in
   force, the context spliced in beside it, every user message, and each tool call with
   its arguments and result.
@@ -3882,12 +3882,12 @@
                       ;; returned -- so a throw here is a silently dropped connection
                       ;; rather than a 500. The stream is netted and simply ends.
                       (try
-                        ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
+                        ;; THE HEADER FIRST: a reader knows what it is reading before the first cell.
                         (hk/send! ch {:headers headers
                                       :body    (str (json/write-str header) "\n")}
                                   false)
-                        (let [sent  (atom 0)
-                              ;; THE TURNS THIS VIEW HAS NOW, then whatever finalizes later.
+                        (let [written (atom 0)
+                              ;; THE CELLS THIS VIEW HAS NOW, then whatever finalizes later.
                               ;; Reading the view costs no file: it is a value on the session.
                               push! (fn []
                                       (let [payload (if (some? held)
@@ -3895,18 +3895,15 @@
                                                               trajectory/trajectory-answer)
                                                       initial)]
                                         (when (some? payload)
-                                          (let [turns (:turns payload)
-                                                ;; THE NEW FINALIZED TURNS, then THE OPEN ONE
-                                                ;; again: a turn still growing is re-sent, and the
-                                                ;; client replaces it by `:index` -- the same
-                                                ;; in-place rule the window's frames use.
-                                                finalized (max 0 (dec (count turns)))
-                                                from      (min @sent finalized)]
-                                            (doseq [turn (subvec turns from finalized)]
-                                              (hk/send! ch (str (json/write-str turn) "\n") false))
-                                            (reset! sent finalized)
-                                            (when (pos? (count turns))
-                                              (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
+                                          ;; THE NEW FINAL CELLS, THEN THE OPEN TAIL AGAIN
+                                          ;; (`trajectory/drift`): the tail really does change under
+                                          ;; a reader -- a call is drawn without its result and
+                                          ;; answered later -- so it is re-sent and SPLICED AT ITS
+                                          ;; `:from` rather than appended.
+                                          (let [{:keys [sent batches]} (trajectory/drift payload @written)]
+                                            (reset! written sent)
+                                            (doseq [batch batches]
+                                              (hk/send! ch (str (json/write-str batch) "\n") false))))))]
                           (push!)
                           (if (and (some? held) (mux/watching? stem))
                             ;; THE SESSION IS HELD *AND* SOMEBODY IS SUBSCRIBED TO IT, so every

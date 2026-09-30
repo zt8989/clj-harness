@@ -4761,19 +4761,25 @@
              ;; the session's opening -- here the catalog -- and the body the ask pulled
              ;; in, both of them as context. And the SECOND turn carries no context: the
              ;; body is history by then, injected once rather than re-shown.
-             (let [turns (:turns (trajectory/records->trajectory (vec records)))
-                   ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
-               (is (= 2 (count turns)))
-               (is (= ["system" "user" "context" "context" "assistant"]
-                      (mapv :kind (:items (first turns))))
-                   "the ask, then the two blocks the model read behind it")
-               (is (some #(str/includes? (str (:text %)) "Available skills") (ctx (first turns)))
+             (let [cells (:cells (trajectory/records->trajectory (vec records)))
+                   of    (fn [turn] (filter #(= turn (:turn %)) cells))
+                   ctx   (fn [turn] (filter #(= "context" (:kind %)) (of turn)))
+                   ;; the two boundary cells are the cut rather than content, so they are
+                   ;; not part of what a turn CARRIES
+                   kinds (fn [turn] (mapv :kind (remove #(contains? #{"turn-start" "turn-end"} (:kind %))
+                                                        (of turn))))]
+               (is (= 2 (count (filter #(= "turn-start" (:kind %)) cells))))
+               (is (= ["system" "turn-start" "user" "context" "context" "message" "turn-end"]
+                      (mapv :kind (take 7 cells)))
+                   "the prompt stands OUTSIDE the turn it was handed to, then the ask and the two
+                    blocks the model read behind it")
+               (is (some #(str/includes? (str (:text %)) "Available skills") (ctx 1))
                    "the catalog")
-               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx (first turns)))
+               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx 1))
                    "the body the ask pulled in, both of them as the bytes they are")
-               (is (every? #(nil? (:source %)) (mapcat ctx turns))
+               (is (every? #(nil? (:source %)) (mapcat ctx [1 2]))
                    "and neither of them claims to have come from a place")
-               (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
+               (is (= ["user" "message"] (kinds 2))
                    "no context this run did not carry -- and the client's own message is not
                     drawn as one instead"))))))
       (finally

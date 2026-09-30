@@ -150,11 +150,65 @@
 (defn- executed [ts call-id name] (record ts "tools/execute" {:toolCallId call-id :toolName name}))
 (defn- post-execute [ts call-id name] (record ts "tools/post-execute" {:toolCallId call-id :toolName name}))
 
-(defn- turns-of
-  "RECORDS -> the folded turns. A collection, not loose arguments: a record is a map,
-  and a map splatted as arguments becomes its ENTRIES."
+(defn- ledger
+  "RECORDS -> the LEDGER the payload answers with (`:cells`). A collection, not loose arguments: a record is a map, and a map splatted as arguments becomes its ENTRIES."
   [records]
-  (:turns (trajectory/records->trajectory (rows records))))
+  (:cells (trajectory/records->trajectory (rows records))))
+
+(defn- turn-cells
+  "TURN N's ITEM cells, out of a LEDGER -- the two boundary cells are the cut, not content."
+  [cells n]
+  (into [] (filter #(and (= n (:turn %))
+                         (not (contains? #{"turn-start" "turn-end"} (:kind %)))))
+        cells))
+
+(defn- turns-of
+  "RECORDS -> the fold's turns, READ BACK OUT OF THE LEDGER, with `message` spelled the way
+  this file's item-level assertions were written (`assistant`).
+
+  THE LEDGER IS THE PAYLOAD; this is the reading the thirty cases below are written in --
+  which row opens a turn, what a tool item carries, what a park and a resume do to it, what
+  the injections are. It is deliberately NOT a second fold: every cell it hands back is the
+  cell the fold produced. TWO THINGS IT PUTS BACK, and both have their own cases below:
+  the PROMPT cell, which the payload keeps OUTSIDE the turn (in front of its `turn-start`)
+  and this reading hands back as the turn's first item, and the `:turn` field, which is the
+  ledger's answer to 'where am I' and not an item's.
+  A collection, not loose arguments: a record is a map, and a map splatted as arguments
+  becomes its ENTRIES."
+  [records]
+  (let [cells (ledger records)
+        item  (fn [cell] (-> cell (dissoc :turn :index) (update :kind #(if (= "message" %) "assistant" %))))]
+    (loop [remaining (seq cells) prompt nil current nil turns []]
+      (if (nil? remaining)
+        (vec (if (some? current) (conj turns current) turns))
+        (let [[cell & more] remaining
+              kind (:kind cell)]
+          (cond
+            (= "turn-start" kind)
+            (recur more nil
+                   (cond-> {:index (:turn cell) :items (if (some? prompt) [prompt] [])}
+                     (seq (:calls cell)) (assoc :calls (vec (:calls cell))))
+                   turns)
+
+            (= "turn-end" kind)
+            (recur more nil nil (conj turns current))
+
+            (contains? #{"turn-start" "turn-end"} kind)
+            (recur more prompt current turns)
+
+            ;; THE PROMPT STANDS IN FRONT OF THE TURN IT WAS HANDED TO; a prompt that
+            ;; changed MID-turn is already inside it and stays where it changed.
+            (= "system" kind)
+            (if (some? current)
+              (recur more prompt (update current :items conj (item cell)) turns)
+              (recur more (item cell) current turns))
+
+            ;; A COMPACTION IS IN NO TURN, so the per-turn reading has no place for it.
+            (nil? (:turn cell))
+            (recur more prompt current turns)
+
+            :else
+            (recur more prompt (update current :items conj (item cell)) turns)))))))
 
 (defn- items-of [turns] (mapv :items turns))
 
@@ -165,6 +219,10 @@
   [turn kind]
   (first (filter #(= kind (:kind %)) (:items turn))))
 
+(defn- turn-count
+  "How many turns a LEDGER holds: one `turn-start` apiece."
+  [cells]
+  (count (filter #(= "turn-start" (:kind %)) cells)))
 ;; --------------------------------------------------------------------- the fold
 
 (def ^:private item-keys
@@ -174,6 +232,11 @@
   #{:kind :text :initial :tools :id :reasoning :toolCallId :name :argsText
     :result :error :executed :outcome :call
     :arrivedAt :resumedAt :executedAt :closedAt :at})
+
+(def ^:private cell-keys
+  "Every key a CELL of the LEDGER may carry: an item's own inventory plus the two the ledger
+  says about WHERE the cell is (`:index`, `:turn`) and the model calls that ride a turn's head."
+  (conj item-keys :index :turn :calls))
 
 (deftest one-turn-carries-what-the-model-saw
   ;; The whole point of the view, in one turn: the system message the client never
@@ -480,7 +543,7 @@
                  (frame 12 "RUN_STARTED" {:threadId "t" :runId "r1"})
                  (pre-execute 20 "c1" "read")]
         answer  (trajectory/records->trajectory (rows records))
-        [turn]  (:turns answer)]
+        turn    (first (turns-of records))]
     (is (true? (:incomplete answer)) "the run has not ended, and the answer says so")
     (is (= ["system" "user" "tool"] (kinds turn))
         "the call is drawn the moment it reaches the seam -- no assistant row, no result row")
@@ -603,21 +666,110 @@
     (is (= ["user" "assistant"] (kinds (second turns)))
         "the run's output belongs to the turn its last user message opened")))
 
-(deftest the-fold-hands-over-each-turn-once-and-in-order
-  ;; The route's stream: `fold-trajectory` is the SAME fold as `records->trajectory`, with
-  ;; an emit for each turn. A turn is handed over only once a LATER one has opened (a
-  ;; parked run resumed writes into the turn it parked in), so the emission is in order,
-  ;; one apiece, and the answer is exactly what the one-shot fold gives.
-  (let [records (rows [(client 0 (user "u1" "a"))
-                       (client 0 (user "u2" "b"))
-                       (system-prompt 10 "S")
+(deftest the-ledger-is-flat-and-the-prompt-stands-outside-the-turn
+  ;; TICKET 04 of `.scratch/system-reminder`: the payload is ONE ORDER of cells -- the shape dsh
+  ;; draws -- rather than a list of turns. The first thing that shape is for is the owner's
+  ;; report: the system prompt used to be `turns[0].items[0]`, i.e. drawn INSIDE turn one, when
+  ;; it is what the turn was HANDED.
+  (let [cells (ledger [(system-prompt 10 "S")
+                       (client 0 (user "u1" "hi"))
                        finished
-                       (message 20 (assistant "answered"))])
-        emitted (atom [])
-        answer  (trajectory/fold-trajectory records (fn [turn] (swap! emitted conj turn)))]
-    (is (= (:turns answer) @emitted) "every turn is handed over exactly once, in order")
-    (is (= (trajectory/records->trajectory records) answer)
-        "the streaming fold and the one-shot fold are the same fold")))
+                       (message 20 (assistant "ok"))])]
+    (is (= (range (count cells)) (map :index cells))
+        "every cell is numbered by its position -- one order, and a client splices at `:from`")
+    (is (= "system" (:kind (first cells))))
+    (is (nil? (:turn (first cells))) "the prompt belongs to NO turn")
+    (is (= ["turn-start" "user" "message" "turn-end"] (mapv :kind (rest cells)))
+        "and the turn it was handed to is bracketed by its own two boundary cells")))
+
+(deftest a-prompt-that-changed-stands-in-front-of-its-turns-boundary
+  ;; A SECOND ARRIVAL IS THE PROMPT THAT CHANGED, and where it stands is the whole statement:
+  ;; there is no 'which turn is this' field on it, only the boundary it is in front of.
+  (let [cells   (ledger [(client 0 (user "u1" "first"))
+                         (system-prompt 10 "S1")
+                         finished
+                         (message 20 (assistant "one"))
+                         (client 100 (user "u2" "second"))
+                         (system-prompt 110 "S2")
+                         finished
+                         (message 120 (assistant "two"))])
+        prompts (filter #(= "system" (:kind %)) cells)
+        starts  (filter #(= "turn-start" (:kind %)) cells)]
+    (is (= ["S1" "S2"] (mapv :text prompts)))
+    (is (true? (:initial (first prompts))) "the first one is the initial prompt")
+    (is (not (contains? (second prompts) :initial))
+        "and the second is not -- the bytes are what changed, not the session")
+    (is (= (mapv :index prompts) (mapv dec (map :index starts)))
+        "each prompt stands immediately in front of the boundary of the turn whose bytes it is")
+    (is (= [nil nil] (mapv :turn prompts)))
+    (is (= [true true] (mapv some? prompts)) "both are cells of the one ledger")))
+
+(deftest a-compaction-is-a-cell-between-turns
+  ;; A COMPACTION IS NOT SOMETHING THE MODEL SAW: it is a fact ABOUT the record -- the range that
+  ;; was folded and what came back -- so it is in no turn, and it is placed by its own row index:
+  ;; after the turn it happened in, before the next one.
+  (let [cells  (ledger [(system-prompt 10 "S")
+                        (client 0 (user "u1" "hi"))
+                        finished
+                        (record 30 "context/compacted"
+                                {:compactionId "k1" :summary "folded four messages"
+                                 :tokens 900 :shadowed [1 2 3 4]})
+                        (client 100 (user "u2" "again"))
+                        finished])
+        k      (first (filter #(= "compacted" (:kind %)) cells))
+        ends   (keep-indexed #(when (= "turn-end" (:kind %2)) %1) cells)
+        starts (keep-indexed #(when (= "turn-start" (:kind %2)) %1) cells)]
+    (is (= 1 (count (filter #(= "compacted" (:kind %)) cells))))
+    (is (nil? (:turn k)) "it belongs to no turn")
+    (is (= "folded four messages" (:text k)))
+    (is (= "k1" (:id k)))
+    (is (= 900 (:tokens k)))
+    (is (= 4 (:messages k)))
+    (is (< (first ends) (:index k)) "after the turn it happened in")
+    (is (< (:index k) (second starts)) "and before the next one")))
+
+(deftest the-open-tail-is-said-again-and-the-final-cells-once
+  ;; THE ROUTE'S RULE, as arithmetic (`trajectory/drift`). A reader keeps the cells it has been
+  ;; given; everything up to the LAST turn's `turn-start` can no longer change and is said ONCE,
+  ;; and the open tail is said again every time because it really does move -- a call is drawn
+  ;; before its result lands, and a turn's head gains its calls as they are written. A batch is
+  ;; SPLICED AT ITS `:from`, so the same tail twice is one copy of it.
+  (let [cells   (ledger [(system-prompt 10 "S")
+                         (client 0 (user "u1" "first"))
+                         (record 15 "model/start" {:model "m"})
+                         (record 16 "model/end" {})
+                         finished
+                         (message 20 (assistant "one"))
+                         ;; a second run opens the SECOND turn, which is the one still moving
+                         (system-prompt 110 "S")
+                         (client 100 (user "u2" "second"))
+                         (record 115 "model/start" {:model "m"})
+                         ;; THE RUN IS STILL GOING: the last wire frame is a start, which is
+                         ;; what makes the SECOND turn the open one -- and an open turn has no
+                         ;; `turn-end` cell, because the ledger may not say a turn is over on
+                         ;; any weaker evidence than a later turn or a terminal frame.
+                         (frame 116 "RUN_STARTED" {:threadId "t" :runId "r2"})])
+        payload {:cells cells}
+        open-at (last (keep-indexed #(when (= "turn-start" (:kind %2)) %1) cells))
+        first'  (trajectory/drift payload 0)]
+    (is (= open-at (:sent first'))
+        "everything up to the last turn's own start is final: only the last turn can still move")
+    (is (= [{:from 0 :cells (subvec cells 0 open-at)}
+            {:from open-at :cells (subvec cells open-at)}]
+           (:batches first'))
+        "what the reader gets: the final cells once, then the open tail")
+    ;; ASKING AGAIN SAYS THE TAIL AGAIN -- from exactly where the reader was left, and nowhere
+    ;; else: a reader cannot be handed the same cell twice.
+    (let [second' (trajectory/drift payload (:sent first'))
+          client  (reduce (fn [acc batch]
+                            (into (subvec acc 0 (:from batch)) (:cells batch)))
+                          []
+                          (concat (:batches first') (:batches second')))]
+      (is (= open-at (:sent second')))
+      (is (= [{:from open-at :cells (subvec cells open-at)}] (:batches second')))
+      (is (= cells client)
+          "splicing every batch into one reader gives the ledger, once -- which is the rule the
+           client is written to"))))
 
 (deftest the-fold-consumers-twin-is-the-same-fold
   ;; Ticket 12: `records->trajectory` is the step over the records in memory, and
@@ -733,7 +885,8 @@
                   (rows [(client 0 (user "u1" "hi"))
                          (record 100 "model/start" {:model "m"})
                          (frame 120 "RUN_STARTED" {:threadId "t" :runId "r1"})]))]
-      (is (= [{:index 0 :model "m" :startedAt 100}] (:calls (first (:turns answer)))))
+      (is (= [{:index 0 :model "m" :startedAt 100}]
+             (:calls (first (filter #(= "turn-start" (:kind %)) (:cells answer))))))
       (is (true? (:incomplete answer))))))
 
 (deftest a-tool-item-carries-its-own-four-marks
@@ -812,7 +965,7 @@
   ;; answer is the honest one, and it is not a truncated run.
   (let [answer (trajectory/records->trajectory
                 [(record 0 "project/bound" {:before nil :after "/tmp/x" :via "http"})])]
-    (is (= [] (:turns answer)))
+    (is (= [] (:cells answer)))
     (is (false? (:incomplete answer)))))
 
 (deftest an-unfinished-run-is-a-flag-not-a-refusal
@@ -822,7 +975,7 @@
                        (frame 20 "RUN_STARTED" {:threadId "t" :runId "r1"})])
         answer  (trajectory/records->trajectory records)]
     (is (true? (:incomplete answer)))
-    (is (= 1 (count (:turns answer))) "as far as it got")
+    (is (= 1 (turn-count (:cells answer))) "as far as it got")
     (is (thrown? Exception (replay/records->messages records))
         "the conversation reader still refuses the same log -- two readers, two answers")))
 
@@ -834,8 +987,9 @@
                    "{\"ts\":20,\"runId\":\"r1\",\"kind\":\"mess")
             :encoding "UTF-8")
       (let [answer (trajectory/log-trajectory f)]
-        (is (= 1 (count (:turns answer))))
-        (is (= ["system" "user"] (kinds (first (:turns answer))))))
+        (is (= 1 (turn-count (:cells answer))))
+        (is (= ["user"] (mapv :kind (turn-cells (:cells answer) 1)))
+            "its one cell is the question -- the prompt stands OUTSIDE the turn"))
       (finally (.delete f)))))
 
 (deftest an-enveloped-request-folds-to-the-same-conversation-as-a-plain-one
@@ -871,12 +1025,13 @@
         ;; THE TIMESTAMPS ARE THE ONE THING THAT DIFFERS -- the rows land at the call's own moment
         ;; now -- so the comparison is over everything else an item says.
         strip     (fn [answer]
-                    (mapv (fn [turn] (mapv #(dissoc % :arrivedAt :at) (:items turn)))
-                          (:turns answer)))]
+                    (mapv #(dissoc % :arrivedAt :at :index)
+                          (filter #(not (contains? #{"turn-start" "turn-end"} (:kind %)))
+                                  (:cells answer))))]
     (is (= (strip plain) (strip enveloped))
         "the same conversation, whether the request stands outside the call or inside it")
-    (is (= [["system" "user" "assistant"]] (mapv kinds (:turns plain)))
-        "and that conversation is the prompt, the question and the answer")))
+    (is (= ["system" "turn-start" "user" "message" "turn-end"] (mapv :kind (:cells plain)))
+        "and that conversation is the prompt, the question, the answer -- and the two boundaries")))
 
 ;; ---------------------------------------------------------------- the endpoint
 
@@ -919,13 +1074,17 @@
 
 (defn- get-trajectory
   "The trajectory route as the CLIENT reads it: NDJSON. The FIRST line is the header
-  (`:threadId` / `:incomplete` / `:behind`); every line after it is one turn. A non-200 answer
-  is a single JSON object (the error map) and no turns.
+  (`:threadId` / `:incomplete` / `:behind`); every line after it is ONE BATCH -- `{:from :cells}`,
+  the cells that became FINAL since the reader last asked and then the whole OPEN TAIL again.
+  THE BATCH IS SPLICED AT ITS `:from`, which is the client half of the rule
+  `harness.edge.trajectory/drift` states on the server's: a reader handed the same tail twice
+  ends up with one copy of it. This reader really is the client. A non-200 answer is a single
+  JSON object (the error map) and no cells.
 
-  READS TURN-COUNT TURNS AND THEN CLOSES THE STREAM: the route KEEPS THE CONNECTION OPEN when
-  this process holds the session (ticket 13 pushes later turns there), so a reader that waited
-  for the body to end would wait forever. TURN-COUNT is what the caller means to read."
-  [port path turn-count]
+  READS UNTIL TURNS TURNS HAVE CLOSED AND THEN CLOSES THE STREAM: the route KEEPS THE
+  CONNECTION OPEN when this process holds the session (ticket 13 pushes later cells there), so a
+  reader that waited for the body to end would wait forever. TURNS is what the caller means to read."
+  [port path turns]
   (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" port path)))
                  (.GET)
                  (.build))
@@ -936,13 +1095,17 @@
     (try
       (let [line*  (fn [] (some-> (.readLine rd) str/trim not-empty))
             header (json/read-str (or (line*) "{}") :key-fn keyword)
-            turns  (loop [acc [] left turn-count]
-                     (if (zero? left)
+            ;; A CEILING ON THE LINES, not on the reading: the fold answers a cell at a time, and
+            ;; a route that went quiet mid-turn must fail the case rather than hang it.
+            cells  (loop [acc [] left 200]
+                     (if (or (zero? left) (>= (turn-count acc) turns))
                        acc
                        (if-some [line (line*)]
-                         (recur (conj acc (json/read-str line :key-fn keyword)) (dec left))
+                         (let [batch (json/read-str line :key-fn keyword)
+                               from  (min (:from batch) (count acc))]
+                           (recur (into (subvec acc 0 from) (:cells batch)) (dec left)))
                          acc)))]
-        [(.statusCode resp) header (vec turns)])
+        [(.statusCode resp) header (vec cells)])
       (finally (.close in)))))
 
 (defn- log-messages
@@ -1003,8 +1166,8 @@
         ;; BEFORE the fold, not after it: the route reads the log, so the log has to
         ;; have been finished being written (see await-run-recorded!).
         (await-run-recorded! thread-id 5000)
-        (let [[status head turns] (get-trajectory port (str "/api/threads/" thread-id "/trajectory") 1)
-              items   (:items (first turns))
+        (let [[status head cells] (get-trajectory port (str "/api/threads/" thread-id "/trajectory") 1)
+              items   (filterv #(not (contains? #{"turn-start" "turn-end"} (:kind %))) cells)
               by      (fn [k] (first (filter #(= k (:kind %)) items)))
               written (->> (stats/read-records (replay/locate (home/projects-dir) thread-id))
                            (filter replay/system-prompt?)
@@ -1012,10 +1175,11 @@
           (is (= 200 status))
           (is (= thread-id (:threadId head)))
           (is (false? (:incomplete head)))
-          (is (= 1 (count turns)) "one user message, one turn")
-          (is (every? #(set/subset? (set (keys %)) item-keys) items)
+          (is (= 1 (turn-count cells)) "one user message, one turn")
+          (is (every? #(set/subset? (set (keys %)) cell-keys) cells)
               "every field on the wire is one the inventory names")
-          (is (= "system" (:kind (first items))) "the turn opens with the system message")
+          (is (= "system" (:kind (first cells))) "the ledger opens with the system prompt")
+          (is (nil? (:turn (first cells))) "AND IT IS IN NO TURN -- it is what the turn was handed")
           (is (= written (:text (by "system")))
               "the system item IS the line the edge wrote, byte for byte")
           (is (seq (:tools (by "system")))
@@ -1039,17 +1203,17 @@
     (fn [port]
       (send-run! port "trajectory-view")
       (await-run-recorded! "trajectory-view" 5000)
-      (let [[status head turns] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)
+      (let [[status head cells] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)
             f     (replay/locate (home/projects-dir) "trajectory-view")
             moved (java.io.File. (str (.getAbsolutePath f) ".moved"))]
         (is (= 200 status))
-        (is (seq turns) "the first ask folds the record and keeps the view")
+        (is (seq cells) "the first ask folds the record and keeps the view")
         (try
           (is (.renameTo f moved) "the record is moved away from the server")
-          (let [[status2 head2 turns2] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)]
+          (let [[status2 head2 cells2] (get-trajectory port "/api/threads/trajectory-view/trajectory" 1)]
             (is (= 200 status2) "the second ask still answers")
-            (is (= [status (:threadId head) (:incomplete head) turns]
-                   [status2 (:threadId head2) (:incomplete head2) turns2])
+            (is (= [status (:threadId head) (:incomplete head) cells]
+                   [status2 (:threadId head2) (:incomplete head2) cells2])
                 "and it answers the SAME thing -- from the view, not from the file"))
           (finally (.renameTo moved f)))))))
 
@@ -1087,26 +1251,30 @@
                   rd   (java.io.BufferedReader. (java.io.InputStreamReader. in StandardCharsets/UTF_8))]
               (try
                 (json/read-str (.readLine rd) :key-fn keyword) ; the header
-                (let [first-turn (json/read-str (.readLine rd) :key-fn keyword)
-                      _          (is (= 1 (:index first-turn)))
+                (let [opening (json/read-str (.readLine rd) :key-fn keyword)
+                      _       (is (= 0 (:from opening)))
+                      _       (is (= "system" (:kind (first (:cells opening)))))
                       ;; THE SECOND RUN HAPPENS WHILE THIS STREAM IS OPEN. The stream is read
-                      ;; until the SECOND turn arrives -- the open one is re-sent as it grows, so
-                      ;; the first line pushed is not necessarily the new turn.
-                      running    (future (send-run! port "trajectory-push" "u2"))
-                      pushed     (loop [left 50]
-                                   (if (zero? left)
-                                     ::timeout
-                                     (let [line (deref (future (.readLine rd)) 15000 ::timeout)]
-                                       (cond
-                                         (or (= ::timeout line) (nil? line)) ::timeout
-                                         (= 2 (:index (json/read-str line :key-fn keyword)))
-                                         (json/read-str line :key-fn keyword)
-                                         :else (recur (dec left))))))]
-                  (is (= 2 (:index pushed)) (str "pushed=" (pr-str pushed)))
+                      ;; until a batch carries the SECOND turn -- the open turn is re-sent as it
+                      ;; grows, so the first line pushed is not necessarily the new one.
+                      running (future (send-run! port "trajectory-push" "u2"))
+                      pushed  (loop [left 50]
+                                (if (zero? left)
+                                  ::timeout
+                                  (let [line (deref (future (.readLine rd)) 15000 ::timeout)]
+                                    (cond
+                                      (or (= ::timeout line) (nil? line)) ::timeout
+                                      (some #(= 2 (:turn %))
+                                            (:cells (json/read-str line :key-fn keyword)))
+                                      (json/read-str line :key-fn keyword)
+                                      :else (recur (dec left))))))]
+                  (is (map? pushed) (str "pushed=" (pr-str pushed)))
+                  (is (some #(and (= 2 (:turn %)) (= "turn-start" (:kind %))) (:cells pushed))
+                      "the new turn arrived as its own boundary cell in a batch")
                   (is (some? (deref running 15000 ::timeout)))
-                  (is (= 2 (count (:turns (trajectory/trajectory-answer (trajectory/view-value "trajectory-push")))))
+                  (is (= 2 (turn-count (:cells (trajectory/trajectory-answer (trajectory/view-value "trajectory-push")))))
                       "the view itself has both turns")
-                  (is (= 2 (count (:turns (trajectory/log-trajectory (replay/locate (home/projects-dir) "trajectory-push")))))
+                  (is (= 2 (turn-count (:cells (trajectory/log-trajectory (replay/locate (home/projects-dir) "trajectory-push")))))
                       "a FRESH fold of the record has both turns"))
                 (finally (.close in))))))))))
 
@@ -1120,10 +1288,10 @@
     (fn [port]
       (send-run! port "trajectory-lone")
       (await-run-recorded! "trajectory-lone" 5000)
-      (let [[status head turns] (get-trajectory port "/api/threads/trajectory-lone/trajectory" 1)]
+      (let [[status head cells] (get-trajectory port "/api/threads/trajectory-lone/trajectory" 1)]
         (is (= 200 status))
         (is (= "trajectory-lone" (:threadId head)))
-        (is (seq turns) "the reader still gets the whole fold")
+        (is (seq cells) "the reader still gets the whole fold")
         (is (empty? (get (deref (var-get #'sessions/watchers)) "trajectory-lone"))
             "and no doorbell was left for a stream nothing can watch")))))
 

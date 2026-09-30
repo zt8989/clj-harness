@@ -48,7 +48,31 @@
   that; the run's own context entry is a user message behind the question, and skill
   bodies land where the call that wanted them did. All of that is what the model saw, so
   it is what this returns -- VERBATIM, every `message` row a run carried: a block carried
-  again is drawn again, because this is a mirror of the record and not a tidied retelling."
+  again is drawn again, because this is a mirror of the record and not a tidied retelling.
+
+  THE PAYLOAD IS A FLAT LEDGER (ticket 04 of `.scratch/system-reminder`), not the
+  per-turn `{:turns [{:index :items :calls}]}` this used to answer: `:cells`, one entry per
+  thing the model had or per row that bounds them, in the record's order. The shape is
+  dsh's (`@deepseek-ai/dsh-client-ui-trajectory@0.1.0-rc.6`: `TrajectoryCellKind`, and a
+  turn model whose `turn === null` reads `Between turns`), and the reason to copy it is
+  that A TURN IS NOT THE ONLY PLACE A ROW CAN SIT. The session's system prompt is not
+  something a turn said -- it is what the turn was HANDED, and dsh draws it above every
+  turn; a compaction is not something the model saw at all, it is a fact about the record.
+  Grouping everything under a turn forced both of them into one, which is exactly the
+  reading the owner objected to (the system prompt drawn inside turn 1).
+
+  THREE KINDS OF CELL ARE BOUNDARIES RATHER THAN CONTENT -- `turn-start`, `turn-end` and
+  the prompt -- and they are cells like the rest so that ONE order carries the whole
+  reading: where the prompt changed is its position, which turn a cell is in is the
+  boundary cells around it, and `:turn nil` means 'between turns'. The record has no
+  `turn/start` row (`docs/architecture/edge.md`: they ride the session's downlink and do
+  not enter the record), so those two are FOLDED -- said out loud here because a reader
+  who goes looking for them in the jsonl will not find them.
+
+  A LEDGER IS ALSO WHAT THE ROUTE STREAMS. The cells up to the open turn's `turn-start`
+  can no longer change; the open tail can, and is re-sent for that reason -- `final-count`
+  and `drift` are that rule, in one place, for the route and for whoever writes the next
+  reader."
   (:require [clojure.string :as str]
             [harness.edge.ag-ui :as ag]
             [harness.edge.stats :as stats]
@@ -105,13 +129,14 @@
   moment the NEXT one opens -- a session runs one action at a time, so by then every row of
   it is written -- and the last one stays open until `segments-answer`, because the record
   may still be growing."
-  [state [_i record]]
+  [state [i record]]
   (cond
     (opens-segment? record (:open state))
     {:open   (cond-> {:run-id       (:runId record)
                       :prompt?      (replay/system-prompt? record)
                       :prompt-row   (when (replay/system-prompt? record) record)
                       :opener       record
+                      :i            i
                       :at           (:ts record)
                       :brought      []
                       :brought-rows []
@@ -466,8 +491,12 @@
       (assoc-in turns [i :items]
                 (into (:items (get turns i)) (mapv context-item messages))))))
 
-(defn- open-turn [turns]
-  (conj turns {:index (inc (count turns)) :items [] :calls []}))
+(defn- open-turn
+  "Open the next turn -- the one the fresh user message that just arrived belongs to. AT is
+  the record index the turn opened at, which is what places a `compacted` cell (a row that
+  belongs to no turn) on the right side of it."
+  [turns at]
+  (conj turns {:index (inc (count turns)) :items [] :calls [] :opened-at at}))
 
 (defn- user-item
   "One user message, taking its text from the message the PROVIDER actually got (the
@@ -801,12 +830,13 @@
             ;; after the birth reads it there), and the session's context entry sits
             ;; BEHIND the question, where ticket 03 put it. Both are drawn in the place
             ;; the model read them, and neither opens a turn.
+            opened-at (:i run)
             lead  (take-while ag/injected? fresh)
             rest' (drop-while ag/injected? fresh)
             tail  (filter ag/injected? rest')
             said  (remove ag/injected? rest')
             turns (-> turns
-                      open-turn
+                      (open-turn opened-at)
                       (cond-> changed?
                         (append-last [(system-item texts (nil? shownSystem)
                                                      (:tools (:prompt-row run)))]))
@@ -818,7 +848,8 @@
             ;; run's own output will land in.
             turns (if (seq said)
                     (reduce (fn [turns message]
-                              (-> turns open-turn (append-last [(user-item ins own-of message at)])))
+                              (-> turns (open-turn opened-at)
+                                  (append-last [(user-item ins own-of message at)])))
                             (append-last turns [(user-item ins own-of (first said) at)])
                             (rest said))
                     turns)
@@ -855,6 +886,85 @@
       (seq calls)    (assoc :calls (vec (map-indexed (fn [i call] (assoc call :index i)) calls)))
       (empty? calls) (dissoc :calls))))
 
+(defn- compacted-cell
+  "A `context/compacted` row as a BETWEEN-TURNS cell: the summary that came back, its id, when
+  it was written and how much it folded."
+  [record]
+  (let [p (replay/payload record)]
+    (cond-> {:kind "compacted" :turn nil :text (str (:summary p))}
+      (some? (:compactionId p)) (assoc :id (:compactionId p))
+      (some? (:ts record))      (assoc :at (:ts record))
+      (some? (:tokens p))       (assoc :tokens (:tokens p))
+      (seq (:shadowed p))       (assoc :messages (count (:shadowed p))))))
+
+(defn- item-cell
+  "ONE ITEM of a turn as a ledger cell: its own fields, the TURN it belongs to (nil for a cell
+  that belongs to none) and the KIND the ledger spells it with -- `assistant` is a `message`
+  cell, which is dsh's word for the model's own words."
+  [turn item]
+  (-> item
+      (assoc :kind (if (= "assistant" (:kind item)) "message" (:kind item)))
+      (assoc :turn turn)))
+
+(defn- turn-cells
+  "ONE TURN -> its cells: the prompt in front of the boundary when this turn is where its
+  bytes appeared, `turn-start`, the items, and `turn-end` WHEN THE TURN HAS REALLY ENDED.
+
+  THE PROMPT STANDS IN FRONT OF ITS `turn-start` AND CARRIES NO TURN: it is not something the
+  turn said, it is what the turn was HANDED (dsh draws it above every turn the same way), and
+  its position in the ledger is the whole statement about which turn it belongs to. A prompt
+  whose bytes changed MID-turn -- a resumed run -- stays where it changed and wears the turn it
+  changed in, because there is no `turn-start` of its own to stand in front of.
+
+  THE TURN'S MODEL CALLS RIDE ITS HEAD (`turn-start`), not a cell of their own: a call is a
+  fact about the turn as a whole, and an item's `:call` is a pointer into that one vector. The
+  head is inside the OPEN TAIL while the turn is still open, so a call that lands mid-run
+  reaches the reader with the next batch (`drift`) instead of being frozen without it.
+
+  A TURN THAT HAS NOT ENDED HAS NO `turn-end` CELL. A turn ends when a LATER one opens (a
+  session runs one action at a time), or when the record's last frame is TERMINAL -- and the
+  ledger may not say a turn is over on any weaker evidence than that, because the cell is read
+  as exactly that fact. The unfinished turn is still bracketed at its head, and a viewer reads
+  `:incomplete` for the rest."
+  [turn closed?]
+  (let [items  (:items turn)
+        n      (:index turn)
+        ahead? (= "system" (:kind (first items)))
+        head   (when ahead? (first items))
+        body   (if ahead? (subvec (vec items) 1) items)
+        start  (cond-> {:kind "turn-start" :turn n}
+                 (seq (:calls turn)) (assoc :calls (vec (:calls turn))))]
+    (vec (concat
+          (when head [(item-cell nil head)])
+          [start]
+          (map #(item-cell n %) body)
+          (when closed? [{:kind "turn-end" :turn n}])))))
+
+(defn- cells-of
+  "TURNS + the rows that belong to no turn -> THE LEDGER: every cell in the record's order,
+  numbered by its position.
+
+  A BETWEEN-TURNS ROW IS PLACED BY ITS OWN RECORD INDEX (`:at-i`), against the index each turn
+  opened at: it lands after the turn it happened in and before the next one, which is where
+  the record has it and the most this fold may claim about it.
+
+  COMPLETE? IS THE RECORD'S OWN ANSWER (`:incomplete` is read off its last frame) and it is
+  what decides whether the LAST turn is bracketed at its tail: every earlier turn has been
+  superseded by the next one, and the last one has not."
+  [turns between complete?]
+  (let [pending (atom (vec (sort-by :at-i between)))
+        last-i  (dec (count turns))
+        before  (fn [i]
+                  (let [[mine rest] (split-with #(< (:at-i %) i) @pending)]
+                    (reset! pending (vec rest))
+                    (map (comp #(assoc % :turn nil) :cell) mine)))]
+    (->> (concat (mapcat (fn [[i turn]]
+                           (concat (before (or (:opened-at turn) -1))
+                                   (turn-cells turn (or (< i last-i) complete?))))
+                         (map-indexed vector turns))
+                 (map (comp #(assoc % :turn nil) :cell) @pending))
+         (map-indexed (fn [i cell] (assoc cell :index i)))
+         vec)))
 (defn trajectory-init
   "The fold's opening state: the segment machine, the two lookup maps, the turn fold, and the
   last frame seen (which is what `:incomplete` is read off at the end)."
@@ -862,6 +972,7 @@
       :life       {}
       :calls      {}
       :folding    {:seen #{} :shownSystem nil :turns [] :history []}
+      :between    []
       :last-event nil})
 
 (defn trajectory-step
@@ -890,83 +1001,106 @@
                         (:closed next))]
     (as-> state s
       (assoc s :segments (assoc next :closed []) :folding folding)
-      (cond-> s (= "event" kind) (assoc :last-event record))))))
+      (cond-> s
+        ;; A COMPACTION IS NOT SOMETHING THE MODEL SAW: it is a fact ABOUT the record -- the
+        ;; range that was folded and what came back -- so it is collected beside the turns and
+        ;; placed between them by its own row index (`cells-of`), never invented into one.
+        (= "context/compacted" kind) (update :between conj {:at-i i :cell (compacted-cell record)})
+        (= "event" kind)             (assoc :last-event record))))))
 
 (defn trajectory-answer
-  "The fold's state -> {:turns [...] :incomplete bool}: the last (still-open) segment folded
-  in, every turn finished, and `:incomplete` read off the last frame the record ended on -- the
-  same rule `stats/incomplete?` uses, kept here so no reader has to walk the record again."
+  "The fold's state -> {:cells [...] :incomplete bool}: the last (still-open) segment folded
+  in, the whole ledger laid out flat, and `:incomplete` read off the last frame the record
+  ended on -- the same rule `stats/incomplete?` uses, kept here so no reader has to walk the
+  record again."
   [state]
-  (let [{:keys [segments folding life calls last-event]} state
+  (let [{:keys [segments folding life calls last-event between]} state
         ;; THE OPEN SEGMENT IS THE LIVE ONE: its record is still being written, so a tool call
         ;; it has already started is drawn as a call in flight (`pending-tool-items`). A closed
         ;; segment is a finished record and is folded exactly as every other reader sees it.
         folding (if-some [open (:open segments)]
                   (one-run folding (assoc open :live? true) life calls)
-                  folding)]
-    {:turns      (mapv finish-turn (:turns folding))
-     :incomplete (boolean (and last-event (not (frames/terminal? (replay/payload last-event)))))}))
+                  folding)
+        incomplete (boolean (and last-event (not (frames/terminal? (replay/payload last-event)))))]
+    {:cells      (cells-of (mapv finish-turn (:turns folding)) between (not incomplete))
+     :incomplete incomplete}))
 
-(defn trajectory-emit-step
-  "The step `fold-record` wants, with EMIT! handed each turn as it becomes final. EMITTED is
-  an atom the CALLER keeps, so the fold state stays the payload's and the same step serves the
-  non-emitting seam."
-  [emit! emitted]
-  (fn [state pair]
-    (let [next  (trajectory-step state pair)
-          final (max 0 (dec (count (:turns (:folding next)))))]
-      (doseq [j (range @emitted final)]
-        (emit! (finish-turn (nth (:turns (:folding next)) j))))
-      (reset! emitted final)
-      next)))
+(defn final-count
+  "How many cells of this LEDGER can no longer change: everything up to the OPEN turn's
+  `turn-start`.
 
-(defn fold-trajectory
-  "RECORDS -> the same answer `records->trajectory` gives, but with EMIT! handed each turn
-  the moment the fold can no longer change it.
+  THE OPEN TURN IS THE ONLY PART OF A LEDGER THAT MOVES. Its cells gain a call (a `turn-start`
+  cell's `:calls`), an assistant's words, the results and marks of a call that was answered
+  after it was first drawn; a turn that has CLOSED is finished, and `turn-cells` only writes
+  the `turn-end` cell of a turn that really is over -- a later turn opened after it, or the
+  record's last frame was terminal. So the open turn is exactly the last `turn-start` with no
+  `turn-end` after it, and a ledger whose every turn is closed is all final.
 
-  WHY A TURN IS NOT FINAL WHEN IT APPEARS: `one-run` appends to the turn it is in -- a parked
-  run resumed writes into the SAME turn, and that run's injected context lands after the turn
-  already exists. So a turn is final only once a LATER turn has opened (or the record has
-  ended): everything but the last turn is handed over as it stops being last, and the last
-  one at the end.
+  THE PROMPT CELL IN FRONT OF AN OPEN TURN IS FINAL TOO, and it is deliberately on that side of
+  the line: whether those bytes ever changed is settled the moment they are laid down."
+  [cells]
+  (let [starts (keep-indexed #(when (= "turn-start" (:kind %2)) %1) cells)
+        ends   (keep-indexed #(when (= "turn-end" (:kind %2)) %1) cells)
+        open   (last starts)]
+    (if (and (some? open) (> open (or (last ends) -1)))
+      open
+      (count cells))))
 
-  THE ROUTE DOES NOT COME THROUGH HERE ANY MORE (ticket 12): it drives the same step over the
-  session's READ STREAM (`sessions/fold-record`), so the record's rows are never all in hand.
-  This is the in-memory twin of that stream, kept for the shape's assertions."
-  [records emit!]
-  (let [emitted (atom 0)
-        state   (reduce (trajectory-emit-step emit! emitted) (trajectory-init) (map-indexed vector records))
-        answer  (trajectory-answer state)]
-    (doseq [turn (subvec (:turns answer) @emitted)]
-      (emit! turn))
-    answer))
+(defn drift
+  "PAYLOAD + how many cells the reader already has -> {:sent n :batches [{:from i :cells […]}]}:
+  what that reader still needs, and the count it can be told it FINALLY has afterwards.
+
+  TWO BATCHES AT MOST, IN ORDER -- the cells that became final since the reader last asked
+  (append-only, said once), then the whole open tail again. THE TAIL IS SAID AGAIN BECAUSE IT
+  REALLY DOES CHANGE: a call is drawn without its result the moment it reaches the seam, and the
+  answer lands later, and the run's own calls fill in as they are written. A batch is SPLICED AT
+  ITS `:from`, so a reader handed the same tail twice ends up with one copy of it."
+  [payload sent]
+  (let [cells (:cells payload)
+        final (final-count cells)
+        sent  (min sent final)]
+    {:sent    final
+     :batches (vec (concat (when (< sent final)
+                             [{:from sent :cells (subvec cells sent final)}])
+                           (when (< final (count cells))
+                             [{:from final :cells (subvec cells final)}])))}))
 
 (defn records->trajectory
-  "RECORDS -> {:turns [...] :incomplete bool}. See the namespace docstring for the fold's
+  "RECORDS -> {:cells [...] :incomplete bool}. See the namespace docstring for the fold's
   rules and the route (GET /api/threads/<stem>/trajectory) for the payload.
 
-  EACH TURN CARRIES WHAT THE MODEL HAD, IN THE RECORD'S ORDER. A turn is :index, the
-  :calls it made, and one :items vector whose entries are keyed by :kind --
+  THE LEDGER IS FLAT: one cell per thing the model had or per row that bounds it, in the
+  record's order, each carrying the TURN it is in (`:turn nil` = between turns) and its
+  `:index`. A turn is bracketed by two boundary cells, `turn-start` / `turn-end`, and the
+  session's system prompt stands OUTSIDE them, in front of the `turn-start` of the turn whose
+  bytes it is -- which is how 'the prompt is not part of the turn' is said without a second
+  field. The kinds are --
 
-    system     :text :initial :tools (the run's table, off the row's envelope)
+    system     :text :initial :tools (the run's table, off the row's envelope); :turn nil
+    turn-start :calls (the model calls this turn made: :index :model :startedAt :endedAt
+               :usage :tokens :finishReason) -- absent when the record predates those lines
+    turn-end   the boundary itself; nothing else
+    compacted  :text :id :at :tokens :messages (a compaction: a fact ABOUT the record, not
+               something the model saw); :turn nil
     context    :text
     user       :id :text
-    assistant  :text :call :reasoning (only when the vendor reported some)
+    message    :text :call :reasoning (an assistant message; only when the vendor reported
+               reasoning)
     tool       :toolCallId :name :argsText :executed
                :result (ABSENT while a run in flight has not answered the call yet)
                :arrivedAt :resumedAt :executedAt :closedAt :outcome :error
 
-  -- and a call is :index, :model, :tools (absent when the request carried none),
-  :startedAt, :endedAt, :usage (the vendor's own map), :tokens and :finishReason.
+  -- which is the same inventory the per-turn payload carried, said once per CELL instead of
+  once per turn's `:items` vector.
   AN ITEM'S TIMES LIVE ON ITS CALL, not on the item: `:call` is the pointer, one fact
   in one place. A tool item keeps its own marks because a tool call has a life of its own,
   and a call that never ran has no `:executedAt` -- absent, never zero.
 
   `:calls` IS WHAT THE MODEL WAS SENT rather than what it saw: the model name actually
-  used and the tool table as it went out, verbatim from the `model/start` line. A turn
-  from a record that predates those lines has NO `:calls` -- a different answer from
-  'this turn made no calls', and both are different from 'here are the tools this
-  session has today'.
+  used and the tool table as it went out, verbatim from the `model/start` line. They ride the
+  turn's `turn-start` cell, which is where an item's `:call` pointer points. A turn from a
+  record that predates those lines has NO `:calls` -- a different answer from 'this turn made
+  no calls', and both are different from 'here are the tools this session has today'.
 
   WHAT IS NOT HERE IS NOT GUESSED. No token counts and no durations: those belong to the
   model call, and this payload answers 'what did it see'. `:executed` is a yes/no about
@@ -975,7 +1109,9 @@
   THE SYSTEM MESSAGE IS SHOWN ONCE, and again whenever its bytes change: the frozen
   prompt is the same text on every run, so listing it per turn would be the same fact
   written N times -- but a prompt that CHANGED between turns is the single most important
-  thing this view could show, and hiding it would be worse than repeating it.
+  thing this view could show, and hiding it would be worse than repeating it. It is a cell
+  OUTSIDE the turn it belongs to (`:turn nil`, in front of that turn's `turn-start`), because
+  it is what the turn was handed rather than something the turn said.
 
   THE INJECTED CONTEXT IS DRAWN VERBATIM, spelled out in `add-context`: every block a run
   carried is drawn in that run, and a block two runs carried is drawn twice. It is styled

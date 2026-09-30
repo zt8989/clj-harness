@@ -47,6 +47,7 @@ import { sidebarRefetchSuite } from "./suites/sidebar-refetch";
 import { injectionSuite } from "./suites/injections";
 import { compactionSuite } from "./suites/compactions";
 import { recordSuite } from "./suites/record";
+import { trajectorySuite } from "./suites/trajectory";
 import { windowSuite } from "./suites/window";
 import { reasoningRowSuite } from "./suites/reasoning-row";
 import { toolRowSuite } from "./suites/tool-row";
@@ -78,7 +79,7 @@ import { composerContextBarSuite } from "./suites/composer-context-bar";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, trajectorySuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -523,7 +524,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// height, and the empty suggestions row is display:none instead of eating a `gap-4`. Both are
 /// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
 /// removes was measured in a real browser.
-const EXPECTED_CASES = 189;
+/// ...187 -> 190: the `trajectory` suite, for the flat ledger (`.scratch/system-reminder` 票 05).
+/// Two cases are pure -- the cut itself (`sectionsOf`: the prompt stands OUTSIDE turn one, a
+/// compaction BETWEEN turns) and what a folded turn takes with it (`rowsOf`: everything in
+/// the turn goes, the context cell included, and nothing that is in no turn moves). The third
+/// drives the real endpoint through `trajectoryFor`, because the wire -- a header line and
+/// batches spliced at their `from` -- is the one thing a hand-written ledger cannot show.
+const EXPECTED_CASES = 192;
 
 let total = 0;
 for (const suite of SUITES) {

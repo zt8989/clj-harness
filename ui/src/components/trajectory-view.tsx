@@ -1,4 +1,4 @@
-// The trajectory view: what the model had in front of it, turn by turn.
+// The trajectory view: what the model had in front of it, as a ledger of cells.
 //
 // ------------------------------------------------------------ why this is not a nicer chat
 //
@@ -20,18 +20,32 @@
 // and no pair of tabs: a row opens ITS OWN detail on the right, and clicking it again
 // (or the ×) closes the pane and gives the width back. That is the owner's rule, and it
 // is also the honest shape of the data -- there is no "the turn's system prompt" to draw
-// beside a turn, there is one item among twenty, and it is the one that was asked about.
+// beside a turn, there is one cell among twenty, and it is the one that was asked about.
 //
 // The two things a fixed pane would have shown are still reachable, because both of them
-// ARE items: the system message is the `system` row (first turn, and again whenever its
-// bytes change), and the tool table's SIGNATURE a call sent lives on that call's `assistant`
-// row -- the row is the call's answer, the signature is the call's request, and the `:call`
-// pointer the record gives us is what connects the two.
+// ARE cells: the system message is the `system` cell (in front of the first turn, and
+// again whenever its bytes change), and the tool table's SIGNATURE a call sent lives on
+// that call's `message` row -- the row is the call's answer, the signature is the call's
+// request, and the `call` pointer the record gives us is what connects the two.
 //
 // Order in the list is the RECORD's order, not the reference screenshot's.
 // `harness.edge.ag-ui/inbound` splices the opening blocks AFTER the system message and
 // before the client's messages, and appends the run's context as a trailing user message;
 // that order is what the model saw, so that order is what is drawn.
+//
+// ------------------------------------------------ a ledger, not a list of turns
+//
+// THE STRIP ABOVE IS CUT THE SAME WAY (dsh's reading): `turn-start` / `turn-end` bracket a
+// turn instead of wrapping it, so the session's system prompt stands OUTSIDE every turn --
+// it is what the turn was handed, not something the turn said -- and a compaction, which
+// the model never saw at all, sits `Between turns`. Cutting the ledger into sections is
+// `sectionsOf`'s one job, and both this list and the strip call it, so a mark and the row
+// it opens can never disagree about which turn they are in.
+//
+// COLLAPSE TURNS is the other half of that: a folded turn keeps its head and draws one
+// summary line, and EVERYTHING inside it goes away with it -- the injected context
+// included, which is the owner's rule (`.scratch/system-reminder`). The prompt does not
+// fold into anything, because it is in no turn.
 //
 // --------------------------------------------- when it asks, and what it costs to ask
 //
@@ -45,19 +59,26 @@
 // component for the `轨迹` tab alone, so the `对话` tab sends no trajectory request at
 // all -- the downlink carries the conversation and nothing else (ticket 06).
 //
-// THE ANSWER ARRIVES AS A STREAM. The route writes NDJSON, so each turn is drawn the
-// moment the fold reaches it instead of after the whole record has been folded -- which
-// is what 'the trajectory loads when it is asked for' looks like on the page.
+// THE ANSWER ARRIVES AS A STREAM. The route writes NDJSON, so each batch of cells is drawn
+// the moment the fold can hand it over instead of after the whole record has been folded --
+// which is what 'the trajectory loads when it is asked for' looks like on the page.
 import { type FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
 import type { TFunction } from "i18next";
-import { WrenchIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, WrenchIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { formatMillis, formatTime, formatTokens } from "@/lib/format";
 import { asLanguage } from "@/lib/language";
 import { onDownlinkOpen } from "@/lib/mux";
-import { type TrajectoryItem, type TrajectoryPayload, type TrajectoryTurn, trajectoryFor } from "@/lib/trajectory";
+import {
+  type TrajectoryCall,
+  type TrajectoryItem,
+  type TrajectoryPayload,
+  trajectoryFor,
+  sectionsOf,
+  rowsOf,
+} from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 import { KIND_HUE } from "@/components/trajectory-colors";
 import { type Mode, TrajectoryTimeline } from "@/components/trajectory-timeline";
@@ -87,7 +108,7 @@ const headline = (item: TrajectoryItem, t: Translate): string => {
       // A SPACE between the two: it is a name and its arguments, and `bash{"command":…}`
       // reads as one long identifier.
       return `${item.name ?? item.toolCallId} ${item.argsText ?? ""}`;
-    case "assistant":
+    case "message":
       if (item.text.trim() !== "") return preview(item.text);
       if (item.reasoning !== undefined && item.reasoning.trim() !== "")
         return `${t("blocks.reasoning")}: ${preview(item.reasoning)}`;
@@ -103,13 +124,14 @@ const headline = (item: TrajectoryItem, t: Translate): string => {
 ///
 /// THE KEY IS THE RECORD'S, THE WORD IS OURS: `item.kind` is the record's own discriminator
 /// -- it is also the key into the shared colour table below -- and it stays exactly that.
-/// What a reader reads is this table's entry, so a page in Chinese says 工具 where a page in
-/// English says `tool`; the record says `tool` either way.
+/// What a reader reads is this table's entry, so a page in Chinese says 助手 where a page in
+/// English says `assistant`; the record says `message` either way.
 const KIND_LABEL: Record<TrajectoryItem["kind"], (t: Translate) => string> = {
   system: (t) => t("kind.system"),
+  compacted: (t) => t("kind.compacted"),
   context: (t) => t("kind.context"),
   user: (t) => t("kind.user"),
-  assistant: (t) => t("kind.assistant"),
+  message: (t) => t("kind.message"),
   tool: (t) => t("kind.tool"),
 };
 
@@ -132,21 +154,21 @@ const Chip: FC<{ kind: TrajectoryItem["kind"] }> = ({ kind }) => {
   );
 };
 
-/// One row of the list. It CARRIES NO EXPANSION OF ITS OWN: opening a row means the
-/// detail pane, because two ways to see the same text (a folded body here, a pane there)
-/// is two places to keep in step.
+/// One row of the list, addressed by ITS OWN LEDGER INDEX (`item.index`) -- the same number
+/// a mark on the strip carries and the same one the detail pane is opened for. It CARRIES
+/// NO EXPANSION OF ITS OWN: opening a row means the detail pane, because two ways to see
+/// the same text (a folded body here, a pane there) is two places to keep in step.
 const ItemRow: FC<{
   item: TrajectoryItem;
-  index: number;
   selected: boolean;
   query: string;
   onSelect: () => void;
-}> = ({ item, index, selected, query, onSelect }) => {
+}> = ({ item, selected, query, onSelect }) => {
   const { t } = useTranslation("trajectory");
   const hit = query === "" || JSON.stringify(item).toLowerCase().includes(query);
 
   return (
-    <li data-slot="trajectory-item" data-kind={item.kind} data-index={index} hidden={!hit}>
+    <li data-slot="trajectory-item" data-kind={item.kind} data-index={item.index} hidden={!hit}>
       <button
         type="button"
         onClick={onSelect}
@@ -249,9 +271,9 @@ const Facts: FC<{ pairs: readonly (readonly [string, string | null])[] }> = ({ p
 /// set as a hash and the count, and grouping by the hash keeps the common case one list --
 /// two tables that differ only in a description group together, which is the point of the
 /// name set.
-const tablesOf = (turn: TrajectoryTurn): { calls: readonly number[]; count: number; key: string }[] => {
+const tablesOf = (calls: readonly TrajectoryCall[]): { calls: readonly number[]; count: number; key: string }[] => {
   const groups: { calls: number[]; count: number; key: string }[] = [];
-  for (const call of turn.calls ?? []) {
+  for (const call of calls) {
     if (call.toolsNamesHash === undefined) continue;
     const key = call.toolsNamesHash;
     const hit = groups.find((g) => g.key === key);
@@ -299,12 +321,12 @@ const ToolRow: FC<{ tool: unknown }> = ({ tool }) => {
   );
 };
 
-/// The tool list of one turn. THE TABLE ITSELF WHEN THE ITEM CARRIES IT: the system row's
-/// envelope keeps it (`:tools`), so a trajectory item is SELF-CONTAINED and this pane
+/// The tool list of one turn. THE TABLE ITSELF WHEN THE CELL CARRIES IT: the system row's
+/// envelope keeps it (`:tools`), so a trajectory cell is SELF-CONTAINED and this pane
 /// never has to go and pull a second record to find out what tools the run served. Falls
 /// back to the per-call envelope groups for a record written before the table moved to
 /// the envelope.
-const ToolList: FC<{ turn: TrajectoryTurn; tools?: readonly unknown[] }> = ({ turn, tools }) => {
+const ToolList: FC<{ calls?: readonly TrajectoryCall[]; tools?: readonly unknown[] }> = ({ calls, tools }) => {
   const { t } = useTranslation("trajectory");
   if (tools !== undefined && tools.length > 0) {
     return (
@@ -320,23 +342,23 @@ const ToolList: FC<{ turn: TrajectoryTurn; tools?: readonly unknown[] }> = ({ tu
       </div>
     );
   }
-  const tables = tablesOf(turn);
-  if (turn.calls === undefined) {
+  if (calls === undefined) {
     return (
       <p className="text-xs text-muted-foreground">
         {t("tools.predates")}
       </p>
     );
   }
+  const tables = tablesOf(calls);
   if (tables.length === 0) {
     return <p className="text-xs text-muted-foreground">{t("tools.noTable")}</p>;
   }
   return (
     <div data-slot="trajectory-tool-tables">
-      {tables.map(({ calls, count }) => (
-        <div key={calls.join("-")} className="mb-2">
+      {tables.map(({ calls: sent, count }) => (
+        <div key={sent.join("-")} className="mb-2">
           <p className="mb-1 text-[0.7rem] uppercase tracking-wide text-muted-foreground">
-            {t("call.sent", { count: calls.length, names: calls.join(", ") })} ·{" "}
+            {t("call.sent", { count: sent.length, names: sent.join(", ") })} ·{" "}
             {t("call.tools", { n: count })}
           </p>
           <p className="text-xs text-muted-foreground">{t("tools.notKept")}</p>
@@ -346,35 +368,39 @@ const ToolList: FC<{ turn: TrajectoryTurn; tools?: readonly unknown[] }> = ({ tu
   );
 };
 
-/// The clicked item, in full. ONE ITEM, ONE PANE: what it is, the whole of what it
+/// The clicked cell, in full. ONE CELL, ONE PANE: what it is, the whole of what it
 /// carries, and -- for the kinds that have them -- the facts the record states about it.
-/// WHICH OF A SYSTEM ITEM'S TWO HALVES IS SHOWING. Only a system item has two: the
+/// WHICH OF A SYSTEM CELL'S TWO HALVES IS SHOWING. Only a system cell has two: the
 /// prompt the model was given, and the tool table that went out with it. They are ONE
-/// subject with two faces -- the tools the run SERVED ride the item itself (the system row's
+/// subject with two faces -- the tools the run SERVED ride the cell itself (the system row's
 /// envelope `:tools`) -- so they share the pane as tabs rather than stacking, which would
 /// prompt under a wall of JSON.
 type SystemTab = "prompt" | "tools";
 
-const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () => void }> = ({
-  item,
-  turn,
-  onClose,
-}) => {
+const ItemDetail: FC<{
+  item: TrajectoryItem;
+  /// The turn this cell is in, nil for a cell that is in none (the prompt, a compaction),
+  /// and the calls its head carries: the model, timings, tokens and tool table a `call`
+  /// pointer resolves to live there, one fact in one place.
+  turn: number | null;
+  calls?: readonly TrajectoryCall[];
+  onClose: () => void;
+}> = ({ item, turn, calls, onClose }) => {
   const { t: tFormat, i18n } = useTranslation("format");
   const { t } = useTranslation("trajectory");
   const locale = asLanguage(i18n.language);
-  /// Reset per item by the `key` the caller gives this component, so clicking a system
+  /// Reset per cell by the `key` the caller gives this component, so clicking a system
   /// row always opens on the prompt and the tools are one deliberate click away.
   const [tab, setTab] = useState<SystemTab>("prompt");
-  /// The call this item belongs to, when the record pointed at one. It is where an
-  /// assistant row's model, timing, tokens and tool table come from: the item itself
+  /// The call this cell belongs to, when the record pointed at one. It is where a
+  /// `message` row's model, timing, tokens and tool table come from: the cell itself
   /// carries only the pointer.
   ///
-  /// `in` rather than a direct read: `call` is on the context, assistant and tool items
-  /// and NOT on system/user, so an unguarded `item.call` is a type error -- the type
+  /// `in` rather than a direct read: `call` is on the context, message and tool cells
+  /// and NOT on system/user/compacted, so an unguarded `item.call` is a type error -- the type
   /// system saying what the record says, that a system message belongs to no call.
   const callIndex = "call" in item ? item.call : undefined;
-  const call = callIndex === undefined ? undefined : turn.calls?.[callIndex];
+  const call = callIndex === undefined ? undefined : calls?.[callIndex];
 
   return (
     <aside
@@ -384,7 +410,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
         <Chip kind={item.kind} />
         <span className="truncate text-xs text-muted-foreground">
-          {t("turn.label", { n: turn.index })}
+          {turn === null ? "" : t("turn.label", { n: turn })}
           {item.kind === "tool" && item.name !== undefined ? ` · ${item.name}` : ""}
           {callIndex === undefined ? "" : ` · ${t("call.label", { n: callIndex })}`}
         </span>
@@ -399,7 +425,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
         </button>
       </div>
       {/* The two tabs, when there are two. Not a row of furniture for every kind: only
-          a system item has a second thing to show. */}
+          a system cell has a second thing to show. */}
       {item.kind === "system" && (
         <div
           data-slot="trajectory-detail-tabs"
@@ -440,7 +466,21 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
             <Block text={item.text} mono />
           </>
         )}
-        {item.kind === "system" && tab === "tools" && <ToolList turn={turn} tools={item.tools} />}
+        {item.kind === "system" && tab === "tools" && <ToolList calls={calls} tools={item.tools} />}
+
+        {item.kind === "compacted" && (
+          <>
+            <Facts
+              pairs={[
+                [t("facts.written"), item.at === undefined ? null : formatTime(item.at, locale)],
+                [t("facts.tokens"), item.tokens === undefined ? null : formatTokens(item.tokens)],
+                [t("facts.messages"), item.messages === undefined ? null : `${item.messages}`],
+                [t("facts.id"), item.id ?? null],
+              ]}
+            />
+            <Block text={item.text} />
+          </>
+        )}
 
         {item.kind === "context" && (
           <>
@@ -470,7 +510,7 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
           </>
         )}
 
-        {item.kind === "assistant" && (
+        {item.kind === "message" && (
           <>
             <Facts
               pairs={[
@@ -539,6 +579,55 @@ const ItemDetail: FC<{ item: TrajectoryItem; turn: TrajectoryTurn; onClose: () =
   );
 };
 
+/// The head of a turn: its number, and the switch that folds it. A COLLAPSED TURN KEEPS
+/// THIS LINE AND LOSES EVERYTHING ELSE -- the injected context included, which is the
+/// owner's rule: an injection is material for the turn it was handed to, so it goes away
+/// with it. `data-slot` is stable because the walkthrough measures it.
+const TurnHead: FC<{ turn: number; items: number; calls?: number; collapsed: boolean; onToggle: () => void }> = ({
+  turn,
+  items,
+  calls,
+  collapsed,
+  onToggle,
+}) => {
+  const { t } = useTranslation("trajectory");
+  const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
+  return (
+    <div className="flex items-baseline gap-1 border-y border-border bg-muted/40 px-2 py-1">
+      <button
+        type="button"
+        data-slot="trajectory-turn-toggle"
+        data-turn={turn}
+        aria-expanded={!collapsed}
+        onClick={onToggle}
+        className="flex items-baseline gap-1 rounded px-1 hover:bg-muted"
+      >
+        <Chevron className="size-3.5 shrink-0 self-center text-muted-foreground" aria-hidden="true" />
+        <span className="text-[0.7rem] font-medium">{t("turn.label", { n: turn })}</span>
+      </button>
+      <span className="text-[0.7rem] text-muted-foreground" data-slot="trajectory-turn-summary">
+        {collapsed
+          ? t("summary.turn", { items, calls: calls ?? 0 })
+          : `${t("turn.items", { n: items })}${calls === undefined ? "" : ` · ${t("turn.calls", { n: calls })}`}`}
+      </span>
+    </div>
+  );
+};
+
+/// The heading a run of cells that belong to no turn wears. It is a seam, not a turn, and
+/// the word is dsh's: `Between turns`.
+const BetweenHead: FC = () => {
+  const { t } = useTranslation("trajectory");
+  return (
+    <div
+      data-slot="trajectory-between"
+      className="border-y border-border bg-muted/40 px-3 py-1 text-[0.7rem] font-medium text-muted-foreground"
+    >
+      {t("between.label")}
+    </div>
+  );
+};
+
 export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("trajectory");
   /// WHETHER A RUN IS IN FLIGHT is read off the runtime here, because the header the stream
@@ -547,9 +636,12 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
   /// why this component -- not the app shell above it -- owns it.
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const [payload, setPayload] = useState<TrajectoryPayload | null>(null);
-  /// WHICH ROW IS OPEN, as (turn, position in that turn). NOTHING IS OPEN BY DEFAULT:
-  /// the list is the page, and the pane is something a reader asks for.
-  const [selected, setSelected] = useState<{ turn: number; index: number } | null>(null);
+  /// WHICH CELL IS OPEN, BY ITS LEDGER INDEX. NOTHING IS OPEN BY DEFAULT: the list is the
+  /// page, and the pane is something a reader asks for.
+  const [selected, setSelected] = useState<number | null>(null);
+  /// WHICH TURNS ARE FOLDED, by turn number. EMPTY IS THE DEFAULT -- every turn open, the
+  /// same way dsh starts.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(() => new Set());
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<Mode>("duration");
 
@@ -565,7 +657,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
       void trajectoryFor(
         threadId,
         (soFar) => {
-          // A late turn from a previous session must not land on this one.
+          // A late batch from a previous session must not land on this one.
           if (live) setPayload(soFar);
         },
         controller.signal,
@@ -595,28 +687,38 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
     };
   }, [threadId, isRunning]);
 
+  /// THE CUT THE STRIP MAKES TOO (`sectionsOf`): one place decides which cells are in a
+  /// turn, so a mark and the row it opens can never disagree.
+  const sections = useMemo(
+    () => (payload === null ? [] : sectionsOf(payload.cells)),
+    [payload],
+  );
+  const turns = useMemo(
+    () => sections.flatMap((section) => (section.kind === "turn" ? [section.turn] : [])),
+    [sections],
+  );
+  /// EVERY ROW THE LIST DRAWS, in order, with the turn it is in and that turn's calls --
+  /// flattened from the same cut, because the pane is opened by cell index and has to be
+  /// able to resolve one.
+  const rows = useMemo(() => rowsOf(sections, collapsed), [sections, collapsed]);
+
   /// A CLICK ON THE STRIP OPENS THE SAME THING A CLICK ON THE ROW DOES -- so when one
   /// comes from up there, the row it names must be brought into view: otherwise the pane
   /// fills in and the reader has nothing to compare it against.
   const listRef = useRef<HTMLOListElement | null>(null);
   useEffect(() => {
     if (selected === null) return;
-    const row = listRef.current?.querySelector(
-      `[data-slot='trajectory-turn'][data-turn='${selected.turn}'] [data-slot='trajectory-item'][data-index='${selected.index}']`,
-    );
+    const row = listRef.current?.querySelector(`[data-slot='trajectory-item'][data-index='${selected}']`);
     row?.scrollIntoView({ block: "nearest" });
   }, [selected]);
 
-  const turns = payload?.turns ?? [];
-  /// The open row, resolved against the CURRENT payload: a refetch can change what the
-  /// record holds, and a pane describing an item that is no longer in it would be the one
+  /// The open cell, resolved against the CURRENT payload: a refetch can change what the
+  /// record holds, and a pane describing a cell that is no longer in it would be the one
   /// kind of lie this view must not tell. Failing to resolve closes the pane instead.
-  const open = useMemo(() => {
-    if (selected === null) return null;
-    const turn = turns.find((candidate) => candidate.index === selected.turn);
-    const item = turn?.items[selected.index];
-    return turn === undefined || item === undefined ? null : { turn, item };
-  }, [selected, turns]);
+  const open = useMemo(
+    () => (selected === null ? null : (rows.find((row) => row.item.index === selected) ?? null)),
+    [selected, rows],
+  );
 
   if (payload === null) {
     return (
@@ -636,6 +738,14 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
     );
   }
 
+  const toggle = (turn: number): void =>
+    setCollapsed((was) => {
+      const next = new Set(was);
+      if (next.has(turn)) next.delete(turn);
+      else next.add(turn);
+      return next;
+    });
+
   return (
     <div data-slot="trajectory-view" className="flex h-full min-h-0 min-w-0 flex-col">
       <TrajectoryTimeline
@@ -643,7 +753,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
         mode={mode}
         onMode={setMode}
         open={selected}
-        onOpen={(target) => setSelected(target)}
+        onOpen={(index) => setSelected(index)}
       />
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
         <input
@@ -662,6 +772,26 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
             {t("header.incomplete")}
           </span>
         )}
+        {/* THE TWO VERBS ARE THE WHOLE TOOLBAR, and they act on the LEDGER rather than on
+            one turn: folding a turn by hand is the chevron on its head. */}
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            data-slot="trajectory-collapse-turns"
+            onClick={() => setCollapsed(new Set(turns.map((turn) => turn.index)))}
+            className="rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            {t("toolbar.collapseTurns")}
+          </button>
+          <button
+            type="button"
+            data-slot="trajectory-expand-turns"
+            onClick={() => setCollapsed(new Set())}
+            className="rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            {t("toolbar.expandTurns")}
+          </button>
+        </div>
       </div>
       {/* NO GRID UNTIL SOMETHING IS OPEN: with nothing selected the list gets the whole
           width, which is what "by default it is not shown" means in pixels. */}
@@ -677,35 +807,54 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
         <ol
           ref={listRef}
           className="h-full min-h-0 min-w-0 overflow-y-auto overflow-x-hidden"
-          data-slot="trajectory-turns"
+          data-slot="trajectory-cells"
         >
-          {turns.map((turn) => (
-            <li key={turn.index} data-slot="trajectory-turn" data-turn={turn.index}>
-              <div className="border-y border-border bg-muted/40 px-3 py-1">
-                <span className="text-[0.7rem] font-medium">{t("turn.label", { n: turn.index })}</span>
-                <span className="ml-2 text-[0.7rem] text-muted-foreground">
-                  {t("turn.items", { n: turn.items.length })}
-                  {turn.calls === undefined ? "" : ` · ${t("turn.calls", { n: turn.calls.length })}`}
-                </span>
-              </div>
-              <ul>
-                {turn.items.map((item, i) => (
-                  <ItemRow
-                    key={`${item.kind}-${i}`}
-                    item={item}
-                    index={i}
-                    query={query.toLowerCase()}
-                    selected={selected?.turn === turn.index && selected.index === i}
-                    onSelect={() =>
-                      setSelected((was) =>
-                        was?.turn === turn.index && was.index === i ? null : { turn: turn.index, index: i },
-                      )
-                    }
-                  />
-                ))}
-              </ul>
-            </li>
-          ))}
+          {sections.map((section, i) => {
+            if (section.kind === "prompt" || section.kind === "between") {
+              const cells = section.kind === "prompt" ? [section.cell] : section.cells;
+              return (
+                <li key={`${section.kind}-${cells[0]?.index ?? i}`} data-slot={`trajectory-${section.kind}`}>
+                  {section.kind === "between" && <BetweenHead />}
+                  <ul>
+                    {cells.map((cell) => (
+                      <ItemRow
+                        key={cell.index}
+                        item={cell}
+                        query={query.toLowerCase()}
+                        selected={selected === cell.index}
+                        onSelect={() => setSelected((was) => (was === cell.index ? null : cell.index))}
+                      />
+                    ))}
+                  </ul>
+                </li>
+              );
+            }
+            const isCollapsed = collapsed.has(section.turn.index);
+            return (
+              <li key={section.turn.index} data-slot="trajectory-turn" data-turn={section.turn.index}>
+                <TurnHead
+                  turn={section.turn.index}
+                  items={section.turn.cells.length}
+                  calls={section.turn.calls?.length}
+                  collapsed={isCollapsed}
+                  onToggle={() => toggle(section.turn.index)}
+                />
+                {!isCollapsed && (
+                  <ul>
+                    {section.turn.cells.map((cell) => (
+                      <ItemRow
+                        key={cell.index}
+                        item={cell}
+                        query={query.toLowerCase()}
+                        selected={selected === cell.index}
+                        onSelect={() => setSelected((was) => (was === cell.index ? null : cell.index))}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </li>
+            );
+          })}
           {query !== "" && (
             <li className="px-3 py-2 text-xs text-muted-foreground">
               {t("list.hidden")}
@@ -714,9 +863,10 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
         </ol>
         {open !== null && (
           <ItemDetail
-            key={selected === null ? "none" : `${selected.turn}-${selected.index}`}
+            key={`${open.item.index}`}
             item={open.item}
             turn={open.turn}
+            calls={open.calls}
             onClose={() => setSelected(null)}
           />
         )}
