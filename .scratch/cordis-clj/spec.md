@@ -45,8 +45,16 @@ keyword 键的注册表、依赖由 `:inject` 声明、每个 effect 返回一�
 | **ctx** | `:apply` 收到的那个 **map**，四把钥匙：`get-service` / `register-service!` / `effect` / `on` | 容器、注入器、环境 |
 | **PENDING** | 「依赖还没齐，我不动」——`apply` 一行没跑，但注册表里看得见它 | 待加载、未就绪 |
 | **waterfall** | around 中间件式的 dispatch：listener 收 `(…, next)`，不调 `next` 就短路 | 洋葱模型、管道 |
+| **`:optional`** | 声明一个「不在也不影响我活不活」的服务：可以直接用，但**不参与生命周期** | 弱依赖、软依赖、可选服务 |
+| **`:when`** | 按 ctx **事实**决定装不装的那根轴。不成立与「依赖未齐」同态（PENDING），翻转即装即撤 | 开关、flag、开关项 |
+| **事实**（facts） | 谓词读的那份数据（平台、这台机器有哪只壳、配置开关）——喂进去就能翻转，所以可测 | 环境、全局状态、运行时变量 |
+| **子插件** | 挂在父插件下的一根 fiber：自己的依赖与 disposer 栈，随父走 | 子模块、子组件、派生插件 |
 | **热重载** | 同一个 id 用新定义换掉旧 fiber：旧效果撤净、注册表不重置 | 重载、刷新、重启 |
 
+`:inject` 与 `:optional` 的语义照 Cordis 的官方文档（[服务与依赖](https://cordis.moe/zh-CN/guide/essential/service.html)）：
+必需依赖的值变 truthy 之前函数体不加载、值一变即回滚、仍 truthy 则回滚完再重新加载；`optional` 不参与
+生命周期。**`:when` 是本仓加的**——Cordis 核心只认「服务的值」，平台这类条件在 dsh 那边靠配置行与 patch 层，
+而本目录决定 4 明确不要 patch 层，所以那条空白由运行时补（票 17、18）。
 `ctx` 是 map 而不是对象，这条不是风格：本仓的立场是「能用数据说清就别立类型」，fiber 也因此天生
 可以在 REPL 里直接看、直接 `pr-str`。
 
