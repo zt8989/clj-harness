@@ -113,6 +113,15 @@ instructions/skills 归 `ctx.systemPrompt` 那一带）。**config-merge 先落�
 `bind!` 的 sqlite commit）、`harness.cap.mcp-wired-test`（8 条 run 用例，基线上同样 8 条）、
 `cd ui && npm test`（`SQLITE_BUSY` + 120s 超时，基线同样红）。
 
+**我动过的测试全绿**（22 个命名空间，含 `mcp-wired`）：**529 tests / 9455 assertions，0 失败**。
+
+其中 `harness.cap.mcp-wired-test` 的 `a-run-sees-a-servers-tools-and-calls-one` 有过一次**我造成**的红：
+它断言「这次 run 的连接记在案上」，而 `mcp/note-outcome!` 只在状态是**新闻**时才排队——如果服务器在 run
+之前就连上了（`mcp/status` 读到 `:connected`、事件却是 0），那行就属于上一次连接、并且已经随测试开头
+删除的那份记录一起没了。**这一行改在测试里**：删记录之后补一次 `mcp/shutdown!`，把「记录为空**且连接
+缓存为空**」这个前提写成注释（断言一个字没改）。**没有钉下**「run 之前是谁先连上的」——那是本次之外
+的时序问题，只在这里记一笔。
+
 **前端**：`npm run typecheck`、`npm run build` 绿。
 
 **合并之后补的两件走查（2026-09-30）**：
