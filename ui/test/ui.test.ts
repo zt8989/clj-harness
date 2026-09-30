@@ -534,10 +534,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// pins the order `lib/thread-messages.ts` now guarantees, and that a conversation with no park
 /// (or one already in that order) is passed through untouched.
 ///
-/// ...189 -> 194: the settings panel's SESSION PAGE -- `.scratch/session-lifecycle` ticket 02, the
+/// ...189 -> 195: the settings panel's SESSION PAGE -- `.scratch/session-lifecycle` ticket 02, the
 /// UI half of the backend ticket beside it, and the row that has to LOOK ticked (2026-09-30: an
 /// invisible selection is a selection somebody deletes the wrong thing from -- that is the fifth
-/// case, and the one assertion here that is a marker rather than a sentence). The other four
+/// case, and the one assertion here that is a marker rather than a sentence -- and the FILTER
+/// (all/archived/unarchived) added the same day, whose case reads which ROWS are drawn. The other four
 /// are SENTENCES, which is why they are renders rather than source reads: what a row is called
 /// and the two states (`已归档` / `运行中`) that decide what a verb does; the three verbs' words
 /// in both languages, with the destructive one OFF while a selected conversation is running (the
@@ -555,7 +556,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// is empty until a browser mounts one: an open dialog renders as nothing in this run. What no
 /// render can see -- that a press really sends the batch, that the listing is read AGAIN
 /// afterwards, and that a deleted row leaves it -- is the browser walkthrough's half.
-const EXPECTED_CASES = 194;
+const EXPECTED_CASES = 195;
 
 let total = 0;
 for (const suite of SUITES) {
