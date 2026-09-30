@@ -51,7 +51,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
 import { BASELINE_LABELS, DefinitionButtons } from "@/components/subagent-list";
-import { SessionsBatchPanel } from "@/components/session-management";
+import { SessionsBatchPanel, type SessionFilter } from "@/components/session-management";
 import {
   Dialog,
   DialogContent,
@@ -1684,6 +1684,10 @@ const SessionsPage: FC = () => {
   const [rowErrors, setRowErrors] = useState<Readonly<Record<string, string>>>({});
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  /// WHICH BUCKET THE LIST IS SHOWING. The type is `session-management`'s own `SessionFilter`
+  /// rather than a second spelling of the three ids here: the state and the prop it feeds are one
+  /// fact, and a copy of it is a copy that can drift.
+  const [filter, setFilter] = useState<SessionFilter>("all");
 
   /// THE PULL, in one place: the read on mount and the read after every write are the same read.
   ///
@@ -1721,13 +1725,18 @@ const SessionsPage: FC = () => {
       was.includes(threadId) ? was.filter((id) => id !== threadId) : [...was, threadId],
     );
 
-  /// SELECT ALL, or clear when everything already is -- one control for both, because the box it
-  /// draws already says which of the two it is.
-  const toggleAll = () =>
+  /// SELECT EVERY ROW IN VIEW, or untick those -- one control for both, because the box it draws
+  /// already says which of the two it is.
+  ///
+  /// IT TAKES THE IDS RATHER THAN READING `sessions`, and that is the whole of the filter's
+  /// integration here: 'all' now means 'all of what is in view'. A box that ticked rows the person
+  /// cannot see is how a batch takes conversations nobody looked at -- and unticking is restricted
+  /// the same way, so a selection made under one bucket survives a look at another.
+  const toggleAll = (threadIds: readonly string[]) =>
     setSelected((was) =>
-      sessions.length > 0 && sessions.every((session) => was.includes(session.threadId))
-        ? []
-        : sessions.map((session) => session.threadId),
+      threadIds.length > 0 && threadIds.every((id) => was.includes(id))
+        ? was.filter((id) => !threadIds.includes(id))
+        : [...was, ...threadIds.filter((id) => !was.includes(id))],
     );
 
   /// THE ONE WRITE. It answers nothing; what it leaves on screen is the state the server came
@@ -1794,6 +1803,8 @@ const SessionsPage: FC = () => {
   return (
     <SessionsBatchPanel
       sessions={sessions}
+      filter={filter}
+      onFilter={setFilter}
       selected={selected}
       errors={rowErrors}
       busy={busy}

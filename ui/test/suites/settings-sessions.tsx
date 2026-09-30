@@ -118,6 +118,8 @@ function panel(language: Language, overrides: Partial<SessionsBatchProps> = {}):
     failure: null,
     onToggle: () => {},
     onToggleAll: () => {},
+    filter: "all",
+    onFilter: () => {},
     onArchive: () => {},
     onDelete: () => {},
     onConfirmDelete: () => {},
@@ -311,6 +313,49 @@ const cases: Case[] = [
       // so the attribute is asked for BY NAME rather than looked for as a word (`hasAttr`'s own
       // reason, one state over).
       expect(hasAttr(row(session(), "en"), "settings-session-row", "data-selected")).toBe(false);
+    },
+  },
+  {
+    name: "the-filter-shows-one-bucket-and-says-how-many-are-in-it",
+    run: async () => {
+      // THE FILTER IS THE PAGE'S OWN INSTRUMENT (2026-09-30): an archived conversation is one
+      // somebody is done with, and 'show me only those' is how a hundred of them get cleaned up
+      // without reading a hundred rows. What a render can see of it is three things: WHICH ROWS a
+      // bucket draws, that the bucket in view says so (`aria-pressed`, the marker the settings nav
+      // uses for the page it is on), and the counts beside each label.
+      const kept = session({ threadId: "kept", firstUserText: "还留着的" });
+      const filed = session({ threadId: "filed", archived: true, firstUserText: "归档了的" });
+
+      // THE ROWS, asked for by the id each one carries (`data-thread-id` is on the row and nowhere
+      // else, and 'is this drawn at all' is the question -- the same way this file already reads a
+      // whole panel for its error slot).
+      const all = panel("en", { sessions: [kept, filed] });
+      expect(all).toContain('data-thread-id="kept"');
+      expect(all).toContain('data-thread-id="filed"');
+
+      const archivedOnly = panel("en", { sessions: [kept, filed], filter: "archived" });
+      expect(archivedOnly).toContain('data-thread-id="filed"');
+      expect(archivedOnly).not.toContain('data-thread-id="kept"');
+
+      const openOnly = panel("en", { sessions: [kept, filed], filter: "unarchived" });
+      expect(openOnly).toContain('data-thread-id="kept"');
+      expect(openOnly).not.toContain('data-thread-id="filed"');
+
+      // WHICH ONE IS IN VIEW IS SAID ON THE CONTROL, not left to be inferred from the rows.
+      expect(attrOf(archivedOnly, "settings-sessions-filter-archived", "aria-pressed")).toBe("true");
+      expect(attrOf(archivedOnly, "settings-sessions-filter-all", "aria-pressed")).toBe("false");
+
+      // A BUCKET WITH NOTHING IN IT SAYS THAT, and does not borrow the sentence about the home:
+      // 'nothing matches this filter' and 'this home has no conversations' are different facts, and
+      // only one of them is about the home.
+      expect(textOf(panel("en", { sessions: [kept], filter: "archived" }), "settings-sessions-empty-view")).toBe(
+        "No conversation matches this filter.",
+      );
+
+      // AND THE COUNTS, which are the other half of the answer somebody comes here for.
+      expect(textOf(all, "settings-sessions-filter-all")).toContain("2");
+      expect(textOf(all, "settings-sessions-filter-archived")).toContain("1");
+      expect(textOf(all, "settings-sessions-filter-unarchived")).toContain("1");
     },
   },
 ];

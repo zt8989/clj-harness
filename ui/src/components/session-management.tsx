@@ -37,6 +37,7 @@
 // is also what makes the delete's off-state and the confirmation's sentence assertable.
 import { type FC } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -187,6 +188,28 @@ export const DeleteSessionsConfirmBody: FC<{
   );
 };
 
+/// WHICH BUCKET THE LIST SHOWS. Three, and the third is the one this page exists for: an archived
+/// conversation is one somebody is done with, and 'show me only those' is how a hundred of them get
+/// cleaned up without reading a hundred rows.
+export type SessionFilter = "all" | "archived" | "unarchived";
+
+type Translate = TFunction<"settings">;
+type ShellTranslate = TFunction<"shell">;
+
+/// THE THREE BUCKETS, ONE TABLE -- the shape `settings-panel.tsx`'s `PAGES` has, and for the same
+/// reason: the ids, the labels and the order are one fact, and a case about the filter reads the
+/// table the page draws. THE LABELS ARE THE SHELL CATALOG'S WHERE ONE ALREADY EXISTS: 已归档 is
+/// `session.archived`, the key the row's own badge reads, so a bucket and a badge cannot end up
+/// calling one state two things.
+const FILTERS: readonly {
+  id: SessionFilter;
+  label: (t: Translate, tShell: ShellTranslate) => string;
+}[] = [
+  { id: "all", label: (t) => t("sessions.filterAll") },
+  { id: "archived", label: (_t, tShell) => tShell("session.archived") },
+  { id: "unarchived", label: (t) => t("sessions.filterUnarchived") },
+];
+
 /// What the panel needs to draw. Every callback is the page's: this component decides nothing about
 /// the store.
 export type SessionsBatchProps = {
@@ -194,6 +217,12 @@ export type SessionsBatchProps = {
   /// listing's own order (`listSidebar` puts the newest first, and the panel keeps that -- a
   /// regrouping here would be a second answer to "in what order").
   sessions: readonly SessionSummary[];
+  /// WHICH BUCKET IS IN VIEW. THE PANEL DERIVES THE ROWS FROM IT (`visible` below) rather than being
+  /// handed a second, already-filtered list: two lists that must agree are two lists that can
+  /// disagree, and a list that no longer matches what is drawn is what a wrong deletion is made of.
+  filter: SessionFilter;
+  /// Pick a bucket. The page owns the value, for the same reason it owns the selection.
+  onFilter: (filter: SessionFilter) => void;
   /// THE IDS THE PERSON HAS TICKED. A selection is a set of IDS rather than of rows, so a re-read
   /// that changes a row's facts -- archived, running -- does not silently drop it.
   selected: readonly string[];
@@ -207,7 +236,11 @@ export type SessionsBatchProps = {
   /// What the last batch, AS A WHOLE, could not do -- a refused request rather than a refused row.
   failure: string | null;
   onToggle: (threadId: string) => void;
-  onToggleAll: () => void;
+  /// SELECT EVERY ROW IN VIEW, or untick those -- IT IS HANDED THE IDS rather than reaching for
+  /// `sessions`, because 'all' now means 'all of what this filter shows': a box that ticked rows the
+  /// person cannot see is how a batch takes conversations nobody looked at. Unticking is the same
+  /// restriction, so a selection made under one filter survives a look at another.
+  onToggleAll: (threadIds: readonly string[]) => void;
   /// ONE VERB, TWO DIRECTIONS (the same shape `setArchived` has): `true` files the selection away,
   /// `false` brings it back.
   onArchive: (archived: boolean) => void;
@@ -220,6 +253,8 @@ export type SessionsBatchProps = {
 
 export const SessionsBatchPanel: FC<SessionsBatchProps> = ({
   sessions,
+  filter,
+  onFilter,
   selected,
   errors,
   busy,
@@ -235,7 +270,21 @@ export const SessionsBatchPanel: FC<SessionsBatchProps> = ({
   const { t } = useTranslation("settings");
   const { t: tShell } = useTranslation();
   const chosen = sessions.filter((session) => selected.includes(session.threadId));
-  const allSelected = sessions.length > 0 && chosen.length === sessions.length;
+  /// THE ROWS THIS BUCKET SHOWS, derived from the one list the page handed over.
+  const visible =
+    filter === "archived"
+      ? sessions.filter((session) => session.archived)
+      : filter === "unarchived"
+        ? sessions.filter((session) => !session.archived)
+        : sessions;
+  /// HOW MANY ARE IN EACH BUCKET. It is the question this row answers -- 'how many are there to
+  /// clean up' -- and the sidebar's archived block counts itself the same way.
+  const counts: Record<SessionFilter, number> = {
+    all: sessions.length,
+    archived: sessions.filter((session) => session.archived).length,
+    unarchived: sessions.filter((session) => !session.archived).length,
+  };
+  const allSelected = visible.length > 0 && visible.every((session) => selected.includes(session.threadId));
   const nothingChosen = chosen.length === 0;
   /// WHETHER A RUN IS GOING FOR ANY OF THE CHOSEN, which is what turns the delete off. THE RULE IS
   /// `lib/session-status.ts`'S (`blocked`) rather than a boolean read here, because the sidebar
@@ -284,13 +333,38 @@ export const SessionsBatchPanel: FC<SessionsBatchProps> = ({
             // opaque background is the point rather than decoration -- rows pass behind it.
             className="bg-popover sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-md border p-2"
           >
+            {/* THE FILTER IS A VIEW, NOT A VERB, and it sits in this bar because this bar is the one
+                thing on the page that STAYS PUT (see the note above): choosing a bucket is what somebody
+                does while reading rows, and a control that scrolls away is one they scroll back for.
+                Each button carries its count, and the count is not decoration -- 'how many archived ones
+                are there' is the question that brings somebody to this page at all. */}
+            <div data-slot="settings-sessions-filter" className="flex items-center gap-1">
+              {FILTERS.map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  data-slot={`settings-sessions-filter-${id}`}
+                  aria-pressed={filter === id}
+                  disabled={busy}
+                  onClick={() => onFilter(id)}
+                  className={
+                    filter === id
+                      ? "bg-accent text-accent-foreground rounded-md px-2 py-1 text-xs"
+                      : "text-muted-foreground hover:bg-accent/40 rounded-md px-2 py-1 text-xs"
+                  }
+                >
+                  {label(t, tShell)}
+                  <span className="ml-1 text-[10px] opacity-70">{counts[id]}</span>
+                </button>
+              ))}
+            </div>
             <label className="flex items-center gap-1.5 text-xs">
               <input
                 type="checkbox"
                 data-slot="settings-sessions-select-all"
                 checked={allSelected}
                 disabled={busy}
-                onChange={onToggleAll}
+                onChange={() => onToggleAll(visible.map((session) => session.threadId))}
               />
               <span data-slot="settings-sessions-select-all-label">
                 {t("sessions.selectAll")}
@@ -330,7 +404,18 @@ export const SessionsBatchPanel: FC<SessionsBatchProps> = ({
           </div>
 
           <ul data-slot="settings-sessions-list" className="flex flex-col gap-1">
-            {sessions.map((session) => (
+            {/* NOTHING IN THIS BUCKET IS NOT 'THIS HOME HAS NONE' -- the two sentences say different
+                things and only one of them is about the home (`sessions.empty` above is the other).
+                The bar is drawn above either way, so the way out is always on screen. */}
+            {visible.length === 0 && (
+              <li
+                data-slot="settings-sessions-empty-view"
+                className="text-muted-foreground px-0.5 text-xs"
+              >
+                {t("sessions.emptyView")}
+              </li>
+            )}
+            {visible.map((session) => (
               <SessionBatchRow
                 key={session.threadId}
                 session={session}
