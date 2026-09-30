@@ -68,7 +68,21 @@ Young GC，正是它）。
 **验收**：`harness.edge.replay-test` 40 tests / 224 assertions 绿；`harness.edge.http-test`
 121 tests / 1330 assertions 绿（窗口路线行为未变）。
 
-## 票 02（未落）：投影只做监听，不要再盲钟
+## 票 02（**已落地**）：投影只做监听，不要再盲钟
+
+**做了什么**：`projection/start!` 不再建 `scheduleAtFixedRate`，而是装一个进程级监听器
+（`harness.infra.stream/listen-every!`）——写一行就 `mark-dirty!` 那个会话（两次 `swap!`，在写线程上就地
+返回，不碰库、不碰日志树、不开连接），短去抖（`coalesce-ms` = 250ms）之后跑一轮，**只投影被标脏的那些
+会话**（`listed-sessions` 多一个带 `ids` 的 arity：`WHERE s.id IN (?,…)`，仍是一条连接、一条查询）。
+
+**一行不等于一轮**：去抖，不是每行一次事务；跑一轮期间落下的标记归下一轮（`finally` 里复查）；一轮抛了
+（比如库被锁）把取走的标记放回去再排一次，不静默丢行。`project!`（整轮）= `(project-round! nil)`，
+`rebuild!` / `lag` 形状不变。`start!` 本身**不跑任何 pass**，所以空闲进程连一轮都不跑；停法仍跟着 server 的
+teardown，而且会**摘掉自己的监听器**（否则一次 run 里上百个 server 会留下上百个监听器）。
+
+**放弃了什么（写在 `start!` 的 docstring 里）**：上一个进程写过、还没投影就停了的那一行，没有人再摇铃，
+要等这个会话的下一次写入才被带上——`read-session!` 从 offset 读到文件尾，所以下一行会把它一起补进来。
+要立刻当前就 `project!` / `rebuild!`。
 
 **现状**：`harness.edge.projection/start!` 用 `interval-ms = 2000` 的 `scheduleAtFixedRate` 跑
 `project!`，而 `project!` 每一轮都要 `listed-sessions`（一条查询）+ **对 263 个会话逐个 `log-for` +
@@ -88,6 +102,15 @@ Young GC，正是它）。
 
 **验收**：空闲且无人写作时的投影 CPU 归零（当前 ~5% 常驻）；有写入时只投影写过的那个会话；
 `harness.edge.projection-test` 保持绿。
+
+**一次偶发的红，如实记在这里。** `projection-test` + `http-test` + `sessions-test` 放在一次 run 里跑，
+第一次 168 条里有 1 条红（`http_test.clj:6491`，
+`a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read`——一条通篇 `until … 5000` 的竞态用
+例）；同一条命令再跑一次全绿（168 / 1530，0 失败），`projection-test` + `http-test` 两件一起也全绿
+（134 / 1392）。**没有复现，所以没有定论。** 如果它再红，第一嫌疑是新的触发让一次 run 期间的 store 轮次
+更密（旧盲钟每 2 秒一轮，新触发是每段写入后 250ms 一轮），与 run 自己的落地写争同一把 sqlite 写锁，
+而那条用例的期限正好是 5 秒（= 库的 busy timeout）。要查就从「投影的写能不能让路」入手：投影是**允许落后**
+的一份拷贝（ADR 0008 决策 2），给它的写一个更短的 busy timeout，比让 run 的落地等它更合规矩。
 
 ## 另一处（顺手指出的，不属本族）
 

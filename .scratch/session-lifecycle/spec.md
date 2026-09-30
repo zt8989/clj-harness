@@ -48,7 +48,18 @@
 **验收**：`harness.edge.http-test` 123 tests / 1346 assertions 绿，含两条新用例
 （批量归档逐行成败；删除把记录、锚点、sessions 行都收走，再删一次按名字拒绝）。
 
-## 票 02（未落）：设置界面里的批量会话管理
+## 票 02（**已落地**）：设置界面里的批量会话管理
+
+**做了什么**：设置面板加了「会话」页（`settings-panel.tsx` 的 `PAGES` + `SessionsPage`），列表来自侧栏同一个
+`listSidebar`（不另造接口），逐行一个复选框 + 全选，三个批量动词（归档 / 取消归档 / 删除），删除走确认框。
+画的部分单独成 `components/session-management.tsx`，理由写在它的文件头：设置面板 import 了 `lib/i18n.ts`
+（加载即碰 `document`），而无 DOM 的 UI 用例要能渲染这些句子；`DeleteSessionsConfirmBody` 再分一层，因为
+Radix 的 portal 在无 DOM 的 run 里渲染成空串。
+
+**一个动作一套说法**：归档 / 取消归档 / 已归档 / 运行中 读的是 `shell` 目录里侧栏已经在用的四个 key，
+只有本页自己的句子（说明、全选、删除与它的确认框）进 `settings` 目录——同一屏上同一个动作两种叫法就是这样来的。
+失败按行显示**服务器原句**（不翻译），写完重读一次存量（推送之外的补一次，`docs/rules/panel-data.md`）。
+删除按钮在选中集合里有运行中的会话时置灰（`lib/session-status.ts` 的既有规矩，服务器那边也会按名字拒）。
 
 **要做**：`settings-panel.tsx` 的 `PAGES` 加一页（现四页：general / models / mcp / subagents），
 列出会话、支持多选、**批量归档 / 取消归档 / 删除**（删除要有确认对话框——今天唯一的确认框是
@@ -73,4 +84,10 @@
   `docs/rules/panel-data.md` 的规矩）。
 
 **验收**：`cd ui && npm run typecheck && npm test && npm run build`；`node scripts/dev.mjs --scripted`
+
+**走查发现、本票没做、建议另开一票**：删掉的如果正是**屏幕上正读着的那条会话**，面板把它删了之后页面仍然停在
+那条已经不存在的会话上（`localStorage` 里记的还是它的 id，`GET /api/projects` 已经不再列它，主栏还画着它、
+输入框还能发，发出去只会吃 run edge 的「未知会话」拒绝）。侧栏对「归档掉正在读的那条」有明确规矩
+（`movesThePage`），而这个面板没有：`SettingsPanel` 只拿到 `open/onOpenChange/threadId`，没有让页面挪窝的回调，
+推送也不会替它挪。形状大概是「面板把删成功的 id 交回 `sidebar.tsx`，由侧栏像 archive 那样挪一步」。
 起服务、自己开浏览器走一趟（设置页点开、选几行、归档、删一条、确认框、以及删除后列表少了一行）。

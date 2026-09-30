@@ -20,7 +20,8 @@
     "general": "General",
     "models": "Models",
     "mcp": "MCP servers",
-    "subagents": "子agent"
+    "subagents": "子agent",
+    "sessions": "会话"
   },
   "panel": {
     "title": "设置",
@@ -174,5 +175,19 @@
     "errorNote": "什么都没写——config.edn 的 :session 与改之前一模一样。",
     "problemLead": "config.edn 的 :session :subagents 块里有认不下来的东西：",
     "problemTail": " 这个会话用的还是那两个内置的。"
+  },
+  "sessions": {
+    "title": "会话",
+    "hint": "这一家留着的全部会话，都在这份清单里。勾中要处理的，再一次性归档、取消归档或删除；服务器拒了哪一条，就在哪一条下面说原因。",
+    "selectAll": "全选",
+    "delete": "删除",
+    "deleteRunning": "选中的会话还在跑——等它结束再删。",
+    "empty": "这一家还没有会话。",
+    "loading": "正在读会话…",
+    "deleteTitle": "删除这些会话？",
+    "deleteBody": "删除会把会话从这一家彻底收走：它的记录（jsonl 文件）、锚点、待办、认领一起走。归档只是把它藏起来。",
+    "deleteCount_other": "{{count}} 条会话会被删掉。",
+    "deleteCancel": "留着",
+    "deleteSubmit": "彻底删除"
   }
 }

@@ -6867,6 +6867,14 @@
                    ;; connection for the length of a round and never a handle across ticks (`fsync!`
                    ;; and every write still go through `harness.infra.db`'s own doors).
                    ;;
+                   ;; TICKET 02 OF `.scratch/record-window/` CHANGED THE TRIGGER, NOT THE DECISION: this
+                   ;; is no longer a 2-second clock. `projection/start!` attaches the write stream's
+                   ;; doorbell (`harness.infra.stream/listen-every!`); the listener only MARKS the
+                   ;; conversation dirty and a short coalesced round copies what was marked. An idle
+                   ;; process therefore runs NO round at all (the clock's 100-127 ms a round, ~5% of
+                   ;; a core, is gone), and a streaming answer's thousands of lines are a couple of
+                   ;; transactions rather than thousands.
+                   ;;
                    ;; IT STILL HAS A TEARDOWN, unlike the writer: a process that stops serving stops
                    ;; copying, and the next one resumes at the offset it left (`projection_offsets`).
                    (projection/start!)]]

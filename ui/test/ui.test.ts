@@ -61,6 +61,7 @@ import { normalizationSuite } from "./suites/normalization";
 import { composerTodosSuite } from "./suites/composer-todos";
 import { composerStateSuite } from "./suites/composer-state";
 import { composerContextBarSuite } from "./suites/composer-context-bar";
+import { settingsSessionsSuite } from "./suites/settings-sessions";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -78,7 +79,7 @@ import { composerContextBarSuite } from "./suites/composer-context-bar";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -523,7 +524,27 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// height, and the empty suggestions row is display:none instead of eating a `gap-4`. Both are
 /// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
 /// removes was measured in a real browser.
-const EXPECTED_CASES = 188;
+///
+/// 188 -> 192: the settings panel's SESSION PAGE -- `.scratch/session-lifecycle` ticket 02, the
+/// UI half of the backend ticket beside it. The `settings-sessions` suite's four cases, and they
+/// are all SENTENCES, which is why they are renders rather than source reads: what a row is called
+/// and the two states (`已归档` / `运行中`) that decide what a verb does; the three verbs' words
+/// in both languages, with the destructive one OFF while a selected conversation is running (the
+/// server refuses those by name -- `lib/session-status.ts` is the rule, and this case is that rule
+/// arriving on the button); the confirmation, which names HOW MANY conversations go and says the
+/// record goes with them; and a refusal drawn VERBATIM, both for one refused row and for a request
+/// the server refused whole (the batch answers one row per id, so both scales are drawable and
+/// neither is a paraphrase).
+///
+/// THE PAGE IS RENDERED AS A BODY rather than as a page, for the boundary the `sidebar` suite's
+/// header states: `settings-panel.tsx` reaches `lib/i18n.ts`, which touches `document` at module
+/// scope, so the panel cannot be imported here at all -- the rows live in
+/// `components/session-management.tsx` for the same reason `subagent-list.tsx` does. And the
+/// confirmation's INSIDE is a component of its own because Radix draws it through a portal, which
+/// is empty until a browser mounts one: an open dialog renders as nothing in this run. What no
+/// render can see -- that a press really sends the batch, that the listing is read AGAIN
+/// afterwards, and that a deleted row leaves it -- is the browser walkthrough's half.
+const EXPECTED_CASES = 192;
 
 let total = 0;
 for (const suite of SUITES) {
