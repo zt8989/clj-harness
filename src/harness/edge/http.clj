@@ -104,6 +104,7 @@
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.projection :as projection]
+            [harness.edge.forget :as forget]
             [harness.edge.compaction :as compaction]
             [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
@@ -3687,6 +3688,82 @@
           (api-response 404 {:error error :threadId stem})
           (rung (api-response 200 {:threadId stem :archived (:ok written)})))))))
 
+(defn- batch-body
+  "A batch route's body -> {:ids [..] :archived <bool?> :had-archived? <bool>}, or {:refusal
+  <response>}.
+
+  THE IDS ARE ASKED FOR BY NAME (`threadIds`), and a body that names none -- or names something that
+  is not a list of strings -- is REFUSED rather than read as 'nothing to do': a batch that quietly did
+  nothing looks exactly like a batch that worked, and the caller would draw every row as done.
+
+  `:had-archived?` IS NOT `:archived`, because `false` and 'absent' are two different statements
+  about that flag, and only one of them is a direction to write."
+  [req]
+  (let [body (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)}
+                  (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} body
+        ids (:threadIds ok)]
+    (cond
+      bad
+      {:refusal (api-response 400 {:error "request body is not valid JSON"})}
+
+      (not (and (sequential? ids) (seq ids) (every? string? ids)))
+      {:refusal (api-response 400 {:error "threadIds must be a non-empty list of conversation ids"})}
+
+      :else
+      {:ids (vec ids) :archived (:archived ok) :had-archived? (contains? ok :archived)})))
+
+(defn- archive-batch-post
+  "POST /api/sessions/archive {threadIds: [..] archived: true|false} -- set the archive flag on MANY
+  conversations in one request: the batch form of `/api/threads/<stem>/archive`.
+
+  Answers {:results [..]}, ONE ROW PER ID AND IN THE ORDER THEY WERE SENT: {:threadId .. :archived
+  bool} for one that was written, {:threadId .. :error <sentence>} for one this home refused. NOTHING
+  IS ROLLED BACK ACROSS THEM, deliberately: the flag is a statement about each conversation on its
+  own, and a batch that rolled back would take the six that worked down with the three that did not
+  -- leaving the caller nothing to draw on the rows that did not fail."
+  [req]
+  (let [{:keys [ids archived had-archived? refusal]} (batch-body req)]
+    (cond
+      (some? refusal)
+      refusal
+
+      (or (not had-archived?) (not (boolean? archived)))
+      (api-response 400 {:error "archived must be true or false"})
+
+      :else
+      (rung (api-response 200
+                          {:results
+                           (mapv (fn [id]
+                                   (try {:threadId id :archived (project/archive! id archived)}
+                                        (catch Throwable t
+                                          {:threadId id :error (ex-message t)})))
+                                 ids)})))))
+
+(defn- delete-batch-post
+  "POST /api/sessions/delete {threadIds: [..]} -- TAKE THESE CONVERSATIONS BACK: the record and
+  everything this home kept about them (`harness.edge.forget` says what that is, and what it
+  deliberately leaves).
+
+  Answers {:results [..]}, one row per id, in the order they were sent: {:threadId .. :forgotten
+  <id>} for one that went, {:threadId .. :error <sentence>} for one that was REFUSED -- a
+  conversation with a run in flight here, or an id this home has never seen.
+
+  THIS IS NOT AN ARCHIVE, and the two must not be confused: an archive writes a column and leaves
+  every byte of the record where it is (its own docstring, and a case that pins the file's length and
+  mtime), while this takes the conversation out of the home for good."
+  [req]
+  (let [{:keys [ids refusal]} (batch-body req)]
+    (if (some? refusal)
+      refusal
+      (rung (api-response 200
+                          {:results
+                           (mapv (fn [id]
+                                   (try {:threadId id :forgotten (forget/forget! id)}
+                                        (catch Throwable t
+                                          {:threadId id :error (ex-message t)})))
+                                 ids)})))))
+
 ;; `live-numbers` is defined just below its one caller, and a `defn-` has to be known before it is
 ;; read: a plain `declare` rather than moving it up, because the live answer reads like the
 ;; fallback it guards -- the record read comes second, only when there is no live answer.
@@ -6553,6 +6630,21 @@
     ;; `/api/project(s)` deliberately -- those two move a conversation to a DIRECTORY,
     ;; and this one is the other statement a caller can make about a conversation:
     ;; that it exists at all.
+    ;; THE COLLECTION'S TWO MUTATING VERBS: the batch form of `/api/threads/<stem>/archive`, and the
+    ;; deletion that has no single-conversation route at all. A BATCH IS ASKED FOR AS A BATCH
+    ;; (`.scratch/session-lifecycle/`): the settings panel manages a SELECTION, and a panel that had to
+    ;; fire one request per row would be inventing its own answer to 'three of my nine clicks failed'
+    ;; -- which is exactly what these two answer, one row per id.
+    (= "/api/sessions/archive" (:uri req))
+    (case (:request-method req)
+      :post (archive-batch-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/sessions/delete" (:uri req))
+    (case (:request-method req)
+      :post (delete-batch-post req)
+      (api-response 405 {:error "method not allowed"}))
+
     (= "/api/sessions" (:uri req))
     (case (:request-method req)
       :post (sessions-post req)

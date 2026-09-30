@@ -3740,6 +3740,73 @@
   (support/temp-dir "http-tasks-2"))
 
 
+(deftest a-batch-archives-what-it-can-and-names-the-row-it-could-not
+  ;; THE BATCH FORM OF THE ROUTE ABOVE, and the reason it answers per id at all: the settings panel
+  ;; manages a SELECTION, so 'eight of my nine clicks worked' is a thing it has to be able to say.
+  ;; A route that refused the whole batch, or dropped the unknown id in silence, would leave the panel
+  ;; drawing nine rows as done.
+  (with-server
+   {"batch-a" script "batch-b" script}
+   (fn []
+     (let [batch! (fn [ids flag]
+                    (let [r (api-call :post "/api/sessions/archive"
+                                      (json/write-str {:threadIds ids :archived flag}))]
+                      [(.statusCode r) (json/read-str (.body r) :key-fn keyword)]))]
+       (let [[status body] (batch! ["batch-a" "batch-b"] true)]
+         (is (= 200 status))
+         (is (= [true true] (mapv :archived (:results body))))
+         (is (= ["batch-a" "batch-b"] (mapv :threadId (:results body)))
+             "the rows come back in the order they were sent"))
+       (let [[status body] (batch! ["batch-a" "never-here"] false)
+             got            (into {} (map (juxt :threadId identity) (:results body)))]
+         (is (= 200 status) "the batch itself succeeded")
+         (is (false? (:archived (got "batch-a"))) "the conversation that exists went through")
+         (is (string? (:error (got "never-here")))
+             "and the one this home has never seen is refused BY NAME, not skipped in silence"))
+       (is (= 400 (first (batch! [] true)))
+           "an empty selection is refused rather than read as 'nothing to do'")
+       (let [r (api-call :post "/api/sessions/archive" (json/write-str {:threadIds ["batch-a"]}))]
+         (is (= 400 (.statusCode r)) "and so is a body that names no direction"))))))
+
+(deftest deleting-a-conversation-takes-its-record-and-every-row-keyed-by-it
+  ;; THE ONE OPERATION THAT IS NOT AN ARCHIVE. An archive writes a column and leaves every byte of the
+  ;; record where it is; this takes the record and everything the conversation left in the store with
+  ;; it. WHAT IS ASSERTED IS WHAT CAN BE LOOKED AT: the file is gone, the anchors a session was
+  ;; holding went with it, and the store row is gone -- which the second delete's own refusal proves.
+  ;; `hashline_undo` is deliberately NOT asserted on: it is keyed by PATH rather than by thread, and
+  ;; belongs to whoever holds that file next.
+  (with-server
+   {"doomed" script}
+   (fn []
+     (post-run "doomed")
+     (let [f      (log-file-for "doomed")
+           ;; THE ANCHOR IS FOUND BY ITS PATH rather than by the thread id, and by a path only this
+           ;; case uses: a count keyed by a thread id would be answered by whatever else in the run
+           ;; happens to share it, and this assertion is about ONE row that must go.
+           held   (fn [] (long (:n (first (db/select
+                                          "SELECT count(*) AS n FROM hashline_ownership
+                                           WHERE path = '/tmp/session-lifecycle-doomed.txt'")))))
+           rows   (fn [] (long (:n (first (db/select
+                                          "SELECT count(*) AS n FROM sessions WHERE id = 'doomed'")))))]
+       (is (.exists f) "the run left a record")
+       (db/with-transaction
+        (fn [c]
+          (db/execute! c "INSERT OR REPLACE INTO hashline_ownership (thread_id, anchor, path)
+                       VALUES (?, ?, ?)" "doomed" "aaaa" "/tmp/session-lifecycle-doomed.txt")))
+       (is (= 1 (held)) "and the conversation is holding an anchor")
+       (let [r    (api-call :post "/api/sessions/delete" (json/write-str {:threadIds ["doomed"]}))
+             body (json/read-str (.body r) :key-fn keyword)
+             row  (first (:results body))]
+         (is (= 200 (.statusCode r)))
+         (is (= "doomed" (:forgotten row)))
+         (is (not (.exists f)) "THE RECORD IS GONE")
+         (is (zero? (held)) "and the anchor it was holding went with it")
+         (is (zero? (rows)) "and so did the row that said it exists"))
+       (let [r   (api-call :post "/api/sessions/delete" (json/write-str {:threadIds ["doomed"]}))
+             row (first (:results (json/read-str (.body r) :key-fn keyword)))]
+         (is (string? (:error row))
+             "and deleting it a second time is refused by name, not answered cheerfully"))))))
+
 (deftest a-task-is-a-session-with-no-project-and-no-memory
   ;; Ticket 01: the sidebar's second half. Two different questions live here, and
   ;; they are answered by two different owners -- WHICH conversations are tasks (the

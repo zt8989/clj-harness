@@ -140,6 +140,17 @@
                     thread-id (json/write-str stored) (System/currentTimeMillis))))
     stored))
 
+(defn forget!
+  "Drop THREAD-ID's task list -- the ROW, not an empty list.
+
+  THE DIFFERENCE IS VISIBLE TO THE NEXT READER: an empty list says 'this conversation has no
+  tasks', and a missing row says 'this conversation has no list yet'. For a conversation being taken
+  back (`.scratch/session-lifecycle/`) the second is the honest one -- there is nothing left for a
+  reader to be told about."
+  [thread-id]
+  (db/with-transaction
+    (fn [c] (db/execute! c "DELETE FROM todos WHERE thread_id = ?" (str thread-id)))))
+
 ;; ----------------------------------------------------------------- one vocabulary
 ;;
 ;; BOTH ANSWERS DESCRIBE THE SAME LIST TO THE SAME MODEL, so the words for a count,

@@ -290,6 +290,25 @@
               (db/execute! c "DELETE FROM session_claims WHERE thread_id = ? AND token = ?"
                            id (str token)))))))
 
+(defn forget!
+  "Drop THREAD-ID's claim row, WHATEVER TOKEN it carries -- and that is `release!`'s caution read
+  from the other side rather than a contradiction of it.
+
+  `release!` DELETES BY TOKEN because a stale release must not take a NEW claim: a conversation this
+  process is still serving must not be left looking free. THIS ONE DELETES BY THREAD ID because the
+  conversation is GOING -- there will be no new claim, and a row left behind would keep a
+  conversation this home no longer has looking claimed, which is a session nothing can build.
+
+  A CALLER MUST HAVE PUT THE CONVERSATION AWAY FIRST (`harness.edge.forget` does, and says why),
+  for exactly the race `release!` describes: a row deleted under a live session leaves that session
+  unclaimed, and the next process along free to take a conversation this one still serves.
+
+  Answers true when it removed a row."
+  [thread-id]
+  (pos? (db/with-transaction
+          (fn [c]
+            (db/execute! c "DELETE FROM session_claims WHERE thread_id = ?" (str thread-id))))))
+
 (defn hand-over!
   "Move THREAD-ID's claim row from FROM-TOKEN to TO-TOKEN, when this process still
   holds it under FROM-TOKEN. Answers true when the row moved.

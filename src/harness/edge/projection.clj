@@ -351,6 +351,16 @@
      (db/with-transaction (fn [c] (forget! c (str session-id)))))
    (project!)))
 
+(defn forget-session!
+  "Drop everything this projection holds for SESSION-ID -- the rows AND the offset, both.
+
+  WHAT IT IS NOT, and it is the whole reason it is not `rebuild!`: a rebuild forgets and then
+  projects the record again, because the record is still there. This is the door for a record that is
+  GOING AWAY (`.scratch/session-lifecycle/`), where projecting again would be making a copy of a
+  conversation nobody has."
+  [session-id]
+  (db/with-transaction (fn [c] (forget! c (str session-id)))))
+
 ;; ------------------------------------------------------------------ the clock
 
 (def interval-ms
