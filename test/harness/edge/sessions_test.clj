@@ -693,6 +693,41 @@
                (:interrupts (sessions/live-entry tid)))
             "the card survives a refresh because it is part of the conversation's state")))))
 
+(deftest a-run-this-process-answered-is-numbered-by-the-line-that-ended-it
+  ;; THE LIVE HALF OF `an-entry-is-numbered-by-the-record-line-it-arrived-in`. A session built
+  ;; from a finished file is numbered by the walk that read it; a run THIS PROCESS answered is
+  ;; numbered when its frames become the conversation -- `settle!` -- from the offset the writer
+  ;; answered for the terminal frame. Landing it where the write ANSWERS it (which is what the
+  ;; edge did until 2026-09-30) numbers NOTHING, because the entries are not in the table yet:
+  ;; every entry a run produced kept `:seq nil`, and `since` -- an entry with no number counts as
+  ;; after anything -- then answered the WHOLE conversation to a reader asking what it had
+  ;; missed. That reader merged it into the window it held, and the newest turn ended up in the
+  ;; MIDDLE of the transcript while the bottom of the page was an old turn.
+  (let [tid    "t-live-seq"
+        run    "r-live"
+        emit   (ag/outbound tid run)
+        frames (vec (concat (emit (ev/text-delta "答"))
+                           (emit (ev/run-end))))]
+    (sessions/append! tid run [seed])
+    (sessions/land-at! tid run (:id seed) 3)
+    (testing "the run's frames are not the conversation yet, and the action's entry has its line"
+      (is (= [3] (mapv :seq (sessions/display tid)))))
+    (testing "the terminal's line numbers them as they enter -- and the doorbell already sees it"
+      (let [rung    (atom [])
+            watcher (fn [_ _] (swap! rung conj (mapv :seq (sessions/display tid))))]
+        (sessions/watch! tid watcher)
+        (try
+          (sessions/settle! tid run frames 41)
+          (let [seqs (mapv :seq (sessions/display tid))]
+            (is (= 3 (first seqs))
+                "the action's own entry keeps the line its own row carried")
+            (is (= 41 (second seqs))
+                "and the run's entries take the number the writer answered for its terminal frame")
+            (is (every? some? (rest seqs))
+                (str "unnumbered entries after a live run: " (pr-str (remove some? (rest seqs))))))
+          (is (every? some? (last @rung))
+              "and a reader rung by `settle!` never sees a conversation whose newest entries have no numbers")
+          (finally (sessions/unwatch! tid watcher)))))))
 ;; ------------------------------------------------- a consumer rides the walk (ticket 02)
 
 (deftest a-fold-rides-the-one-walk-the-session-already-makes

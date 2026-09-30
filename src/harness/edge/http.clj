@@ -1123,10 +1123,16 @@
   [thread-id run-id state]
   (fn [frame]
     ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
-    ;; messages into the conversation at this same moment, and the record's offset of this line
-    ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
-    ;; so the number is already on its way back when the entries appear -- and `land!` is
-    ;; idempotent and by group, so either order works.
+    ;; messages into the conversation at this same moment, and this line's record offset is the
+    ;; number they are given (`sessions/land!`). THE NUMBER IS HELD, NOT APPLIED, and the order is
+    ;; the whole reason: the write is synchronous (ADR 0007), so the offset comes back HERE --
+    ;; before `settle!` has put those entries in the table -- and `land!` numbers only entries
+    ;; that are already there. Landing it here numbered NOTHING AT ALL, which is how every entry a
+    ;; run produced came to keep `:seq nil` (measured 2026-09-30: 7 of a session's 563 in memory,
+    ;; 563 of 563 in the file), and `since` then answered the whole conversation to a reader
+    ;; asking what it had missed. `settle!` takes it as its fourth argument and applies it before
+    ;; the doorbell; the note there says why that is the only moment that works. (The comment
+    ;; here used to claim 'either order works' -- it does not.)
     ;; THE PER-TOKEN REASONING DELTAS ARE NOT RECORDED (ADR 0009): they were **63% of the LINES of one
     ;; real log** (8,640 of 13,631) and **80% of the BYTES of another** (41,896,984 of 52,248,775 --
     ;; measured, `.scratch/reasoning-out-of-the-record/evidence/read_routes.txt`), and the same text is
@@ -1141,9 +1147,13 @@
     ;; keeps is a whole frame rather than a line -- so the wire-only test reads ROW.
     (doseq [row (text-lines state frame)]
       (when-not (or (reasoning-frame? row) (wire-only-frame? row))
-        (log! thread-id run-id "event" row
-              (when (contains? terminal (:type row))
-                (fn [offset] (sessions/land! thread-id run-id offset))))))
+        (let [offset (log! thread-id run-id "event" row
+                           (when (contains? terminal (:type row))
+                             (fn [offset] (swap! state assoc :terminal-line offset))))]
+          ;; AND THE LAST LINE THIS RUN WROTE, which is all a run that DIED has to be numbered by:
+          ;; the crash path below settles the frames it managed to write, and the terminal it never
+          ;; reached is exactly the number the ordinary path hands `settle!`.
+          (when (some? offset) (swap! state assoc :last-line offset)))))
     ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
     ;; history is what this run was handed, and these frames are what came of it. Collected HERE
     ;; because this is the one place that sees every frame exactly once, and settled at the
@@ -1155,7 +1165,7 @@
       ;; saying the thread is running (harness.edge.sessions/running? -- the fact the sidebar row
       ;; reads), and where the conversation becomes what it says.
       (unregister-run! thread-id run-id)
-      (sessions/settle! thread-id run-id (:frames @state))
+      (sessions/settle! thread-id run-id (:frames @state) (:terminal-line @state))
       (swap! state assoc :terminal (:type frame)))
     ;; THE FRAME ITSELF, NOT A DECORATED COPY: this map is what the socket carries, and for every
     ;; family but the reasoning one (ADR 0009) it is also the map the record logs -- `:threadId`, the
@@ -2181,7 +2191,7 @@
         ;; conversation that never had the half-answer the client is looking at. The
         ;; fold is the emitter's own (`sessions/settle!`), so the session gets exactly
         ;; the messages its frames describe, and nothing is invented for the ending.
-        (sessions/settle! thread-id run-id (:frames @state))
+        (sessions/settle! thread-id run-id (:frames @state) (or (:terminal-line @state) (:last-line @state)))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
         ;; AND THE READER IS TOLD: a crashed run emits no terminal, and a reader on the downlink
@@ -2536,6 +2546,13 @@
         ;; conversation. The agent route keeps the same atom for the same reason: it is
         ;; the one place that sees every frame exactly once.
         frames   (atom [])
+        ;; AND THE LINE THE RUN'S TERMINAL FRAME IS WRITTEN ON, held for the `settle!` in the
+        ;; `finally` below for the same reason the agent route holds it (see `runner`): the entries
+        ;; it numbers are not in the table until the frames become the conversation.
+        terminal-line (atom nil)
+        ;; AND THE LAST LINE THIS DELEGATION WROTE, for the `finally` when it died without a
+        ;; terminal -- the same fact the agent route keeps (see `runner`).
+        last-line (atom nil)
         ;; AND THE ONE PLACE THE AGENT ROUTE ALSO USES for its text (`text-lines`): the messages
         ;; still open live here, and what reaches the record is the snapshot, not the token.
         text     (atom {})]
@@ -2665,9 +2682,10 @@
                           ;; guard's frame is the wire's alone in a delegation too.
                           (doseq [row (text-lines text f)]
                             (when-not (or (reasoning-frame? row) (wire-only-frame? row))
-                              (log! thread-id run-id "event" row
-                                    (when (contains? terminal (:type row))
-                                      (fn [offset] (sessions/land! thread-id run-id offset))))))
+                              (let [offset (log! thread-id run-id "event" row
+                                                (when (contains? terminal (:type row))
+                                                  (fn [offset] (reset! terminal-line offset))))]
+                                (when (some? offset) (reset! last-line offset)))))
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)
@@ -2696,7 +2714,7 @@
           ;; answer is not a turn. `settle!` also carries the state the terminal frame
           ;; says (settled / unfinished), so the next reader of this session gets the
           ;; same answer the record would give.
-          (sessions/settle! thread-id run-id @frames))))))
+          (sessions/settle! thread-id run-id @frames (or @terminal-line @last-line)))))))
 
 ;; The door repairs a run that never closed before it reads the record (see the 4b decision
 ;; below); the repair is defined with the read side further down, so it is named here.

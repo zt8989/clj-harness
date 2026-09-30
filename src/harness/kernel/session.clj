@@ -792,6 +792,8 @@
       (ring! id {:kind :entries}))
     (mapv :message (take-last n (get-in after [id :entries])))))
 
+(declare land!)
+
 (defn settle!
   "Fold the frames a run emitted into THREAD-ID's conversation, so the next run of it
   continues from what just happened. GROUP is the run id those frames belong to.
@@ -817,28 +819,46 @@
   what a client is shown.
 
   Called with the frames a run emitted, in order. Answers the messages that entered,
-  same as `append!` -- a run that produced nothing (a refusal) answers []."
-  [thread-id group frames]
-  (let [entered (if (seq frames)
-                  (append! thread-id group (frames/apply-frames frames))
-                  [])
-        tf      (last (filter frames/terminal? frames))
-        st      (if (seq frames)
-                  (if-some [t tf]
-                    (if (= "interrupt" (get-in t [:outcome :type])) :parked :settled)
-                    :unfinished)
-                  (:state (live-entry thread-id)))]
-    (when (seq frames)
-      ;; THE INTERRUPTS COME WITH THE STATE, because the client's approval card is
-      ;; drawn from them and a live session is what `sofar` answers from now: a parked
-      ;; conversation whose interrupts lived only in the record would come back from
-      ;; memory with nothing to approve.
-      (swap! registry update (str thread-id)
-             (fn [e] (-> e
-                         (assoc :state st)
-                         (assoc :interrupts (vec (get-in tf [:outcome :interrupts]))))))
-      (ring! (str thread-id) {:kind :entries}))
-    entered))
+  same as `append!` -- a run that produced nothing (a refusal) answers [].
+
+  LANDED IS THE RECORD OFFSET OF THE LINE THE RUN'S TERMINAL FRAME WAS WRITTEN ON, and it is
+  an ARGUMENT rather than something this namespace could look up: the number exists on the
+  WRITER's side of the edge (`harness.edge.http/log!` answers it), and the edge hands it over
+  HERE because this is the moment the entries exist -- a run's frames become the conversation
+  when the run ends, which is a beat AFTER the terminal's own line was written. Landing it any
+  earlier numbers nothing at all: every entry a run produced kept `:seq nil` (measured on the
+  live process, 2026-09-30: 7 of a session's 563 entries numbered, against 563 of 563 in the
+  file), and `since` -- whose rule is that an entry with no number counts as after anything --
+  then answered the WHOLE conversation to a reader asking what it had missed, which is the
+  scrambled window that reader drew. IT IS APPLIED BEFORE THE DOORBELL, deliberately: a reader
+  rung about a conversation whose newest entries still have no numbers is a reader misled."
+  ([thread-id group frames]
+   ;; NO TERMINAL LINE, AND THAT IS AN ORDINARY CALL: a run that produced no frames answers []
+   ;; below, and the entries the ACTION brought with it are numbered by the writer's own door
+   ;; (`land-at!`, by name) as their rows land.
+   (settle! thread-id group frames nil))
+  ([thread-id group frames landed]
+   (let [entered (if (seq frames)
+                   (append! thread-id group (frames/apply-frames frames))
+                   [])
+         tf      (last (filter frames/terminal? frames))
+         st      (if (seq frames)
+                   (if-some [t tf]
+                     (if (= "interrupt" (get-in t [:outcome :type])) :parked :settled)
+                     :unfinished)
+                   (:state (live-entry thread-id)))]
+     (when (seq frames)
+       ;; THE INTERRUPTS COME WITH THE STATE, because the client's approval card is
+       ;; drawn from them and a live session is what `sofar` answers from now: a parked
+       ;; conversation whose interrupts lived only in the record would come back from
+       ;; memory with nothing to approve.
+       (swap! registry update (str thread-id)
+              (fn [e] (-> e
+                          (assoc :state st)
+                          (assoc :interrupts (vec (get-in tf [:outcome :interrupts]))))))
+       (when (some? landed) (land! thread-id group landed))
+       (ring! (str thread-id) {:kind :entries}))
+     entered)))
 
 (defn land-at!
   "The line that carried ONE of GROUP's entries is on disk, at OFFSET. AT is the entry's

@@ -1028,6 +1028,13 @@
       numbers its entries by the LAST line of the run, which is where the record
       stops -- a partial answer is allowed to move once the run ends.
 
+  WHERE THE TWO SIDES STILL DISAGREE, and it is a measured fact rather than an argument: an entry
+  a `message` ROW carried is numbered by its OWN line here, while the live table gives a whole run
+  ONE number -- its terminal line (`harness.kernel.session/settle!` takes that offset as its fourth
+  argument). So such an entry can be a few lines out between the two readings. Both are real offsets
+  in the same record and a reader dedupes by id, which is why nothing a client draws changes today;
+  `.scratch/entry-numbering/issues/01-entries-numbered-by-their-own-row.md` is the ticket that
+  closes it (a pending-landing table, so BOTH sides can number every entry by the line it arrived in).
   ENTRIES NUMBERED ALIKE ARRIVED TOGETHER: one run's frames. That is what makes a page cut
   at a group boundary unambiguously right, and it is why the window carries numbers rather
   than a slice of the message list (ticket 05's `tail` / `since` / `before`, and ticket 06's
@@ -1144,8 +1151,9 @@
   IT ALSO ANSWERS THE ENTRIES, NUMBERED (`entries` below): the same conversation with
   the record offset each entry arrived at. A caller that wants the window -- a client
   that refreshed, a page being cut -- needs those numbers, and they are the same numbers
-  the live edge mints (`harness.edge.sessions/land!`), so the two readings of one record
-  cannot disagree."
+  the live edge mints (`harness.edge.sessions/land!`) for everything the FRAMES produced, so the two
+  readings of one record agree to within the lines a `message` row is numbered by here and the run's
+  terminal line is numbered by there (`entries` above says how much, and which ticket closes it)."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))]
     ;; THE CONTEXT IS A MESSAGE AND NOT A FIELD: the conversation is born with the
