@@ -1939,18 +1939,24 @@ export const SettingsPanel: FC<{
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         data-slot="settings-panel"
-        className="sm:max-w-3xl"
+        className="sm:max-w-5xl"
         aria-describedby={undefined}
       >
         <DialogHeader>
           <DialogTitle>{t("panel.title")}</DialogTitle>
         </DialogHeader>
 
-        {/* THE DIALOG DOES NOT GROW WITH ITS CONTENT. A provider form is taller than
-            the panel, and a modal that resized around it would move the nav and the
-            buttons while somebody is typing in it. So the size is fixed here and the
-            PAGE scrolls inside. */}
-        <div className="flex h-[min(30rem,62vh)] gap-4">
+        {/* THE DIALOG DOES NOT GROW WITH ITS CONTENT. A provider form is taller than the panel, and a
+            modal that resized around it would move the nav and the buttons while somebody is typing
+            in it. So the size is fixed here and the PAGE scrolls inside.
+
+            AND IT IS BIGGER THAN IT WAS (2026-09-30), because one of these pages is a LIST rather
+            than a form: the session page draws every conversation this home keeps and shares the
+            column with a row of verbs, so 48rem wide and a screenful of height was a handful of rows
+            in a mostly empty box. `sm:max-w-5xl` and 78vh of the window -- with a 40rem ceiling, so
+            it never grows past a laptop screen -- is the same rule with a size that fits what these
+            pages now hold. */}
+        <div className="flex h-[min(40rem,78vh)] gap-4">
           {/* TWO SHAPES, ONE `sm` APART. From `sm` up this is two columns. Below it the nav
               is not a column at all (`hidden sm:flex`): the list below is its narrow
               spelling, and a tap on one of its rows swaps the list for that page. */}

@@ -75,10 +75,27 @@ export const SessionBatchRow: FC<{
   const { t } = useTranslation();
   const title = titleOf(session.firstUserText) ?? session.threadId;
   return (
+    // A TICKED ROW HAS TO LOOK TICKED. The checkbox alone says it, and a list where four of forty
+    // rows are quietly in the selection is a list somebody deletes the wrong thing from -- which is
+    // why the row's own border and background carry the state rather than the box alone.
+    // `data-selected` IS THE MARKER, in the shape the sidebar already uses for `data-archived`: the
+    // attribute is the fact, so a suite can read it without reading a class list (and the class list
+    // is free to change).
     <li
       data-slot="settings-session-row"
       data-thread-id={session.threadId}
-      className="flex flex-col gap-0.5 rounded-md border px-2 py-1"
+      data-selected={selected ? "" : undefined}
+      // THE CLASS LIST IS THE STATE, spelled the way the settings nav above spells its own active
+      // item (one ternary, both branches literal): a `data-selected:` VARIANT would have to match the
+      // attribute's VALUE -- Tailwind compiles it to `:where([data-selected=true])`, so the empty
+      // marker this file uses (the sidebar's `data-archived` shape) would style nothing at all.
+      // The marker stays empty and the classes move; a marker that lies about itself is worse than
+      // a duplicated class list.
+      className={
+        selected
+          ? "bg-accent/50 border-foreground/40 flex flex-col gap-0.5 rounded-md border px-2 py-1 transition-colors"
+          : "hover:bg-accent/30 flex flex-col gap-0.5 rounded-md border px-2 py-1 transition-colors"
+      }
     >
       <div className="flex items-center gap-2">
         {/* A BARE CHECKBOX, the precedent the panel's own provider form already set: there is no
@@ -261,7 +278,11 @@ export const SessionsBatchPanel: FC<SessionsBatchProps> = ({
         <>
           <div
             data-slot="settings-sessions-actions"
-            className="flex flex-wrap items-center gap-2 rounded-md border p-2"
+            // STUCK TO THE TOP OF THE COLUMN, because the column is what scrolls: this home keeps a
+            // hundred conversations, so the list under these three verbs is longer than the panel and
+            // the verbs have to be reachable while somebody is ticking rows forty rows down. The
+            // opaque background is the point rather than decoration -- rows pass behind it.
+            className="bg-popover sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-md border p-2"
           >
             <label className="flex items-center gap-1.5 text-xs">
               <input
