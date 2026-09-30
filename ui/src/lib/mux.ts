@@ -145,15 +145,105 @@ const subscriptions = new Map<string, Subscription>();
 /// running it. A `Map` of SETS because a page may drive runs on more than one conversation.
 const runSubscriptions = new Map<string, Set<(event: RunFrame) => void>>();
 
-/// HOW FAR EACH RUN'S FRAME STREAM HAS BEEN READ, by conversation -- the `:seq` of the last
-/// run frame this page saw. It is what a reconnecting socket re-declares (`runSince`) so the
-/// server hands back the frames that happened while the socket was down: a run is a PUSH,
-/// and a push nobody heard is gone unless the sender remembered it.
+/// WHAT THIS PAGE HOLDS OF EACH CONVERSATION'S RUN -- the `:seq` of the last run frame it
+/// RECEIVED. It is what a socket re-declares (`runSince`), and it is what the server replays
+/// from (`harness.edge.mux/run-frames-after`: a `since` is "I hold this much"), so the number
+/// has to mean what the server reads it as -- what is IN HAND, not what has been drawn.
+///
+/// AT RECEIPT, NOT AT DELIVERY (`lib/coalesce.ts` holds frames for the next animation frame,
+/// and a hidden tab draws for nobody), and that difference was a real bug: a mark that waited
+/// for delivery lagged by up to `HOLD_LIMIT` frames, so a re-declaration in that window -- a
+/// pane mounting, a window's repair, a reconnect -- made the server RE-SEND frames this page
+/// already had. A second `TEXT_MESSAGE_END` is fatal to a run: `@ag-ui/client`'s verifier has
+/// no `:seq` of its own to drop it by, and answers "No active text message found with ID ...
+/// A 'TEXT_MESSAGE_START' event must be sent first" (measured in a browser, 2026-09-30 --
+/// `.scratch/mux-run-replay-dupes/`). What a mark may never do is run AHEAD of what this page
+/// holds; a mark that lags what it has DRAWN is exactly right, because the frames it lags are
+/// in the batch above, not on the wire.
 ///
 /// IT RESETS ON `RUN_STARTED`, because the sender's numbering does too (`record-run!` starts a
 /// fresh buffer per run): carrying a finished run's high-water mark into the next one would
 /// ask for frames numbered above anything the new run will ever send.
 const runCursors = new Map<string, number>();
+
+/// WHAT THIS PAGE HAS ALREADY RECEIVED OF EACH RUN, so a frame that arrives TWICE is drawn once.
+///
+/// WHY A FRAME CAN ARRIVE TWICE AT ALL: every declaration asks the server for the run's frames
+/// after the cursor above (`harness.edge.http/mux-replay-run!`), and that replay is a REPAIR --
+/// exact when the cursor is what the page holds, and only then. This is the belt to that pair of
+/// braces: the frames a replay hands back have been received before, and the second copy is the
+/// one `@ag-ui/client` refuses.
+///
+/// `upTo` IS CONTIGUOUS -- 'every number up to here has been received' -- and `ahead` holds the
+/// ones that arrived before their gap was filled. A HIGH-WATER MARK WOULD BE WRONG IN ONE
+/// DIRECTION: it would drop the frame a replay was repairing (a replayed burst can be overtaken
+/// by a live frame, so the burst's numbers are then below the mark while never having been
+/// seen), turning a duplicate into a lost START -- which the same verifier refuses just as
+/// hard. A number the sender can no longer replay is given up rather than held (the bound below
+/// is its own ring size).
+///
+/// AND IT IS KEYED BY RUN: `RUN_STARTED` is the one frame whose numbering starts over, so the
+/// `runId` is what tells a NEW run from the same run's frame arriving again.
+const runAhead = new Map<string, { runId: string | null; upTo: number; ahead: Set<number> }>();
+const RUN_RING = 4096;
+
+/// WHETHER THIS RUN FRAME IS ONE THIS PAGE HAS NOT RECEIVED YET, recording it when it is. A
+/// `false` is a re-send, and the socket drops it before the batch: nothing downstream has to
+/// know that a frame can arrive twice.
+///
+/// A FRAME WITH NO `:seq` IS ALWAYS NEW: the number is the sender's bookkeeping FOR this
+/// question (`harness.edge.mux/record-run!` numbers every frame of a run), and one that carries
+/// none cannot be placed.
+function runFrameIsNew(frame: MuxFrame & RunFrame): boolean {
+  const seq = typeof frame.seq === "number" ? frame.seq : null;
+  if (seq === null) return true;
+  const threadId = frame.threadId;
+  const runId = typeof frame.runId === "string" ? frame.runId : null;
+  const seen = runAhead.get(threadId);
+  // WIDENED ON PURPOSE, as in `deliver`: `frame` is a window frame AND a run frame (one socket,
+  // two kinds), so its `type` reads as the window union alone until it is asked for as a string.
+  const type: string = frame.type;
+  if (type === "RUN_STARTED") {
+    // THE SAME RUN'S `RUN_STARTED` AGAIN IS THE RE-SEND THIS EXISTS FOR; a different id is a run
+    // whose numbering starts over, and the mark starts over with it.
+    if (seen !== undefined && seen.runId !== null && runId === seen.runId) return false;
+    runAhead.set(threadId, { runId, upTo: seq, ahead: new Set() });
+    return true;
+  }
+  if (seen === undefined) {
+    runAhead.set(threadId, { runId, upTo: seq, ahead: new Set() });
+    return true;
+  }
+  if (seq <= seen.upTo) return false;
+  if (seen.ahead.has(seq)) return false;
+  seen.ahead.add(seq);
+  while (seen.ahead.delete(seen.upTo + 1)) seen.upTo += 1;
+  // A GAP THE SENDER CAN NO LONGER FILL: past its whole ring (`harness.edge.mux/run-buffer-size`)
+  // the missing frame cannot come back, so the numbers waiting on it are given up rather than
+  // held for the life of the page.
+  if (seen.ahead.size > RUN_RING) {
+    const oldest = Math.min(...seen.ahead);
+    seen.ahead.delete(oldest);
+    seen.upTo = oldest;
+    while (seen.ahead.delete(seen.upTo + 1)) seen.upTo += 1;
+  }
+  return true;
+}
+
+/// ONE RECEIVED RUN FRAME, AND THE TWO THINGS THIS MODULE OWES IT: the cursor the socket declares
+/// (`runCursors` above, moved at receipt) and the answer to whether it is new (`runFrameIsNew`,
+/// so a replay's copy is dropped). A `false` means the frame goes no further.
+function receiveRunFrame(frame: MuxFrame & RunFrame): boolean {
+  if (!runFrameIsNew(frame)) return false;
+  const seq = typeof frame.seq === "number" ? frame.seq : null;
+  // THE TYPE IS ASKED FOR AS A STRING, for the reason `deliver` says: one socket, two kinds of
+  // frame, and only one of them has this name.
+  const type: string = frame.type;
+  if (seq !== null && (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0))) {
+    runCursors.set(frame.threadId, seq);
+  }
+  return true;
+}
 
 /// WHAT THIS PAGE READS FACTS FROM, by conversation: the turn and model-call families
 /// (`FactFrame`). A `Map` of SETS for the same reason the run map is one -- a page may hold
@@ -246,21 +336,10 @@ function deliver(frame: MuxFrame & RunFrame): void {
     return;
   }
   for (const onEvent of runSubscriptions.get(frame.threadId) ?? []) onEvent(frame);
-  // REMEMBER HOW FAR THIS RUN HAS BEEN READ, so a socket that drops can ask for the rest.
-  // AT DELIVERY AND NOT AT ARRIVAL (`lib/coalesce.ts`'s header): a frame still waiting in
-  // the batch has been seen by nobody, and a mark ahead of it would make the reconnect
-  // SKIP it. `RUN_STARTED` RESETS the mark rather than raising it -- the sender starts a
-  // fresh numbering per run, and a stale high-water mark would suppress the new run's
-  // frames.
-  const seq = frame.seq;
-  // WIDENED ON PURPOSE: `frame` is a window frame AND a run frame (one socket, two kinds),
-  // so its `type` reads as the window union alone until it is asked for as a string.
-  const type: string = frame.type;
-  if (typeof seq === "number") {
-    if (type === "RUN_STARTED" || seq > (runCursors.get(frame.threadId) ?? 0)) {
-      runCursors.set(frame.threadId, seq);
-    }
-  }
+  // AND THE RUN'S OWN CURSOR IS NOT TOUCHED HERE: it belongs to the SOCKET, where the frame
+  // ARRIVES (`runCursors` above says why -- a mark that waited for this line was the bug). The
+  // fact family's cursor stays where it is, in its own branch above, for the reason it always
+  // had: a fact is idempotent, so a re-sent one costs nothing.
 }
 
 /// THE BATCH EVERY FRAME GOES THROUGH (`lib/coalesce.ts`): run frames, window frames and
@@ -402,6 +481,12 @@ function open(): void {
     // next animation frame, which is what keeps a fast vendor's stream at one React update
     // per frame instead of one per token. WHICH KIND of frame this is, and who reads it, is
     // `deliver` above.
+    // A RUN FRAME IS ACCOUNTED FOR AT RECEIPT (`receiveRunFrame`): the cursor this page declares
+    // is what it HOLDS, and a frame the server sent twice is dropped before any subscriber sees
+    // it. Both are about that one fact, which is why they are one call -- and why they are HERE
+    // rather than in `deliver`: a re-sent `TEXT_MESSAGE_END` reaching a subscriber is fatal to
+    // the run that subscriber is driving.
+    if (familyOf(frame.type) === "run" && !receiveRunFrame(frame)) return;
     batch.push(frame);
   };
   ws.onclose = () => {

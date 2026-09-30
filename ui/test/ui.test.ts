@@ -556,7 +556,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// is empty until a browser mounts one: an open dialog renders as nothing in this run. What no
 /// render can see -- that a press really sends the batch, that the listing is read AGAIN
 /// afterwards, and that a deleted row leaves it -- is the browser walkthrough's half.
-const EXPECTED_CASES = 195;
+///
+/// ...195 -> 197: the `mux` suite's two, for THE FRAME THAT ARRIVES TWICE. The owner's report
+/// (2026-09-30) is a page whose run died with `Cannot send 'TEXT_MESSAGE_END' event: No active
+/// text message found with ID '<id>'. A 'TEXT_MESSAGE_START' event must be sent first.` while
+/// reusing a tab that had been in the background. Two halves of one contract: the cursor a page
+/// declares is what it HOLDS (not what it has drawn -- `lib/coalesce.ts` holds frames, and a
+/// hidden tab holds up to `HOLD_LIMIT` of them), and a frame the server therefore sends again
+/// reaches a run ONCE (the sender numbers every frame, and a second END or START is fatal).
+/// Both were reproduced in a real browser, with the numbers, in
+/// `.scratch/mux-run-replay-dupes/`; what a suite cannot have is the hidden tab itself, which
+/// stays the walkthrough's question like every other socket one.
+const EXPECTED_CASES = 197;
 
 let total = 0;
 for (const suite of SUITES) {

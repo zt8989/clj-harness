@@ -18,10 +18,13 @@
 // the moment it arrives, and whatever was held in FRONT of it goes first, in order: these
 // frames arrived before it, and the conversation is read in the order it happened.
 //
-// THE CURSOR MOVES WHEN A FRAME IS DELIVERED, NOT WHEN IT ARRIVES. That half is
-// `lib/mux.ts`'s, and it is why this module cannot just be a queue: `runCursors` is what a
-// reconnect asks from (`runSince`), so a mark that had moved past a frame still waiting
-// here would make the reconnect SKIP it. Delivery is the only moment a frame has been seen.
+// THE CURSORS ARE NOT THIS MODULE'S, AND BOTH ARE `lib/mux.ts`'s. The RUN family's is moved at
+// RECEIPT -- a `since` means "I hold this much" (`harness.edge.mux/run-frames-after`), and a
+// frame waiting here IS held: what a mark must never do is run ahead of that, and it cannot.
+// Marking it at delivery instead was a real bug, not a conservative choice: a hidden tab holds
+// up to `HOLD_LIMIT` frames, every re-declaration in that window asked the server to re-send
+// them, and a second `TEXT_MESSAGE_END` is fatal to a run (`.scratch/mux-run-replay-dupes/`).
+// The FACT family's is still marked at delivery, which costs nothing: a fact is idempotent.
 //
 // A HIDDEN PAGE DOES NOT DRAW, so `requestAnimationFrame` stops coming and the queue would
 // grow for as long as the tab stays away -- which is why there is a limit: past
