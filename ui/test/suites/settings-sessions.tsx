@@ -90,13 +90,13 @@ function hasAttr(html: string, slot: string, name: string): boolean {
 
 /// ONE ROW, rendered the way the page renders it: a real i18n instance, nothing selected and nothing
 /// in flight unless a case says otherwise.
-function row(session: SessionSummary, language: Language, error: string | null = null): string {
+function row(session: SessionSummary, language: Language, error: string | null = null, selected = false): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
       <ul>
         <SessionBatchRow
           session={session}
-          selected={false}
+          selected={selected}
           busy={false}
           error={error}
           onToggle={() => {}}
@@ -294,6 +294,23 @@ const cases: Case[] = [
         "This home has no conversations yet.",
       );
       expect(textOf(panel("zh"), "settings-sessions-empty")).toBe("这一家还没有会话。");
+    },
+  },
+  {
+    name: "a-ticked-row-says-so-on-the-row-and-not-only-in-the-box",
+    run: async () => {
+      // THE ROW IS THE BUG'S OWN SHAPE. What was wrong with the selection was not the checkbox --
+      // that one is honest -- but that NOTHING ELSE on the row said it: a list where four of forty
+      // rows are quietly in the selection is a list somebody deletes the wrong thing from. So the
+      // marker is the ROW's, in the shape the sidebar's rows use for `data-archived`.
+      const ticked = row(session(), "en", null, true);
+      expect(hasAttr(ticked, "settings-session-row", "data-selected")).toBe(true);
+
+      // AND AN UNTICKED ROW DOES NOT CARRY IT, which is the half a substring search of the markup
+      // cannot answer: the row's own class list names the colours the selected branch draws with,
+      // so the attribute is asked for BY NAME rather than looked for as a word (`hasAttr`'s own
+      // reason, one state over).
+      expect(hasAttr(row(session(), "en"), "settings-session-row", "data-selected")).toBe(false);
     },
   },
 ];
