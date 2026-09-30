@@ -218,7 +218,7 @@
         outs (message! [(call "c1" "replace" {:remove_from b
                                               :replacement_lines ["BETA"]})
                         (call "c2" "replace" {:remove_from b
-                                              :replacement_lines "no array"})])
+                                              :replacement_lines 42})])
         last-out (last outs)]
     (is (true? (:error last-out)) (:content last-out))
     (is (str/includes? (:content last-out) "edit 2 of 2") "which call")

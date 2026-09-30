@@ -213,13 +213,29 @@
     (check {:anchor a :lines ["X"]} "direction")
     (check {:anchor a :direction "sideways" :lines ["X"]} "before\" or \"after")
     (check {:anchor a :direction "after"} "lines")
-    (check {:anchor a :direction "after" :lines "X"} "array of strings")
+    (check {:anchor a :direction "after" :lines 42} "array of strings")
     (check {:anchor a :direction "after" :lines [1]} "must be a string")
     (check {:anchor "toolong" :direction "after" :lines []} "4-character anchor")
     (check {:anchor a :direction "after" :lines [] :nope 1} "does not take")
     (testing "and the direction is read case-insensitively, because JSON is the
               model's to spell"
       (is (false? (:error (insert! {:anchor a :direction "AFTER" :lines ["X"]})))))))
+
+(deftest a-whole-lines-field-sent-as-one-string-is-read
+  ;; Same slip as replace's: the whole array in the FIELD rather than in one element.
+  ;; `lines` shares the parser, so it gets the same reading and the same sentence.
+  (use-mode!)
+  (put! "one\ntwo\n")
+  (let [a (anchor-of "one")]
+    (testing "a JSON array as the whole field"
+      (let [out (:content (insert! {:anchor a :direction "after"
+                                    :lines "[\"X\",\"Y\"]"}))]
+        (is (str/includes? out "Unwrapped a JSON array") (pr-str out))))
+    (testing "content as the whole field, split on newlines"
+      (put! "one\ntwo\n")
+      (let [a (anchor-of "one")
+            out (:content (insert! {:anchor a :direction "after" :lines "P\nQ"}))]
+        (is (str/includes? out "Split the whole") (pr-str out))))))
 
 (deftest a-nul-byte-is-refused-in-the-lines-too
   (use-mode!)

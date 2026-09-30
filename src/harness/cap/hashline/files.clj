@@ -102,6 +102,26 @@
       (Files/setPosixFilePermissions (.toPath f) ^java.util.Set mode)
       (catch Exception _ nil))))
 
+(def max-bytes
+  "How large a text file this feature will read OR write: 100 MiB, upstream's number.
+  The read side refuses a file past it because the whole-file model this design rests on
+  stops being something a session can do; the write side refuses a RESULT past it because
+  the next read could not open what the write left behind. One number for both directions,
+  so the two cannot disagree."
+  (* 100 1024 1024))
+
+(defn check-size!
+  "Refuse BODY -- what a write would leave on disk, BOM and line endings included -- when
+  it is past `max-bytes`. Called BEFORE the file is touched, so an oversized edit costs
+  the file, the anchor table and the undo record nothing."
+  [^String path ^String body]
+  (let [n (alength (.getBytes body "UTF-8"))]
+    (when (> n max-bytes)
+      (throw (ex-info (str path " would be " n " bytes, over the " max-bytes
+                           "-byte limit for anchored editing. `read` could not open the"
+                           " result; use `write` only to replace a file wholesale.")
+                      {:path path :bytes n :limit max-bytes :reason :file-too-large})))))
+
 (defn read-file
   "PATH as {:text <without BOM, line endings normalized to \\n>
             :bom <boolean> :ending <string> :mode <permissions or nil>}.
@@ -128,6 +148,7 @@
   (let [f    (File. path)
         tmp  (File. (str path ".hashline-tmp"))
         body (str (when bom (str bom-char)) (from-lf text (or ending "\n")))]
+    (check-size! path body)
     (spit tmp body :encoding "UTF-8")
     (restore-mode! tmp mode)
     (Files/move (.toPath tmp) (.toPath f) (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))

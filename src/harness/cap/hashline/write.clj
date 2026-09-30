@@ -33,6 +33,7 @@
   line is refused above, and a freshly written line is not an anchor until a read
   has shown it."
   (:require [clojure.string :as str]
+            [harness.cap.hashline.files :as files]
             [harness.cap.hashline.store :as store]))
 
 (defn- stored-anchors
@@ -95,6 +96,7 @@
      path
      (fn []
        (check-no-echo! thread-id path content)
+       (files/check-size! path content)
        (let [f (java.io.File. ^String path)]
          (when-let [p (.getParentFile f)] (.mkdirs p))
          (spit f content :encoding "UTF-8"))
