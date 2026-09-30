@@ -158,8 +158,12 @@ const useTurnSteps = (): number => {
 /// A CARD IS NOT A STEP, and this is the one thing the answer above does not decide
 /// (`.scratch/compaction-frames`, `lib/card-parts`). The three answers here are about a
 /// MESSAGE's place in the turn; whether a message that is put away still shows something
-/// depends on its PARTS, so `thread.aui.tsx` draws a card part even in a folded step or
-/// head. This function's answer is unchanged by that -- a "step" is still a step.
+/// depends on its PARTS, and `thread.aui.tsx` draws exactly one kind of card in a folded
+/// turn: a COMPACTION (`isKeptCardPart`), because it is the boundary where history stopped
+/// being messages. An INJECTED CONTEXT is material the turn was handed -- an instruction
+/// file, a skill body, a job's ending -- so it goes away with the turn's steps, which is what
+/// 'fold the context injection together with the turn' means. This function's answer is
+/// unchanged by any of that -- a "step" is still a step.
 ///
 /// Every selector above returns a primitive, because `useAuiState` compares with
 /// `Object.is`: a fresh object would re-render this message on every store update,
@@ -181,6 +185,51 @@ export function useStepFold(): "none" | "step" | "head" | "answer" {
 export function useTurnFolded(): boolean {
   const key = useAuiState(turnKeyOf);
   const foldable = useAuiState(isFoldableOf);
+  const unfolded = useTurnOpened(key);
+  return foldable && !unfolded;
+}
+
+/// The first ASSISTANT message after this one -- where the turn this message stands in front
+/// of begins. -1 when there is none.
+///
+/// IT HAS TO LOOK FORWARD because a CARD-ONLY user message is not a step of any turn:
+/// `turnBounds` groups assistant messages, and a user message is a turn of its own (`first ===
+/// last`, so nothing to fold). A session's opening blocks arrive exactly that way.
+const nextTurnIndex = (s: AssistantState): number => {
+  const { messages } = s.thread;
+  for (let i = s.message.index + 1; i < messages.length; i += 1) {
+    if (messages[i]?.role === "assistant") return i;
+  }
+  return -1;
+};
+
+/// The name of the turn that follows this message, by its first message's id -- the same name
+/// that turn's own summary line folds and unfolds.
+const followingTurnKeyOf = (s: AssistantState): string => {
+  const i = nextTurnIndex(s);
+  if (i < 0) return "";
+  const { messages } = s.thread;
+  return messages[turnBounds(messages, i).first]?.id ?? "";
+};
+
+const isFollowingFoldableOf = (s: AssistantState): boolean => {
+  const i = nextTurnIndex(s);
+  if (i < 0) return false;
+  const { messages } = s.thread;
+  const { first, last } = turnBounds(messages, i);
+  return last > first && turnIsSettled(messages, last, s.thread.isRunning);
+};
+
+/// WHETHER THE TURN THIS MESSAGE STANDS IN FRONT OF IS FOLDED -- the question an injected
+/// card asks (`thread.aui.tsx`'s `UserInjectionCard`), so that folding a turn takes the
+/// context it was handed with it: an opening's instruction file, the skill catalogue, a body
+/// a person asked for. Unfold the turn and the card is back, like any other step of it.
+///
+/// A CARD WITH NO TURN AFTER IT IS NEVER HIDDEN (`isFollowingFoldableOf` is false for it):
+/// there is nothing to fold it with, and hiding it would be the view losing a fact.
+export function useFollowingTurnFolded(): boolean {
+  const key = useAuiState(followingTurnKeyOf);
+  const foldable = useAuiState(isFollowingFoldableOf);
   const unfolded = useTurnOpened(key);
   return foldable && !unfolded;
 }

@@ -20,7 +20,10 @@
   tool body has its thread-id, a test has neither and passes nil."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [harness.infra.home :as home]))
+            [harness.infra.home :as home]
+            ;; THE SHAPE an injected body wears (`harness.cap.reminder`), and the label
+            ;; line this namespace reads a body's name back out of.
+            [harness.cap.reminder :as reminder]))
 
 (def convention-dir
   "The host's own layout for skills, relative to a home directory: a directory
@@ -130,7 +133,6 @@
   of them -- another host, a later version of this one -- still find it here."
   #{:name :description})
 
-(defn- escape-attr [s] (str/replace (str s) "\"" "&quot;"))
 
 (defn- unquote-value [v]
   (let [v (str/trim v)]
@@ -382,17 +384,19 @@
   (into []
         (keep (fn [m]
                 (when (= "user" (:role m))
-                  (when-let [[_ n] (re-matches #"(?s)<skill name=\"([^\"]*)\">.*" (str (:content m)))]
-                    (str/replace n "&quot;" "\"")))))
+                  (when-let [n (reminder/skill-name (:content m))]
+                    n))))
         messages))
 
 (defn- skill-message
-  "{:name .. :body ..} -> the user message that carries it. The tag is the frame
-  the model reads (this is an instruction that arrived, not something the user
-  just typed) and the anchor this namespace reads back."
+  "{:name .. :body ..} -> the user message that carries it. The `<system-reminder>` frame
+  is what tells the model this is an instruction that arrived rather than something the
+  user just typed, and the `Skill <name>` label line is the anchor this namespace reads
+  back (`loaded-names`). The name is NOT escaped: it is the rest of a plain-text line,
+  not an attribute, so there is nothing for it to break out of."
   [name body]
   {:role "user"
-   :content (str "<skill name=\"" (escape-attr name) "\">\n" body "\n</skill>")})
+   :content (reminder/wrap [(str "Skill " name) "" (str body)])})
 
 ;; ------------------------------------------------------------ the slash form
 ;;

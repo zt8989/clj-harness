@@ -1,9 +1,10 @@
 {
   "kind": {
     "system": "system",
+    "compacted": "compaction",
     "context": "context",
     "user": "user",
-    "assistant": "assistant",
+    "message": "assistant",
     "tool": "tool"
   },
   "row": {
@@ -18,6 +19,16 @@
     "count_other": "{{count}} turns",
     "items": "{{n}} items",
     "calls": "{{n}} calls"
+  },
+  "between": {
+    "label": "Between turns"
+  },
+  "summary": {
+    "turn": "{{items}} items · {{calls}} calls"
+  },
+  "toolbar": {
+    "collapseTurns": "Collapse turns",
+    "expandTurns": "Expand turns"
   },
   "call": {
     "label": "call {{n}}",
@@ -35,6 +46,8 @@
     "injected": "injected",
     "by": "by",
     "arrived": "arrived",
+    "written": "written",
+    "messages": "messages folded",
     "id": "id",
     "model": "model",
     "took": "took",

@@ -798,10 +798,10 @@
       (testing "a notice is appended, tagged like every other injection"
         (is (= 2 (count once)))
         (is (= "hi" (:content (first once))) "the client's own message is untouched")
-        (is (str/starts-with? (:content (second once)) "<job-ended"))
+        (is (str/starts-with? (:content (second once)) "<system-reminder>\nBackground job "))
         (is (str/includes? (:content (second once)) "[exit 0]") "how it went")
         (is (str/includes? (:content (second once))
-                           "<command>echo JOB-SAYS-$((6*7)); exit 0</command>")
+                           "Command: echo JOB-SAYS-$((6*7)); exit 0")
             "which command it was -- the id alone identifies nothing")
         (is (str/includes? (:content (second once)) "job_output")
             "and the one line that says where to read it")

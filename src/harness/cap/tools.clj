@@ -1152,11 +1152,12 @@
 ;; between sessions for a reason that has nothing to do with the tool's shape.
 (register! "skill"
   (tool (str "Load a skill -- a set of instructions for a kind of task. "
-             "The skills available to this session are listed in the message tagged <skills> at the "
-             "start of the conversation; call this with one of those names when its description "
+             "The skills available to this session are listed under `Available skills` in the "
+             "opening context at the start of the conversation; call this with one of those names "
+             "when its description "
              "matches what you are about to do. The result is the skill's instructions, followed by "
              "the directory they live in -- a path any file they name is relative to.")
-        {"name" {:type "string" :description "The skill's name, as listed in <skills>."}}
+        {"name" {:type "string" :description "The skill's name, as listed under `Available skills`."}}
         [:name] t-skill))
 
 ;; --------------------------------------------------------- todo_write / todo_read

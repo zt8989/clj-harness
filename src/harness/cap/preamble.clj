@@ -7,7 +7,8 @@
   system message is replaced by the frozen prompt, otherwise it is prepended')
   into a rule about a family of them. Everything else the model is handed at the
   start of a conversation -- the instruction files, the skills catalog -- arrives as an
-  ordinary user message whose tag says what it is.
+  ordinary user message wearing a `<system-reminder>` frame whose first line says what
+  it is (`harness.cap.reminder`).
 
   THEY ENTER THE CONVERSATION ONCE, WHEN IT IS BORN (`.scratch/session-opening`):
   the run that births a session writes these messages into it
@@ -36,7 +37,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.infra.home :as home]
-            [harness.cap.skills :as skills])
+            [harness.cap.skills :as skills]
+            [harness.cap.reminder :as reminder])
   (:import [java.nio ByteBuffer]
            [java.nio.charset CharacterCodingException CodingErrorAction StandardCharsets]
            [java.nio.file Files]))
@@ -96,15 +98,21 @@
       (catch CharacterCodingException e
         (throw (ex-info "not valid UTF-8" {:cause :encoding}))))))
 
-(defn- escaped [s] (str/replace (str s) "\"" "&quot;"))
+(defn- instructions-message
+  "The folded instruction files -> the ONE user message that carries them all.
 
-(defn- instruction-message
-  "One folded instruction file -> the user message that carries it. The path is
-  on the tag so the model (and a reader of the log) can see which file said
-  this, and it is rendered ABSOLUTE because that is what the caller resolved."
-  [{:keys [path content]}]
+  ONE MESSAGE, NOT ONE PER FILE, and that is what 'merge the AGENTS.md files into one
+  injection' means. The shape is `harness.cap.reminder/instructions-lines`: dsh's own
+  opening sentence, then a section per file (`Instructions from: <path>`, a blank line,
+  the text). Each path is ABSOLUTE because that is what the caller resolved, and it is
+  what tells the model -- and a reader of the log -- which file said this.
+
+  A QUOTE IN A PATH IS ORDINARY TEXT NOW. The old `<instructions path=…>` tag forced an
+  attribute, which forced escaping; a label line does not, so nothing is escaped and a
+  path is carried exactly as the filesystem spells it."
+  [instructions]
   {:role "user"
-   :content (str "<instructions path=\"" (escaped path) "\">\n" content "\n</instructions>")})
+   :content (reminder/wrap (reminder/instructions-lines instructions))})
 
 (defn gather
   "FILES -> the material a run opens with, read fresh:
@@ -156,12 +164,12 @@
    files))
 
 (defn- skills-message
-  "The catalog block, or nil when this session has no usable skills. Same shape
-  as an instruction message and for the same reason: a user message and nothing
-  else, so it never becomes an AG-UI frame."
+  "The catalog block, or nil when this session has no usable skills. A user message and
+  nothing else, so it never becomes an AG-UI frame; the label line (`Available skills`)
+  is what a reader uses to tell it apart from the rest of the opening."
   [text]
   (when (seq text)
-    {:role "user" :content (str "<skills>\n" text "\n</skills>")}))
+    {:role "user" :content (reminder/wrap ["Available skills" "" (str text)])}))
 
 (defn messages
   "GATHERED -> the ordered user messages a conversation opens with.
@@ -169,10 +177,10 @@
   THE ORDER IS THE DECISION THIS FUNCTION EXISTS TO MAKE, and it is semantics
   rather than typography:
 
-    1. the instruction files, in the order they were resolved -- the OS home's
-       first, the project's second, so the more specific statement is the nearer
-       one;
-    2. the skills catalog, last of the opening blocks.
+    1. the instruction files, ALL OF THEM IN ONE BLOCK, in the order they were
+       resolved -- the OS home's first, the project's second, so the more specific
+       statement is the nearer one;
+    2. the skills catalog, last of the opening blocks (its own block).
 
   WHERE THEY LAND IS NOT THIS FUNCTION'S QUESTION: it answers the order among the
   blocks and nothing else. They enter the conversation once, in front of the question,
@@ -183,7 +191,7 @@
   reads in order meets the constraints it must always honour before the optional
   capabilities it may reach for."
   [{:keys [instructions skills]}]
-  (cond-> (mapv instruction-message instructions)
+  (cond-> (cond-> [] (seq instructions) (conj (instructions-message instructions)))
     (seq skills) (conj (skills-message skills))))
 
 (defn report
@@ -196,8 +204,9 @@
   is not handed to it. Nothing is truncated to fit here -- an oversized
   AGENTS.md goes in whole -- which is exactly why the number is worth reporting."
   [{:keys [instructions skills skipped]}]
-  (cond-> {:instructions (mapv (fn [{:keys [path content]}]
-                                 {:path path :chars (count content)})
-                               instructions)
-           :skipped (mapv identity skipped)}
-    (seq skills) (assoc :skills {:chars (count skills)})))
+  (let [injected (when (seq instructions) (:content (instructions-message instructions)))
+        menu     (when (seq skills) (:content (skills-message skills)))]
+    (cond-> {:instructions {:paths (mapv :path instructions)
+                            :chars (count (str injected))}
+             :skipped (mapv identity skipped)}
+      (seq skills) (assoc :skills {:chars (count (str menu))}))))

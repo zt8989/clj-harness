@@ -737,10 +737,14 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
 
 **服务端每轮算出来的注入物，人也能在会话栏里看见**——一张与工具卡同一套壳的折叠卡：折着只有一行
 `上下文注入 · <首行> · N 字节`，点开是那段字节（等宽、可滚动），一次注入一张。
+**一轮折上时，属于它的注入卡跟着一起收**（`card-parts/isKeptCardPart`）：注入是这一轮被递到的材料，
+折轮就把材料也收起来；**压缩卡不在此列**——它是「历史在这里被折过一次」的边界（`.scratch/compaction-frames`），
+折了也画。
 
 **它不是一个消息，而是一个 `data` part。** 每条注入在服务端是一条 `CUSTOM` 帧（见 [edge](edge.md)），
-适配器把它按顺序落成 `{kind: "data", name, value}`；`lib/injections.ts` 从 part 里算出**标题**（首行的标签，
-如 `<job-ended …>` → `job-ended`，认不出就用首行）、**预览**与**字节数**（UTF-8，中文一个字三字节）；
+适配器把它按顺序落成 `{kind: "data", name, value}`；`lib/injections.ts` 从 part 里算出**标题**（reminder
+里**首行标签行**——`Instructions from: …` / `Available skills` / `Skill <名字>` / `Background job …`；
+老记录里是 `<skill …>` 那种标签，认不出就用首行）、**预览**与**字节数**（UTF-8，中文一个字三字节）；
 `components/context-card.tsx` 用 `makeAssistantDataUI({name: "injected-context"})` 画它——**注册就是那个组件
 的挂载**（`app.tsx` 里挂在 `AssistantRuntimeProvider` 之内），`thread.aui.tsx` 那句
 `case "data": return part.dataRendererUI` 是抄来的，一行未改。文案进 `thread` 命名空间（中英两份）。
@@ -816,7 +820,13 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
 ## 轨迹（`Conversation` / `Trajectory` 两个视图）
 
 线程列上方有一条切换：`Conversation` 是今天这个页面，`Trajectory` 换成**轨迹视图**——
-按**轮**列出**模型当时手里到底有什么**，上方一条 `input` / `model` / `tools` 三条 lane 的时间轴。
+画一条**平铺的账本**（`:cells`，照 dsh 的形状）：一格一件东西，`Turn N` 与 `Between turns` 是粗分割线，
+上方一条 `input` / `model` / `tools` 三条 lane 的时间轴。
+**`system` 格不在任何轮里**：它不是哪一轮说的话，是那一轮被交到手里的东西，所以它站在自己那条 `turn-start`
+**前面**，折轮也折不到它（老画法里它是 `turns[0].items[0]`，看起来像第一轮的第一条——那是折法的选择，
+不是事件顺序错了）。**工具栏有 `Collapse turns` / `Expand turns`**：折上的一轮只留轮头与一行摘要
+（`N 个条目 · N 次模型调用`），**轮里的 `context` 格跟着 `message` / `tool` 一起收**——这就是牛总那句
+「按轮次折叠的时候要把上下文注入一起折叠」。
 
 **默认只有那份列表**，点某一行才在右侧展开**那一条**（再点一次、或点 × 收回，宽度还给列表）。
 这里**没有固定的第二列、也没有一对固定页签**——因为记录里本来就没有「这一轮的 system 提示词」这种东西：
@@ -840,9 +850,10 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
   绝不拿「这个会话今天有什么」去填。
-- **它是流式的，而且只有被问到才取。** 路由答的是 **NDJSON**（首行是头、其后一轮一行，
-  `harness.edge.trajectory/fold-trajectory` 折完一轮就吐一轮），`lib/trajectory.ts` 边收边画，
-  `trajectory-view.tsx` 每落一个 turn 就 `setPayload` 一次——长记录不再等整份折完才画第一轮。
+- **它是流式的，而且只有被问到才取。** 路由答的是 **NDJSON**：首行是头，其后**一行一批格**
+  （`{:from :cells}`——不再会变的那些，然后是整条开放尾部再来一遍；`harness.edge.trajectory/drift`
+  是这条规则唯一一处）。`lib/trajectory.ts` **按 `:from` 剪接**（同一段尾部收到两次也只留一份），
+  每收一批就 `setPayload` 一次——长记录不再等整份折完才画第一轮。
   组件**只在 `Trajectory` 这一栏被打开时挂载**（`app.tsx` 的视图切换），所以 `对话` 一栏不发这个
   请求：下行只承载对话本身，轨迹是按需取的那一半。
 - **注入物整场只画一次。** 服务端没有会话，所以每个 run 都会把开场块重新拼一遍、把历史里还留着的
@@ -851,10 +862,12 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
   （与 `system` 条同一条规矩）。技能的正文也一样：**用一次画一次**，画在用它的那一轮。
   折法在 `harness.edge.trajectory/add-context`（去重记在会话这一层），客户端照旧只画折好的东西。
 - **跑着的调用占一行，还没有结果。** 一轮的**返回侧 `message` 行**（助手那条、以及回答工具的那条）是 `:run/done`
-  之后才写的，所以服务端对**仍然开着的那一轮**多折一次：**已经到达、还没被回答的调用**照样是 `items` 里的一条
-  `tool`（`harness.edge.trajectory/pending-tool-items`）。它**没有 `result`**（缺席，不是空串），所以这一行
+  之后才写的，所以服务端对**仍然开着的那一轮**多折一次：**已经到达、还没被回答的调用**照样是账本里的一条
+  `tool` 格（`harness.edge.trajectory/pending-tool-items`）。它**没有 `result`**（缺席，不是空串），所以这一行
   **不画 `→ 结果` 那一半**，右侧面板的「已执行」说**尚未**（「否」留给真没跑的、被人拦下的那种）。返回侧落盘后，
   同一条被换成 `message` 行折出来的那条——名字、参数、结果俱全，**一次调用始终只有一行**。
+  **没结束的轮也没有 `turn-end`**：轮结束的凭据只有「后一轮开了」或「记录最后一帧是终态」，
+  所以尾巴上那一轮只有轮头，`Collapse turns` 照样折得动它。
 - **切换住在 `app.tsx`，整列换掉，输入框也一起没有**——轨迹是读一份已发生的东西，不是一个能打字的地方。
   它**不写任何存储**：这是看会话的一种方式，不是关于会话的偏好。轨迹那半边只画**当前显示的那一场**
   （每份 host 只在 visible 时渲染整列），所以不显示的会话只挂着 runtime，不渲染消息。
@@ -871,10 +884,12 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
   就是折法错了**，这是这个视图的自查手段。没有对应条目的记号（比如一次还没配对到回答的模型调用）
   照旧画出来，但**不是按钮**：它是一个事实，不是一扇通往空面板的门。
 - **配色只有一份**（`trajectory-colors.ts`）：`input`/`model`/`tools` 三条 lane 的颜色
-  就是 `user`/`assistant`/`tool` 三个标签的颜色，因为一条 lane 上的记号**就是**同一类条目
+  就是 `user`/`message`/`tool` 三个标签的颜色（模型自己说的那条按 dsh 叫 `message`，界面上的字仍是「助手」），
+  因为一条 lane 上的记号**就是**同一类条目
   ——lane 与条目说同一种颜色语言，读者不必学第二套。`LANE_KIND` 把这份对应写下来，
   而不是留给下一个加 lane 的人去猜。
-- 一格里没有的都不编：老记录（早于 `model/*` 那两行）**没有** `calls`、模型 lane 空着并如实说；
+- 一格里没有的都不编：老记录（早于 `model/*` 那两行）**没有** `calls`（缺席的是那一轮 `turn-start` 上的
+  `:calls` 键，不是空数组）、模型 lane 空着并如实说；
   被否决的调用**没有** `startedAt`（它不是「0 秒」），画成空心记号。
 - 文案与 UI 其余部分同语言（见[文案与语言](#文案与语言i18n)：这一面的文案进
   `ui/src/locales/*/trajectory.json`），`data-slot` 是它的挂点（`trajectory-view` / `trajectory-turn` /

@@ -94,6 +94,7 @@
             [harness.kernel.loop :as loop]
             [harness.cap.claims :as claims]
             [harness.cap.preamble :as preamble]
+            [harness.cap.reminder :as reminder]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
             [harness.infra.stream :as stream]
@@ -865,27 +866,23 @@
   "WHO PUT THIS MESSAGE INTO THE ARRAY, for a message a RUN added: what the model returned,
   what a tool answered, and what the pre-LLM step derived along the way.
 
-  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the tag answers the rest: a skill
-  body and a job's ending are wrapped by the code that writes them (`harness.cap.skills`
-  writes `<skill name=..>`, `harness.cap.jobs` writes `<job-ended ..>`), and the skills
-  namespace reads the first of those tags back out of the conversation
-  (`loaded-skill-names`), so this is the same reading rather than a new convention. Anything
-  else a run injected is an `injection` and says so."
+  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the block's LABEL LINE answers the
+  rest. Every injection now wears the same `<system-reminder>` frame, so the frame itself
+  cannot tell them apart; the first line inside it can, and `harness.cap.reminder/kind-of`
+  is that reading, kept beside the writer that puts the label there. Anything it calls an
+  `injection` is one."
   [message]
   (let [content (str (:content message))]
     (case (:role message)
       "assistant" "model"
       "tool"      "tool"
-      (cond
-        (str/starts-with? content "<skill name=")   "skill"
-        (str/starts-with? content "<job-ended ")    "job"
-        ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
-        ;; the instruction files and the skills catalog were folded in at the birth, so a
-        ;; later run's copy is the same kind of fact -- an `opening` -- and the tags are the
-        ;; ones `harness.edge.ag-ui/opening-entries` writes.
-        (str/starts-with? content "<instructions")  "opening"
-        (str/starts-with? content "<skills")        "opening"
-        :else                                       "injection"))))
+      ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
+      ;; the instruction files and the skills catalog were folded in at the birth, so a
+      ;; later run's copy is the same kind of fact -- an `opening` -- and `kind-of` reads
+      ;; the label lines `harness.cap.preamble` writes (`Instructions from`, `Available
+      ;; skills`). A skill body (`Skill <name>`) and a job's ending (`Background job <id>
+      ;; ended`) are per-run derivations, which is why they are their own sources.
+      (reminder/kind-of content))))
 
 (defn- log-message!
   "ONE \"message\" line, for one message a RUN put in the array -- the row's payload is the
@@ -3904,7 +3901,7 @@
                                                (compaction/config stem))))))
 
 (defn- trajectory-get
-  "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
+  "GET /api/threads/<stem>/trajectory -- one session's LEDGER as the MODEL saw it,
   folded from its RECORD (harness.edge.trajectory): the system message that was in
   force, the context spliced in beside it, every user message, and each tool call with
   its arguments and result.
@@ -3962,12 +3959,12 @@
                       ;; returned -- so a throw here is a silently dropped connection
                       ;; rather than a 500. The stream is netted and simply ends.
                       (try
-                        ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
+                        ;; THE HEADER FIRST: a reader knows what it is reading before the first cell.
                         (hk/send! ch {:headers headers
                                       :body    (str (json/write-str header) "\n")}
                                   false)
-                        (let [sent  (atom 0)
-                              ;; THE TURNS THIS VIEW HAS NOW, then whatever finalizes later.
+                        (let [written (atom 0)
+                              ;; THE CELLS THIS VIEW HAS NOW, then whatever finalizes later.
                               ;; Reading the view costs no file: it is a value on the session.
                               push! (fn []
                                       (let [payload (if (some? held)
@@ -3975,18 +3972,15 @@
                                                               trajectory/trajectory-answer)
                                                       initial)]
                                         (when (some? payload)
-                                          (let [turns (:turns payload)
-                                                ;; THE NEW FINALIZED TURNS, then THE OPEN ONE
-                                                ;; again: a turn still growing is re-sent, and the
-                                                ;; client replaces it by `:index` -- the same
-                                                ;; in-place rule the window's frames use.
-                                                finalized (max 0 (dec (count turns)))
-                                                from      (min @sent finalized)]
-                                            (doseq [turn (subvec turns from finalized)]
-                                              (hk/send! ch (str (json/write-str turn) "\n") false))
-                                            (reset! sent finalized)
-                                            (when (pos? (count turns))
-                                              (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
+                                          ;; THE NEW FINAL CELLS, THEN THE OPEN TAIL AGAIN
+                                          ;; (`trajectory/drift`): the tail really does change under
+                                          ;; a reader -- a call is drawn without its result and
+                                          ;; answered later -- so it is re-sent and SPLICED AT ITS
+                                          ;; `:from` rather than appended.
+                                          (let [{:keys [sent batches]} (trajectory/drift payload @written)]
+                                            (reset! written sent)
+                                            (doseq [batch batches]
+                                              (hk/send! ch (str (json/write-str batch) "\n") false))))))]
                           (push!)
                           (if (and (some? held) (mux/watching? stem))
                             ;; THE SESSION IS HELD *AND* SOMEBODY IS SUBSCRIBED TO IT, so every

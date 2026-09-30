@@ -111,7 +111,7 @@ developer's real home"）指向一个根本不存在的代码路径。两半一�
 - 要 home / 项目目录 / 配置目录的用例**自己造**：`harness.test-support/with-temp-env` 给它一对临时
   root + OS home（跑完连目录一起删掉），项目目录用 `temp-dir`；临时 root 里它会种一份最小
   `config.edn`，否则 run 会被「没有 `:default` provider」拒掉。**不要往 `isolate!` 那对里写**——
-  它是整个 JVM 共用的，留下的文件会变成下一条用例的输入（凭空多出的 `<instructions>` / `<skills>` 块）。
+  它是整个 JVM 共用的，留下的文件会变成下一条用例的输入（凭空多出的指令 reminder / 技能清单块）。
 - **临时目录一律 `temp-dir`，不要自己拼 `<tmpdir>/<名字>`**：它是 `Files/createTempDirectory`，名字由
   OS 取（同一个 label 两次是两个目录），目录交回来是**空的**，所以「先 delete 再 mkdirs」那两行要删掉。
   拼出来的名字上一个 run 用过、并排的另一个进程也在用——`java.io.tmpdir` 里那些前任留下的树就是这么来的。

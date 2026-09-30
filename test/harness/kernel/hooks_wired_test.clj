@@ -592,7 +592,7 @@
              (is (some #(str/includes? % "user rules") texts))
              (is (some #(str/includes? % "project rules") texts))
              (testing "tagged with an absolute path, not a bare filename"
-               (is (some #(str/includes? % (str "<instructions path=\"" (io/file proj "AGENTS.md") "\">"))
+               (is (some #(str/includes? % (str "Instructions from: " (io/file proj "AGENTS.md")))
                          texts))))))))))
 
 (deftest a-session-with-no-instruction-files-fires-nothing
