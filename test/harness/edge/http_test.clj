@@ -4975,8 +4975,10 @@
   ;; this used to compose was the same idea and only closed half the window.
   (support/temp-dir "http-git"))
 
-(defn- init-repo!
-  "A real repository at DIR, so the route meets git rather than a story about git.
+(defn- build-repo!
+  "A real repository at DIR, built by REAL git -- and THE ONE BUILD THIS NAMESPACE PAYS
+  FOR: every other repository the cases want is a copy (see `git-template`).
+
   Renamed rather than `init -b`: see harness.cap.git-test for why."
   [dir]
   (let [steps ["git init -q"
@@ -5009,6 +5011,29 @@
         (throw (ex-info (str "init-repo! failed in " dir ": " err)
                         {:dir dir :exit exit})))
       dir)))
+
+(def ^:private git-template
+  "The ONE repository this namespace has git build; every other one is a copy of it.
+
+  THREE DIRECTORIES NEED A REPOSITORY and no two of them can share one: the session route's
+  (`git-repo`), and the listing case's listed/unlisted pair -- one of which is then moved to
+  `side`, which is exactly why they cannot be the same directory. A git build is a spawn;
+  a copy is plain file operations (`harness.test-support/copy-tree!`), so git builds this
+  once and the cases copy it. THE TEMPLATE IS STILL GIT'S WORK, which is what keeps the
+  route meeting real git rather than a pre-fabricated `.git`."
+  (atom nil))
+
+(defn- git-template-repo
+  "The built-once repository the cases copy from."
+  []
+  (or @git-template
+      (reset! git-template (build-repo! (support/temp-dir "http-git-template")))))
+
+(defn- init-repo!
+  "A repository at DIR -- A COPY of the one this namespace builds (`git-template-repo`).
+  A case gets a clean repository of its own, and git is paid for once instead of per case."
+  [dir]
+  (support/copy-tree! (git-template-repo) dir))
 
 (defn- make-git-repo []
   (init-repo! git-repo))

@@ -49,16 +49,23 @@
   -- and this fixture would be the first thing to notice if it did not."
   [dir]
   (.mkdirs (io/file dir))
-  (run-in dir "git init -q")
-  (run-in dir "git config user.email test@example.invalid")
-  (run-in dir "git config user.name 'harness test'")
-  (run-in dir "git config commit.gpgsign false")
-  (spit (io/file dir "README.md") "hello\n" :encoding "UTF-8")
-  (run-in dir "git add README.md")
-  (run-in dir "git commit -q -m first")
-  (run-in dir "git branch -m main")
-  (run-in dir "git branch side")
-  dir)
+  ;; ONE SPAWN, NOT EIGHT. Each `run-in` is a `bash -lc`, and its login profile is most of
+  ;; a spawn (~0.7s on this machine, measured 2026-09-30 -- `docs/rules/testing.md` carries
+  ;; the number). The steps stay a list you can read; the SHELLS around them are what is
+  ;; saved. `run-in` still checks the exit, so a step that fails stops the rest and the
+  ;; fixture fails, rather than a half-built repository failing a case for its own reasons.
+  (let [steps ["git init -q"
+               "git config user.email test@example.invalid"
+               "git config user.name 'harness test'"
+               "git config commit.gpgsign false"
+               "git add README.md"
+               "git commit -q -m first"
+               "git branch -m main"
+               "git branch side"]]
+    (.mkdirs (io/file dir))
+    (spit (io/file dir "README.md") "hello\n" :encoding "UTF-8")
+    (run-in dir (str/join " && " steps))
+    dir))
 
 (def ^:private template-root
   "The per-process root the template is built under, from the same
@@ -97,28 +104,6 @@
          (finally (support/wipe-tree! template-root)
                   (reset! template nil)))))
 
-(defn- copy-tree!
-  "SRC copied to DST with plain file operations -- no process, which is the whole
-  point: this is what replaced seven of the eight spawns per case.
-
-  PATHS ARE RELATIVIZED WITH `java.nio.file.Path`, NOT SLICED AS STRINGS. On Windows
-  `File.getPath` answers with backslashes, so subtracting a prefix spelled with
-  slashes matches nothing and the copy lands in the wrong place or nowhere --
-  `harness.layers-test`'s own docstring is about the day that happened, and this is
-  the version of the arithmetic that means the same thing on both platforms."
-  [src dst]
-  (let [root (io/file src)
-        src  (.toPath root)
-        dst  (.toPath (io/file dst))
-        none (make-array java.nio.file.attribute.FileAttribute 0)]
-    (doseq [f (file-seq root)]
-      (let [target (.resolve dst (.relativize src (.toPath f)))]
-        (if (.isDirectory f)
-          (java.nio.file.Files/createDirectories target none)
-          (do (java.nio.file.Files/createDirectories (.getParent target) none)
-              (java.nio.file.Files/copy (.toPath f) target
-                                        (make-array java.nio.file.CopyOption 0))))))))
-
 (defn- scratch-repo
   "A fresh repository at DIR: a COPY of the template, which is what eight processes
   bought for every case until this was written.
@@ -139,7 +124,7 @@
   own trees were being taken (measured 2026-09-22). See
   harness.test-support/track-temp-dir!."
   [dir]
-  (copy-tree! (template-repo) dir)
+  (support/copy-tree! (template-repo) dir)
   (support/track-temp-dir! dir))
 
 (def ^:private dir

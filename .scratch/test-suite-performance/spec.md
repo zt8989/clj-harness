@@ -222,8 +222,32 @@ narrowing 策略，而 `cap.editing` 的那个每次都要解析本会话的配�
 照旧逐名；bulk 答案照样能收窄；只给集合的被按名拒绝）；`editing_mode_tools_test` 一条（两条门对同一组
 名字必须给出同一答案）。该组原有 7 fail + 1 err，与基线逐条相同。
 
+## 票 06：剩下的两处 git 夹具 spawn（2026-09-30 完成，票已删）
+
+**两处，两种省法。**
+
+**(a) `cap/git_test/build-repo!` 的八次 spawn 合成一条链**（步骤仍是可枚举的 vector；`run-in` 照旧
+查退出码，所以某一步失败会停在它那里，而不是留下半建好的仓库去让下面的用例为一个无关的理由红）。同一个
+仓库、同一窗口交替量（`dev/scratch_repo_copy_cost.clj` 的 (a) 段）：**八个 spawn ≈ 10.4s vs 一条链
+≈ 2.3s**（这台机器现在被别的 agent 的测试占着，一次 spawn 约 1.3s，所以比票 01 那次量的更大——看比例，
+别看绝对值）。
+
+**(b) `edge/http_test` 的三个仓库改成「建一个、其余拷贝」。** 三个目录不能共用（一个会被切到 `side`，
+listing 那条要一个被列出的、一个不被列出的），但只有第一个需要花钱在 git 上：**模板仍是 git 建的**
+（路线见的还是真 git，不是捏出来的 `.git`），另外两个用 `harness.test-support/copy-tree!` 拷。
+同窗口交替量（(b) 段）：**建三个 ≈ 6.8–7.9s vs 建一个 + 拷两个 ≈ 2.25s**（省约 5s；第三轮 9.1s 是
+负载尖峰，如实记）。这次省的是**两次 git 构建**，不是两次 spawn。
+
+**`copy-tree!` 从 `cap/git_test` 提到 `harness.test-support`**：两个命名空间现在都要它，而它那段
+「用 `java.nio.file.Path` 相对化、不是切字符串」的算术踩过 Windows 的坑，不该有第二份。顺手修掉一个
+真 bug：它原来答的是 `doseq` 的 **nil**——`git_test` 的 `scratch-repo` 靠 `track-temp-dir!` 的返回值
+遮住了这件事，而 `http_test` 的 `init-repo!` 直接把 nil 当仓库路径用了出去（listing 那条用例当场
+NPE）。现在它**答 DST**。
+
+**用例**：`cap.git-test` 与 `edge.http-test`（后者那两条走 `/api/git` 的用例）绿；整轮见下。
+
 ## 还没做的（已量化，见 issues/）
 
 `shell-test` 的 ~20s 固定超时（票 03）；整轮 22% 的 CPU 占用指向跨命名空间并行（票 04）；前端 80.5s 的
-串行是设计使然（票 05）；还剩两处 git 夹具的 spawn（票 06）；runner 的逐条计时开关（票 07）。
+串行是设计使然（票 05）；runner 的逐条计时开关（票 07）。
 **产品那一侧**：一次 `/api/git` 读已修到 ≈0.13s（见 `.scratch/git-read-cost/`）。
