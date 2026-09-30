@@ -255,6 +255,57 @@ const cases: Case[] = [
     },
   },
   {
+    name: "a-copy-whose-numbers-run-backwards-is-rebuilt-from-the-page-not-merged-into",
+    run: async () => {
+      // THE 2026-09-30 SCRAMBLE, AS A RULE. A copy built from a server whose entries had no
+      // numbers holds OLD entries appended after newer ones -- the newest turn in the middle and an
+      // old turn at the bottom of the page. Merging a tail page into it would keep that order for as
+      // long as the copy lives, and nothing else ever re-reads a window a page already holds. So the
+      // copy is REBUILT from the page, and the count says how much was dropped.
+      const scrambled: Window = held([entry("m9", 9), entry("m2", 2), entry("m3", 3)], 2, true, 9);
+      const healed = aligned(scrambled, {
+        type: "tail",
+        entries: [entry("m2", 2), entry("m3", 3), entry("m9", 9)],
+        baseSeq: 2,
+        cursor: 9,
+        hasMore: true,
+        state: "settled",
+      });
+      expect(healed.effect).toEqual({ kind: "rebuilt", dropped: 3 });
+      expect(healed.window.entries.map((e) => (e.message as { id: string }).id)).toEqual([
+        "m2",
+        "m3",
+        "m9",
+      ]);
+
+      // A COPY THAT IS IN ORDER IS MERGED, AS ALWAYS: the rule is about a copy that cannot be a
+      // window, not about every read being a rebuild.
+      const whole = aligned(held([entry("m1", 0), entry("m2", 1)], 0, true, 1), {
+        type: "tail",
+        entries: [entry("m1", 0), entry("m2", 1)],
+        baseSeq: 0,
+        cursor: 1,
+        hasMore: true,
+        state: "settled",
+      });
+      expect(whole.effect).toEqual({ kind: "none" });
+      expect(whole.window.state).toBe("settled");
+
+      // AND AN ENTRY WITH NO NUMBER IS NOT OUT OF ORDER: it is still in the writer's queue, so it
+      // has nothing to be compared WITH -- a copy holding one is not rebuilt for that.
+      const waiting = aligned(held([entry("m1", 0), entry("m9", null)], 0, true, 0), {
+        type: "tail",
+        entries: [entry("m1", 0), entry("m9", null)],
+        baseSeq: 0,
+        cursor: 0,
+        hasMore: true,
+        state: "running",
+      });
+      expect(waiting.effect).toEqual({ kind: "none" });
+      expect(waiting.window.entries).toHaveLength(2);
+    },
+  },
+  {
     name: "the-end-of-a-window-and-its-generation-both-mean-reopen",
     run: async () => {
       const start = held([entry("m1", 0)], 0, true, 0);

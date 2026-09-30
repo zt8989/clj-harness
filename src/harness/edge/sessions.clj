@@ -229,6 +229,7 @@
 (def append! session/append!)
 (def settle! session/settle!)
 (def land-at! session/land-at!)
+(def number-entries! session/number-entries!)
 (def land! session/land!)
 ;; THE RUN STATE'S ADAPTER HALF. The kernel owns the REGISTRY (the pins, the refusal,
 ;; the stop switch -- it cannot see the store and must not), and the store's column

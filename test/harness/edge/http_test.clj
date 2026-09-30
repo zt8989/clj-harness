@@ -17,6 +17,7 @@
             [harness.kernel.hooks :as hooks]
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
+            [harness.kernel.session :as session]
             [harness.edge.ag-ui :as ag]
             [harness.edge.host :as host]
             [harness.edge.http :as http]
@@ -5688,6 +5689,14 @@
   [dir tid]
   (boolean (:running (session-row-of dir tid))))
 
+(defn- blank-numbers!
+  "Leave TID's conversation the way a process that had NO NUMBERING left it: every entry unnumbered
+  (`.scratch/window-self-heal/`). A TEST-ONLY door, and a `swap!` on the private registry is the only
+  honest way to spell 'this number was never written' -- the repair under test is what puts it back."
+  [tid]
+  (swap! @#'session/registry update-in [tid :entries]
+         (fn [es] (mapv #(assoc % :seq nil) (or es [])))))
+
 (defn- bind!
   "Bind TID to DIR through the ordinary route, asserting it worked."
   [tid dir]
@@ -6376,6 +6385,44 @@
                "and each entry wears the number the record's own fold gives that same entry")))
        (testing "and the run kept exactly ONE terminal frame"
          (is (= 1 (count (terminals "sofar-a")))))))))
+(deftest a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read
+  ;; A SESSION THIS PROCESS ALREADY HOLDS, WHOSE RUNS ENDED IN A PROCESS THAT HAD NO NUMBERING
+  ;; (`.scratch/window-self-heal/`): its entries carry `:seq nil`, and the rows that decided them died
+  ;; with the run that wrote them -- only the RECORD still says where each entry arrived. So a read
+  ;; hands the numbers back (a STREAMING fold of that file, `harness.edge.http/reconcile-numbers!`),
+  ;; and the window it answers with is one a reader can cut a page from and ask a delta of. Before
+  ;; this, such a session waited for a put-away or a restart, and until then `since` answered the
+  ;; WHOLE conversation -- the scrambled window of 2026-09-30.
+  (with-server
+   "heal-a"
+   [{:content "an answer"}]
+   (fn []
+     (let [sock (fire-run! "heal-a")]
+       (try
+         ;; THE RUN MUST HAVE REACHED ITS TERMINAL, and 'the file appeared' is not that: the birth
+         ;; writes the first rows BEFORE the run registers, so a file that exists says nothing about
+         ;; whether `running?` is a real reading yet (the same race the crash case names).
+         ;; (the read is guarded: the file does not exist until the writer creates it, and a case that
+         ;; throws on the way in would fail for the wrong reason)
+         (is (until #(try (boolean (seq (terminals "heal-a"))) (catch Throwable _ false)) 5000)
+             "the run reached its terminal frame")
+         (is (until #(not (http/running? "heal-a")) 5000) "and the run ended")
+         (finally (.close sock))))
+     (testing "the state an older process left behind: numbers that were never written"
+       (blank-numbers! "heal-a")
+       (is (some nil? (map :seq (session/display "heal-a")))
+           "the fixture really has unnumbered entries, or this case proves nothing"))
+     (testing "and the next read hands back the ones the RECORD gives, entry for entry"
+       (let [body    (read-json (api-call :get "/api/threads/heal-a/page" nil))
+             on-file (into {} (map (juxt (comp :id :message) :seq))
+                           (replay/entries (replay/read-records (log-file-for "heal-a"))))]
+         (is (every? some? (map :seq (:entries body)))
+             "a read of a session this process holds must answer numbers")
+         (is (every? (fn [e] (= (get on-file (get-in e [:message :id])) (:seq e))) (:entries body))
+             "each entry wears the number the record's own fold gives it")))
+     (testing "and it happens once: the session now says it has been looked at"
+       (is (true? (sessions/fold-value "heal-a" :numbered-from-record)))))))
+
 (deftest a-run-that-is-being-written-tells-the-window-watcher-the-record-grew
   ;; A PAGE THAT RELOADED INTO A RUNNING SESSION HOLDS A WINDOW AND NOTHING ELSE, and a
   ;; window reads the RECORD while a run of the session is in flight (memory folds a run's

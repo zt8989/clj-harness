@@ -4784,6 +4784,42 @@
             {:ok (:entries e) :live true :state (live-state stem)})))
     (record-entries stem false)))
 
+(defn- reconcile-numbers!
+  "GIVE A CONVERSATION THIS PROCESS ALREADY HOLDS THE NUMBERS ITS RECORD SAYS -- the repair for a
+  session whose runs ended in a process that PREDATES the numbering (`.scratch/window-self-heal/`):
+  its entries carry `:seq nil`, and nothing in memory can say what they should be, because the rows
+  that decided them died with the run that wrote them. The record is the only place they still exist,
+  so it is read ONCE -- a STREAMING fold (`replay/fold-entries`, the same reader that gives a window
+  its numbers) -- and the names it answers are handed to the session (`number-entries!`).
+
+  WHEN IT DOES NOT RUN, and each of these is a reason on its own:
+    * nobody here holds the conversation, or it has no log -- nothing to number, nothing to read;
+    * a run of it is IN FLIGHT: its newest entries have no number YET, on purpose, and the run that
+      is writing them is the door they will come through (`harness.edge.http/runner`);
+    * `:numbered-from-record` on the session's fold table says it has been looked at. A session
+      BORN from the record is numbered by that walk and never needs this; one that has been looked at
+      once must not be looked at again on every read (the flag, not the scan, is what keeps a
+      well-formed conversation from paying for this at all).
+
+  A READ STILL WRITES NOTHING: no record byte, no claim, no birth -- only numbers in the table. The
+  same shape `revive-parks!` has beside it, and for the same reason: a reader handed a conversation
+  it can neither cut a page from nor ask a delta of is a reader misled."
+  [stem]
+  (let [session (sessions/live-entry stem)]
+    (when (and (some? session)
+               (not (sessions/fold-value stem :numbered-from-record))
+               (not (sessions/running? stem))
+               (some #(nil? (:seq %)) (:entries session)))
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (sessions/number-entries!
+         stem nil
+         (into {} (keep (fn [e] (when-some [id (get-in e [:message :id])] [id (:seq e)])))
+               (replay/fold-entries f))))
+      ;; AND THE SESSION IS MARKED LOOKED AT, log or no log: a conversation with no record has
+      ;; nothing to be numbered BY, and asking that again on every read would be a file lookup (and
+      ;; a scan) per read for an answer that cannot change.
+      (sessions/set-fold-value! stem :numbered-from-record true))))
+
 (defn- read-entries
   "`read-entries-raw` (above, which says everything about WHERE an answer comes from), with
   one step in front of the answer: the parks this conversation is waiting on are rebuilt
@@ -4797,6 +4833,7 @@
   words, under the same ids -- so the card goes on being answerable, and a READ still writes
   nothing but that: no record byte, no claim, no birth, and never twice for one park."
   [stem]
+  (reconcile-numbers! stem)
   (let [read (read-entries-raw stem)]
     (if-some [es (:ok read)]
       (assoc read :ok (sessions/revive-parks! stem es))
@@ -4816,6 +4853,7 @@
   with nothing to say about which half; the PAGE route is where a broken record is reported
   BY NAME (`read-entries`)."
   [stem since]
+  (reconcile-numbers! stem)
   (let [from-record (when (running? stem) (:ok (record-entries stem true)))
         page (cond
                (nil? from-record)

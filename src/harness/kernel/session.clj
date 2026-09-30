@@ -872,9 +872,12 @@
        (ring! (str thread-id) {:kind :entries}))
      entered)))
 
-(defn- number-entries!
+(defn number-entries!
   "Fill in `{entry-id line}` for THREAD-ID's entries of GROUP that have no number yet -- the
   numbers a caller got from folding this run's OWN rows (`harness.edge.replay/entries-of-rows`).
+  GROUP NIL MEANS ANY GROUP, which is the shape a REPAIR has: a conversation whose runs ended in a
+  process that predates the numbering has entries with no number in every group (see
+  `harness.edge.http/reconcile-numbers!`), and the fold that answers them is the whole record's.
 
   IT IS A DOOR BESIDE `land-at!` RATHER THAN ONE OF ITS MODES, because the two do not answer the
   same question: `land-at!` is the WRITER saying 'the line that carried this entry is N', by the
@@ -884,11 +887,11 @@
   map does not have keeps its nil for `land!` to fill."
   [thread-id group numbers]
   (let [id (str thread-id)
-        g  (str group)]
+        g  (when (some? group) (str group))]
     (swap! registry update-in [id :entries]
            (fn [es]
              (mapv (fn [e]
-                     (if (and (= g (:group e))
+                     (if (and (or (nil? g) (= g (:group e)))
                               (nil? (:seq e))
                               (contains? numbers (:id (:message e))))
                        (assoc e :seq (long (get numbers (:id (:message e)))))
