@@ -193,8 +193,37 @@ round 3:  old 7264ms   new 1542ms   saved 5722ms
 spawn 的实测成本）、`dev/scratch_git_fixture_cost.clj`（一个仓库老写法 vs 新写法，同一窗口交替量）、
 `dev/scratch_http_client_cost.clj`（一次真 run 的客户端各阶段：机件 ~55ms，剩下 ~195ms 是 run 本身）。
 
+## 票 02：`tools/specs` 每个名字问一遍策略（2026-09-30 完成，票已删）
+
+**证明**（`dev/scratch_specs_cost.clj`，计数而不是猜）：一次 `specs` 里 `harness-config`
+被调用 **22 次**（20 个名字 + 2），单次约 0.5ms —— 正是那 8ms 里的大头。`served?` 对每个名字问一遍所有
+narrowing 策略，而 `cap.editing` 的那个每次都要解析本会话的配置（`editing-mode` → `blocks` →
+`project/harness-config`，docstring 明写每次重读，不快照）。
+
+**修**：`install!` 的 `:narrow` 多一个可选键 `:served-names`（一次答完整个集合）。`specs` 于是每个策略
+只问一次；只有 `:served?` 的策略照旧逐名问。**两扇门必须给出同一答案**，所以只给 `:served-names` 的
+策略在 `install!` 就被按名拒绝（执行缝按名单问 `:served?`，只答集合的策略会让名字从表里消失却仍然
+可调用 —— 那正是拒绝语汇要把两种状态分开的那一对）。`served?` 这个公开的按名单问门保留不动（子代理按
+父会话推导自己的表要用它）。**没有新增缓存**：模式仍然每次现求，改 config.edn 下一次问就生效。
+
+**实测（同一台机器、同一会话；先热身再取 10 次均值；对照是把三处源码 checkout 成 main 的版本跑同一条
+脚本）**：
+
+| | 改动前 | 改动后 |
+|---|---|---|
+| 一次 `specs` 里 `harness-config` | 22 次 | **3 次** |
+| `specs(thread-id)` 均值 | 8ms | **3ms** |
+| `specs(nil)` 均值 | 10ms | **5ms** |
+
+省下的钱随工具数增长（从前是每个名字读一次配置）。剩下那 3 次是常数：`served-names` 自己一次，另两次是
+`read` / `write` 各自的 `:describe` 在说自己的模式——不是按名字重复。
+
+**用例**：`tools_test` 一条（有 `:served-names` 的策略被问一次、`:served?` 零次；只有 `:served?` 的
+照旧逐名；bulk 答案照样能收窄；只给集合的被按名拒绝）；`editing_mode_tools_test` 一条（两条门对同一组
+名字必须给出同一答案）。该组原有 7 fail + 1 err，与基线逐条相同。
+
 ## 还没做的（已量化，见 issues/）
 
-`tools/specs` 带线程时 127ms/次（票 02）；`shell-test` 的 ~20s 固定超时（票 03）；整轮 22% 的 CPU 占用
-指向跨命名空间并行（票 04）；前端 80.5s 的串行是设计使然（票 05）；还剩两处 git 夹具的 spawn（票 06）；
-runner 的逐条计时开关（票 07）。**产品那一侧**：一次 `/api/git` 读 ≈1.6s —— 见 `.scratch/git-read-cost/`。
+`shell-test` 的 ~20s 固定超时（票 03）；整轮 22% 的 CPU 占用指向跨命名空间并行（票 04）；前端 80.5s 的
+串行是设计使然（票 05）；还剩两处 git 夹具的 spawn（票 06）；runner 的逐条计时开关（票 07）。
+**产品那一侧**：一次 `/api/git` 读已修到 ≈0.13s（见 `.scratch/git-read-cost/`）。

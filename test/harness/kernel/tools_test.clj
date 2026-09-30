@@ -1255,3 +1255,45 @@
                                                    :arguments (json/write-str {})}}
                                          "jt-list-nothing"))]
         (is (= jobs/no-jobs-line (str/trim answer)))))))
+
+(deftest a-policy-that-answers-for-the-whole-table-is-asked-once
+  ;; THE BULK DOOR of `install!`'s :narrow. A policy whose per-name answer is expensive --
+  ;; the editing one resolves this session's config.edn -- can answer for a whole
+  ;; collection instead, and `specs` asks that ONCE rather than once per tool. COUNTED, not
+  ;; timed: a count says which door the seam used, and that is the thing that can regress.
+  (testing "a policy offering :served-names is asked once, and its :served? not at all"
+    (let [bulk (atom 0)
+          one  (atom 0)
+          td   (tools/install! {:name   "counting"
+                                :narrow {:served?      (fn [_ _] (swap! one inc) true)
+                                         :served-names (fn [_ names] (swap! bulk inc) names)}})]
+      (try
+        (let [names (mapv #(get-in % [:function :name]) (tools/specs "bulk-thread"))]
+          (is (seq names) "there is a table to ask about")
+          (is (= 1 @bulk) "the bulk door was asked once for the whole table")
+          (is (zero? @one) "and the per-name door was never asked"))
+        (finally (td)))))
+  (testing "a policy with only :served? is still asked per name -- the bulk door is optional"
+    (let [one (atom 0)
+          td  (tools/install! {:name "counting-per-name"
+                               :narrow {:served? (fn [_ _] (swap! one inc) true)}})]
+      (try
+        (let [names (mapv #(get-in % [:function :name]) (tools/specs "bulk-thread"))]
+          (is (seq names))
+          (is (= (count names) @one) "exactly one ask per name"))
+        (finally (td)))))
+  (testing "and a bulk answer still narrows: the names it leaves out are gone"
+    (let [td (tools/install! {:name   "withholder"
+                              :narrow {:served?      (fn [_ n] (not= n "read"))
+                                       :served-names (fn [_ names] (remove #{"read"} names))}})]
+      (try
+        (is (not (contains? (set (mapv #(get-in % [:function :name])
+                                     (tools/specs "bulk-thread")))
+                            "read")))
+        (finally (td)))))
+  (testing "and a policy that offers ONLY the collection is refused by name"
+    ;; The seam asks `:served?` per call, so a bulk-only policy would hide a name from the
+    ;; array while still running its calls. The boundary is where that is caught.
+    (is (thrown-with-msg? Exception #"also answer for one name"
+                          (tools/install! {:name   "bulk-only"
+                                           :narrow {:served-names (fn [_ names] names)}})))))

@@ -324,3 +324,14 @@
   (testing "and the failure names the file, so it is fixable in place"
     (let [m (try (tools/specs "emt-broken") nil (catch Exception e (ex-message e)))]
       (is (str/includes? m (.getAbsolutePath (home/config-file)))))))
+
+(deftest the-bulk-door-and-the-per-name-door-answer-the-same-names
+  ;; `specs` asks `served-names` now, so the two doors of the EDITING policy must agree --
+  ;; otherwise the toolset changes and nothing can say why. The bulk door exists only to
+  ;; stop resolving this session's config.edn once per tool.
+  (let [names (vec (keys (tools/effective-tools "edt-bulk")))]
+    (is (seq names))
+    (doseq [tid [nil "edt-bulk"]]
+      (is (= (filterv #(editing/served? tid %) names)
+             (vec (editing/served-names tid names)))
+          (str "the doors disagree for " (pr-str tid))))))

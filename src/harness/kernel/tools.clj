@@ -186,6 +186,22 @@
                                  ;   installed a turn is just calls, and every one
                                  ;   of them runs on its own.
      :narrow  {:served? (fn [thread-id name])   ; which names this session is served
+               :served-names                                 ; ...or answer for the WHOLE
+                                                             ; collection in one ask. Optional:
+                                                             ; a policy whose per-name
+                                                             ; answer is expensive (it
+                                                             ; resolves this session's
+                                                             ; config) offers it, and a
+                                                             ; table's derivation then asks
+                                                             ; once instead of per name.
+                                                             ; IT MUST AGREE WITH
+                                                             ; :served?, which the seam
+                                                             ; asks per call; a policy
+                                                             ; giving only this one is
+                                                             ; REFUSED (they would answer
+                                                             ; differently, and a name
+                                                             ; would be hidden yet
+                                                             ; runnable).
                :refuse  (fn [thread-id name])}   ; ...and what to say when it is not
                                                  ;   ONE policy per layer, and a layer
                                                  ;   may install a second one beside
@@ -215,6 +231,18 @@
   wants the second has to mean it."
   [{:keys [name tools disable planner narrow unattended tools-for disabled-for]
     :as _contribution}]
+  ;; THE TWO DOORS MUST BOTH BE THERE, and this is the one place that can say so. The seam
+  ;; asks `:served?` per call (the execution seam and the refusal both do), while a table
+  ;; derivation asks `:served-names` once -- and they answer the SAME question. A policy
+  ;; that offered only the collection would hide a name from the tools array while the
+  ;; seam went on serving and running it: absent from the list AND callable, which is
+  ;; exactly the pair of states the refusal vocabulary exists to keep apart.
+  (when (and (:served-names narrow) (not (:served? narrow)))
+    (throw (ex-info (str "a narrowing policy that answers for a whole collection must also"
+                         " answer for one name: the execution seam asks :served? per call,"
+                         " so a policy with only :served-names would hide a name from the"
+                         " table while still letting it run.")
+                    {:reason :narrowing-needs-both-doors :name name})))
   (let [id    (str (java.util.UUID/randomUUID))
         layer {:id id :name (or name id) :tools (or tools {})
                :disable (vec disable) :planner planner :narrow narrow
@@ -500,6 +528,11 @@
                (describe thread-id)
                {:description (:description t) :parameters (:parameters t)})))
 
+;; DECLARED RATHER THAN MOVED UP HERE: `served-names` belongs beside `served?` (it is the
+;; same question asked for a whole collection), and `specs` -- which is the caller that
+;; makes it worth having -- is defined above both of them.
+(declare served-names)
+
 (defn specs
   "The tools array as an OpenAI-compatible provider expects it, for THREAD-ID's
   effective toolset (base overlaid with its session additions/removals).
@@ -537,8 +570,12 @@
   that nothing changes at all while the roster holds."
   ([] (specs nil))
   ([thread-id]
-   (let [tools  (into {} (filter (fn [[n _]] (served? thread-id n))
-                                 (effective-tools thread-id)))
+   (let [effective (effective-tools thread-id)
+         ;; ONE ASK PER POLICY, NOT ONE PER NAME -- see `served-names`. The editing
+         ;; policy's per-name answer resolves this session's config.edn, so asking per name
+         ;; read that file once per tool, on EVERY model call.
+         served    (set (served-names thread-id (keys effective)))
+         tools     (into {} (filter (fn [[n _]] (contains? served n)) effective))
          ;; A tool with no `:source` is one this session contributed; the door that adds
          ;; one (session-add!) stamps it, so an unstamped row is an UNKNOWN quantity
          ;; rather than a stable one, and it is ranked with the changing half -- an
@@ -749,6 +786,31 @@
   the narrowing rules."
   [thread-id name]
   (every? (fn [policy] (narrowing-serves? thread-id name policy))
+          @installed-narrowings))
+
+(defn- served-names
+  "The subset of NAMES this session serves -- the SAME ANSWER as `served?` for each of
+  them, but asked ONCE PER POLICY instead of once per name.
+
+  WHY A SECOND DOOR IS WORTH IT: a policy's per-name answer can be expensive. The editing
+  policy resolves the session's config.edn (deliberately uncached -- an edit takes effect on
+  the next ask), so asking it per name read that file once per tool: 22 reads inside one
+  `specs` for a 20-name table, on every model call.
+
+  A POLICY MAY ANSWER FOR THE WHOLE COLLECTION (`:served-names`, see `install!`). A policy
+  that offers only `:served?` is still asked per name, so the bulk door is an optimisation,
+  not a requirement -- and NOTHING INSTALLED still means everything is served, in both
+  doors.
+
+  FAILS OPEN, like `served?`: a policy that throws serves what it was asked about."
+  [thread-id names]
+  (reduce (fn [names policy]
+            (cond
+              (:served-names policy) (try (vec ((:served-names policy) thread-id names))
+                                          (catch Throwable _ names))
+              (:served? policy)      (filterv #(narrowing-serves? thread-id % policy) names)
+              :else                  names))
+          (vec names)
           @installed-narrowings))
 
 (defn- unserved-message

@@ -228,6 +228,24 @@ is not itself an error."
   is `bash`, which the model may use whenever it likes.)"
   {"grep" :grep})
 
+(defn served-names
+  "The subset of NAMES this session serves -- `served?`'s answer for a WHOLE COLLECTION,
+  in ONE resolution of the configuration.
+
+  WHY IT EXISTS BESIDE `served?`: the answer needs the session's editing configuration, and
+  resolving it is a read of this home's config.edn -- deliberately uncached, so an edit takes
+  effect on the next ask. Asked per name, building the tools array read that file once per
+  tool (22 reads for a 20-name table); asked this way it is read once per array -- which is
+  the difference on every model call."
+  [thread-id names]
+  (let [config (editing-mode thread-id)]
+    (filterv (fn [name]
+               (let [family (get family-of name)
+                     knob   (get search-tool name)]
+                 (and (not (and knob (false? (get config knob))))
+                      (or (nil? family) (= family (:mode config))))))
+             names)))
+
 (defn served?
   "Is tool NAME served in THREAD-ID's session? True for a tool that belongs to no
   editing implementation (ask `family-of`) and for one belonging to the mode in
@@ -237,13 +255,10 @@ is not itself an error."
 
   The configuration is resolved per call, so a session that changes its
   config.edn changes its toolset on the next ask -- there is no cache to
-  invalidate and no restart to perform."
+  invalidate and no restart to perform. `served-names` above is the same answer for
+  many names at once, and it is what a table's derivation should ask."
   [thread-id name]
-  (let [config (editing-mode thread-id)
-        family (get family-of name)
-        knob   (get search-tool name)]
-    (and (not (and knob (false? (get config knob))))
-         (or (nil? family) (= family (:mode config))))))
+  (boolean (seq (served-names thread-id [name]))))
 
 (defn unserved-message
   "What the model is told when it calls a tool this session does not serve. It

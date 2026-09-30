@@ -1728,5 +1728,6 @@
   (kernel-tools/install! {:name "built-ins"
                           :tools @built-ins
                           :planner replace/plan-turn
-                          :narrow {:served? editing/served?
-                                   :refuse  editing/unserved-message}}))
+                          :narrow {:served?      editing/served?
+                                   :served-names editing/served-names
+                                   :refuse       editing/unserved-message}}))
