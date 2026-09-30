@@ -65,10 +65,17 @@ run 自己的注入。这条例由 `harness.edge.pressure/messages-of` 拼，`co
 没动**。
 
 **代价（量过，不是估的）**：三桶按数组量字符，一次约 **64ms** —— 那份 2 MB / 1354 条的活会话上量的，
-而每个 `model/start` 和每个 `model/end` 各付一次（推送里带着环的四样东西）。同一量级的两项本来就
-在付：`band-pressure` 要把同一段对话估两遍，`live-surface` 还要把它拼出来。所以它不是零，只是与邻居
-同量级：`dev/scratch_ctx_face.clj` 把「纯量字符」和「折 + 量」两个数一起印出来，将来要省，先省这里
-（比如把三桶的字符数在折子里增量维护，而不是每次重算）。
+（推送里带着环的四样东西）。同一量级的两项本来就在付：`band-pressure` 要把同一段对话估两遍，
+`live-surface` 还要把它拼出来。所以它不是零，只是与邻居同量级：`dev/scratch_ctx_face.clj` 把「纯量
+字符」和「折 + 量」两个数一起印出来，将来要省，先省这里（比如把三桶的字符数在折子里增量维护，而不是
+每次重算）。
+
+**但整份答案一回调用里原来算三遍（2026-09-30 收掉了一遍）**：`model/start` 一遍（那是要用的 —— 它答的
+是**上一发**，见上），`model/end` **两遍** —— 推送（`live-numbers-slice`）与落库（`numbers-snapshot`）
+各自向 fold 要了同一瞬间的同一份答案。现在那个回调只装配一次，两个读者拿同一个值（`slice-of` /
+`snapshot-of` 是拆出来的两半算术）。`stats-test/the-numbers-are-assembled-once-per-model-fact` 数着钉住
+它：两发调用的 run，改前 7 次、改后 5 次（2 个 start + 2 个 end + run 收尾那一次）。
+上面那句「每个 `model/start` 和每个 `model/end` 各付一次」的账，也就此结清。
 
 ## 读数留档（2026-09-30，修之前，真会话 `62f30024-…`）
 

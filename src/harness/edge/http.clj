@@ -849,7 +849,12 @@
 
 ;; THE FACT FAMILY'S WRITER AND THE NUMBERS ITS `model/end` CARRIES (ADR 0006): both are defined
 ;; with the downlink machinery, far below the emitter that calls them.
-(declare family-send! live-numbers-slice numbers-snapshot task-send!)
+;;
+;; `live-numbers` IS IN HERE TOO NOW (2026-09-30): the emitter asks the folds for the answer
+;; ITSELF, once, and hands it to both the push and the store write (`slice-of` / `snapshot-of`) --
+;; so it needs the name earlier than the `declare` that used to sit beside its other caller.
+(declare family-send! live-numbers live-numbers-slice numbers-snapshot slice-of snapshot-of
+         task-send!)
 
 (defn speaks-for-a-person?
   "Whether MESSAGE is something A PERSON said, as the record spells it: a `user` message whose
@@ -2019,10 +2024,15 @@
                         (sessions/set-fold-value! thread-id :turn (turn/state-init)))
                       ;; AND THE NUMBERS ARE WRITTEN ONE LAST TIME FOR THIS RUN, HERE AND NOT AT
                       ;; THE TERMINAL FRAME (ticket 01 of `.scratch/session-numbers-in-the-store`):
-                      ;; the returned tail has just landed (`log-messages!` above), and the context
-                      ;; split is counted from the tail -- so a snapshot taken at the terminal
-                      ;; frame would be the one the old `reload`-after-the-run existed to correct.
-                      ;; A session this process does not hold writes nothing (`numbers-snapshot`
+                      ;; THE TERMINAL FRAME (ticket 01 of `.scratch/session-numbers-in-the-store`):
+                      ;; the returned tail has just landed (`log-messages!` above), and the counts
+                      ;; this run's closing turn carries (`harness.edge.turn/answer`) include the
+                      ;; assistant messages it wrote -- so a snapshot taken at the terminal frame
+                      ;; would be the one the old `reload`-after-the-run existed to correct.
+                      ;;
+                      ;; THE RING'S SPLIT IS NO LONGER ONE OF THE REASONS (2026-09-30): since
+                      ;; `.scratch/context-ring` it is counted from the array the CHOSEN CALL was
+                      ;; handed, which is complete when that call ends -- this tail does not move it.
                       ;; answers nil).
                       (when-some [snap (numbers-snapshot thread-id)]
                         (project/remember-numbers! thread-id snap))
@@ -2066,32 +2076,44 @@
                               ;; batch, and the queue empties itself -- a later call writes nothing.
                               (when (= "model/start" kind) (flush-request!))
                               (when (contains? mux/fact-types kind)
-                                (family-send!
-                                 thread-id
-                                 (cond-> {:type kind :seq offset}
-                                   ;; THE START CARRIES THEM TOO, and that is the whole point of
-                                   ;; the `:start` phase: the request has just gone out, so the
-                                   ;; strip can be initialized (counts, zeroes, and the estimate
-                                   ;; of what was sent) instead of drawing nothing until the
-                                   ;; vendor answers. See `initial-numbers`.
-                                   (= "model/start" kind) (assoc :payload payload
-                                                                :numbers (live-numbers-slice
-                                                                          thread-id :start))
-                                   ;; THE NUMBERS RIDE ON THE END, and they are the session's own
-                                   ;; folds at this moment -- ADR 0006 decision 8: the fold has to
-                                   ;; be in memory for this to have anything to say.
-                                   (= "model/end" kind) (assoc :payload payload
-                                                              :numbers (live-numbers-slice thread-id))))
-                                ;; AND THE STORE IS TOLD THE SAME THING, AFTER THE PUSH (ticket 01
-                                ;; of `.scratch/session-numbers-in-the-store`): the snapshot the
-                                ;; strip's FIRST read answers from is written at the one moment a
-                                ;; fold has just moved -- no timer, nothing folded twice -- and it
-                                ;; is written after the frame so that a store that refuses cannot
-                                ;; swallow a frame the client is waiting for. Both readings come
-                                ;; from the same folds, so they cannot disagree.
-                                (when (= "model/end" kind)
-                                  (when-some [snap (numbers-snapshot thread-id)]
-                                    (project/remember-numbers! thread-id snap)))))
+                                ;; ONE ASSEMBLY, NOT TWO (2026-09-30). The push below and the
+                                ;; store write after it are the SAME answer from the same folds at
+                                ;; the same moment, and each used to ask `live-numbers` for it: the
+                                ;; whole answer -- the stats, the context section and the band's
+                                ;; price -- built twice in a row inside one callback. Pricing the
+                                ;; array the ring splits is ~50ms on a 2 MB conversation (measured,
+                                ;; `harness.edge.context/shares`), so the second assembly was that
+                                ;; much of nothing. Asking once is not only cheaper: the two
+                                ;; readings are the same answer BY CONSTRUCTION now, where they
+                                ;; used to be two reads of one fold that had to agree.
+                                (let [live (when (contains? #{"model/start" "model/end"} kind)
+                                             (live-numbers thread-id))]
+                                  (family-send!
+                                   thread-id
+                                   (cond-> {:type kind :seq offset}
+                                     ;; THE START CARRIES THEM TOO, and that is the whole point of
+                                     ;; the `:start` phase: the request has just gone out, so the
+                                     ;; strip can be initialized (counts, zeroes, and the estimate
+                                     ;; of what was sent) instead of drawing nothing until the
+                                     ;; vendor answers. See `initial-numbers`.
+                                     (= "model/start" kind) (assoc :payload payload
+                                                                  :numbers (slice-of live :start))
+                                     ;; THE NUMBERS RIDE ON THE END, and they are the session's own
+                                     ;; folds at this moment -- ADR 0006 decision 8: the fold has to
+                                     ;; be in memory for this to have anything to say.
+                                     (= "model/end" kind) (assoc :payload payload
+                                                                :numbers (slice-of live :end))))
+                                  ;; AND THE STORE IS TOLD THE SAME THING, AFTER THE PUSH (ticket 01
+                                  ;; of `.scratch/session-numbers-in-the-store`): the snapshot the
+                                  ;; strip's FIRST read answers from is written at the one moment a
+                                  ;; fold has just moved -- no timer, nothing folded twice -- and it
+                                  ;; is written after the frame so that a store that refuses cannot
+                                  ;; swallow a frame the client is waiting for. Both readings ARE
+                                  ;; that one answer (`live` above), which is a stronger promise
+                                  ;; than the one they used to keep by both asking the folds.
+                                  (when (= "model/end" kind)
+                                    (when-some [snap (snapshot-of live)]
+                                      (project/remember-numbers! thread-id snap))))))
                             ;; WHAT THE RUN IS DOING, KEPT FOR THE WAY OUT. Only the
                             ;; close handler and the drop warning read it, and both
                             ;; are read when the run is over -- a run that stops
@@ -3761,10 +3783,6 @@
                                           {:threadId id :error (ex-message t)})))
                                  ids)})))))
 
-;; `live-numbers` is defined just below its one caller, and a `defn-` has to be known before it is
-;; read: a plain `declare` rather than moving it up, because the live answer reads like the
-;; fallback it guards -- the record read comes second, only when there is no live answer.
-(declare live-numbers)
 (defn- fold-requested?
   "Does this stats request ask for the RECORD's own fold rather than the stored snapshot?
   `?fold=1` is that question. IT IS THE REPAIR DOOR: the stored numbers are a last-known
@@ -3774,9 +3792,21 @@
   [req]
   (= "1" (get (query-params (:query-string req)) "fold")))
 
+(defn- snapshot-of
+  "LIVE -- the fold's whole answer, or nil -- -> the snapshot the store would keep: minus the
+  two keys that are facts about a READ rather than numbers, plus WHEN it was taken.
+
+  IT IS KEPT APART FROM `numbers-snapshot` SO ONE ASSEMBLY CAN FEED BOTH READERS (2026-09-30):
+  the push at `model/end` and the store write are one answer, and a caller that already holds it
+  hands it here rather than asking the folds a second time."
+  [live]
+  (when-some [live live]
+    (assoc (dissoc live :pressure :incomplete) :numbersAt (System/currentTimeMillis))))
+
 (defn- numbers-snapshot
   "THREAD-ID's numbers as the store would keep them: the folds this process holds, minus the
   two keys that are facts about a READ rather than numbers, plus WHEN the snapshot was taken.
+  (`snapshot-of` is that arithmetic; this asks the folds for the answer to run it on.)
 
   WHAT IS LEFT OUT, and why it is not a detail:
 
@@ -3792,8 +3822,7 @@
   NIL when this process does not hold the conversation, which is what makes both writers
   no-ops for a session another process is serving."
   [thread-id]
-  (when-some [live (live-numbers thread-id)]
-    (assoc (dissoc live :pressure :incomplete) :numbersAt (System/currentTimeMillis))))
+  (snapshot-of (live-numbers thread-id)))
 
 (defn- stats-get
   "GET /api/threads/<stem>/stats -- one session's numbers, folded from its RECORD
@@ -5144,6 +5173,23 @@
     (assoc :outputTokensPerSecond (:outputTokensPerSecond n))
     (seq (:context n)) (assoc :context (:context n))))
 
+(defn- slice-of
+  "LIVE -- the fold's whole answer, or nil -- + PHASE -> the slice a `model/*` fact puts on the
+  wire. See `live-numbers-slice`, which is this plus the question 'what do the folds say?'.
+
+  IT IS KEPT APART SO ONE ASSEMBLY CAN FEED BOTH READERS (2026-09-30): the `log!` callback at
+  `model/end` pushes this slice AND writes the store, and building the fold's answer twice in
+  one callback paid for the whole assembly twice -- the ring's split alone is ~50ms on a 2 MB
+  conversation (`harness.edge.context/shares`)."
+  [live phase]
+  (when-some [n live]
+    (let [base (owned-numbers n)]
+      (if (and (= :start phase) (zero? (long (or (:stepsWithUsage n) 0))))
+        ;; NOTHING REPORTED YET: this is the conversation's opening request (or one whose
+        ;; vendor has told us nothing), and the strip is initialized rather than left blank.
+        (initial-numbers base (:pressure n))
+        base))))
+
 (defn- live-numbers-slice
   "The slice of `live-numbers` that the `model/*` facts put on the wire (ADR 0006 decision 4):
   the session's numbers AT THIS MOMENT -- how many turns, how many calls so far, what they
@@ -5178,16 +5224,13 @@
   was present, the slice was `{}`, and `model/end` had been pushing AN EMPTY MAP since the day
   it was written -- invisible while a snapshot was in hand (merging `{}` changes nothing), and
   the reason a page that had only ever been PUSHED drew a raw catalog key instead of a number
-  (measured 2026-09-27). One shape, read as itself."
+  (measured 2026-09-27). One shape, read as itself.
+
+  IT IS TWO THINGS, and this half is the QUESTION: `slice-of` does the arithmetic, and a caller
+  that already holds the fold's answer -- the `log!` callback at `model/end`, which also writes
+  the store -- hands it there rather than asking the folds a second time."
   ([stem] (live-numbers-slice stem :end))
-  ([stem phase]
-   (when-some [n (live-numbers stem)]
-     (let [base (owned-numbers n)]
-       (if (and (= :start phase) (zero? (long (or (:stepsWithUsage n) 0))))
-         ;; NOTHING REPORTED YET: this is the conversation's opening request (or one whose
-         ;; vendor has told us nothing), and the strip is initialized rather than left blank.
-         (initial-numbers base (:pressure n))
-         base)))))
+  ([stem phase] (slice-of (live-numbers stem) phase)))
 
 (defn- task-body
   "THE TASK PANE'S WHOLE ANSWER for THREAD-ID, as one payload: this session's background jobs
