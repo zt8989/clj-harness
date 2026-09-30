@@ -125,8 +125,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/providers/<id>/remove` | POST | 从 `:providers` 里去掉一条；`:default` 正指着它就先拒（那会把家变成每轮都跑不起来） | 无 |
 | `/api/providers/models` | POST | 问厂商要它的 model 列表——**本特征唯一出网的路由**，密钥可由表单带；测试缝 `providers/*list-models*` | 无 |
 | `/api/defaults` | POST | 设**默认档**（`:default` 那三个旋钮）：缺席 = 不动那一项，`null` = 清掉那个键；先解析后写 | 无 |
-| `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数 | 无（只读） |
-| `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传） | `git/branch` |
+| `/api/git` | GET | 本会话目录作为工作树：当前分支、本地分支、脏改动条数。**`?dir=` 问的是一个目录**（答同一形状），给的是**页面自己铸的会话**——它还没有行，`?threadId=` 只能答 `{dir: nil}`；只认这个家列出来的项目（`cap.project/listed-dir`），别的目录按「没有目录」答 | 无（只读） |
+| `/api/git` | POST | 把本会话目录切到某个分支（脏树与占用由 git 自己拒绝，原话回传）。**`{dir, branch}` 是同一个动词**，给上面那种会话用；它**不写审计行**——那条行只属于一份会话日志，而这场会话还不存在 | `git/branch`（`dir` 那一形不写） |
 | `/api/project` | GET | 绑定目录（未绑定答 `null`） | 无 |
 | `/api/project` | POST | 绑定 / 换绑 / 解绑（`dir: null`，upsert，`{threadId, dir}`）。**它同时把那条会话的日志搬过去**（一个会话一份文件，见 [home-and-storage](home-and-storage.md#一个会话一份文件)），所以这一段与写日志的那条路**同一把锁**：读旧绑定、写库、搬文件都在 `log-lock` 里，而写记录的那条路（`log!`）也在同一把锁里决定「这条记录写哪个文件」。没有这一点，一次落在 run 中途的 bind（**发送才建会话**之后这是常态）会和写手抢同一个重命名：轻则一句假的拒绝，重则一次会话被劈成两份 | `project/bound`（runId null） |
 | `/api/project/pick` | POST | 开 OS 原生目录对话框，**不绑任何东西** | 无 |

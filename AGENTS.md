@@ -16,6 +16,32 @@ Five canonical roles, each label string equal to its name. See `docs/agents/tria
 
 Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
 
+## feature / hotfix 都在 worktree 里开
+
+**主检出只留 `main`，不切分支**：feature 与 hotfix 一律先造一棵 worktree，在那里改、在那里测，
+合完删掉。工作树放 `.worktrees/<slug>`（已 gitignore），分支同名、从 `main` 切出：
+
+```bash
+git worktree add .worktrees/<slug> -b <slug> main   # 开工
+cd .worktrees/<slug>/ui && npm i --offline          # 新树没有 node_modules；只吃本机 npm 缓存
+```
+
+新树看不见主检出里**未提交**的改动（它从 `main` 切出）——主检出那份是权威，别两头改同一处。
+`npm i --offline` 不联网、也不碰主检出那份 `node_modules`：缓存缺哪个包就点名报错，不许改成联网装。
+装完照旧 `npm run build` / `npm run typecheck` / `npm test`。
+只改文档、不动代码的那种不必开树——直接在主检出改、提交，省一趟 `npm i --offline`。
+
+收尾：**合并之后三样一起清**——工作树、本地分支、远程分支；顺序别倒，工作树还占着这个分支时删分支会失败。
+
+```bash
+git worktree remove .worktrees/<slug>   # 里面还跑着东西就 --force
+git worktree prune                      # 目录被手工删过时，拿它清账
+git branch -d <slug>                    # -d 只肯删已合并的；-D 是「确认不要了」的手动挡
+git push origin --delete <slug>
+```
+
+**合进 `main` 之前不删**：工作树是这一票的现场，提前删掉、回头想复看只能重新 `worktree add`。
+
 ## 测试
 
 **铁律：测试期间 `~/.clj-harness` 只读——一个字都不许写进去。** 两个进程抢同一个 `harness.db` 的那次，

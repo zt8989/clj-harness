@@ -5912,17 +5912,36 @@
   way. `:dir` is the binding the answer is about, echoed so a strip can draw the
   directory and the branch from one call.
 
+  `?dir=..` ASKS THE SAME QUESTION ABOUT A DIRECTORY, and it exists for the one session
+  that has no row: the id this page minted and has not sent to (the composer's picker and
+  the sidebar's 'New session' both remember a directory and write nothing). `?threadId=`
+  answers `{:dir nil}` for it -- correctly, for an id this home has never heard of -- so the
+  strip could never draw the branch of the repository in front of it. A directory this home
+  does not list is answered exactly like a session with none; the gate and its reason are
+  `project/listed-dir`'s.
+
   A SESSION WITH NO DIRECTORY ANSWERS `{:dir nil :repo? false}`, not a 400: most
   sessions have no project, the strip simply shows nothing, and a caller drawing
   chrome should not have to treat 'nothing to show' as a failure."
   [req]
-  (let [thread-id (get (query-params (:query-string req)) "threadId")
-        dir       (project/binding-for thread-id)]
+  (let [params (query-params (:query-string req))
+        asked  (get params "dir")
+        dir    (if (str/blank? (str asked))
+                 (project/binding-for (get params "threadId"))
+                 (project/listed-dir asked))]
     (api-response 200 (assoc (git/state dir) :dir dir))))
 
 (defn- git-post
   "POST /api/git {threadId, branch} -- move the session's directory onto BRANCH,
   and answer the state afterwards.
+
+  {dir, branch} IS THE SAME VERB FOR A DIRECTORY, and it is what the composer's branch
+  picker uses before the session exists (`project/listed-dir` is the gate, and the reason is
+  the GET's). IT WRITES NO AUDIT LINE, and that is not an omission: the line belongs in a
+  session's log, and the session this is for is one this page minted and has not sent to --
+  writing a log for it is exactly the row `POST /api/project` stopped creating (点击新增不立刻
+  会话，发送才新建). The checkout itself is not hidden: it is a real change in a real working
+  tree, and `git reflog` in that directory is where git keeps it.
 
   THE ONE THING HERE THAT CHANGES A DIRECTORY RATHER THAN A ROW, and it is
   confined to what was asked for: `git checkout` with no --force, so a dirty tree
@@ -5938,26 +5957,31 @@
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
                     (catch Throwable _ {:bad true}))
-        {:keys [ok bad]} parsed]
+        {:keys [ok bad]} parsed
+        thread-id (str (:threadId ok))
+        asked     (str (:dir ok))]
     (cond
       bad
       (api-response 400 {:error "request body is not valid JSON"})
 
-      (str/blank? (str (:threadId ok)))
-      (api-response 400 {:error "missing threadId"})
+      (and (str/blank? thread-id) (str/blank? asked))
+      (api-response 400 {:error "missing threadId or dir"})
 
       :else
-      (let [thread-id (str (:threadId ok))
-            dir       (project/binding-for thread-id)]
+      (let [by-dir? (not (str/blank? asked))
+            dir     (if by-dir? (project/listed-dir asked) (project/binding-for thread-id))]
         (if (str/blank? (str dir))
-          (api-response 400 {:error "this session has no project directory, so it has no branch to switch"})
+          (api-response 400 {:error (if by-dir?
+                                      "this home does not list that directory as a project, so it has no branch to switch"
+                                      "this session has no project directory, so it has no branch to switch")})
           (let [before   (git/state dir)
                 answer   (git/switch! dir (:branch ok))]
             (if-some [error (:error answer)]
               (api-response 400 {:error error})
-              (do (log! thread-id nil "git/branch"
-                        {:before (:branch before) :after (:branch (:ok answer))
-                         :dir dir :via "http"})
+              (do (when-not by-dir?
+                    (log! thread-id nil "git/branch"
+                          {:before (:branch before) :after (:branch (:ok answer))
+                           :dir dir :via "http"}))
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
 (defonce ^:private compaction-lock
