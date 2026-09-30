@@ -55,6 +55,7 @@ import { subagentsSuite } from "./suites/subagents";
 import { subagentViewSuite } from "./suites/subagent-view";
 import { muxSuite } from "./suites/mux";
 import { coalesceSuite } from "./suites/coalesce";
+import { markdownCommitSuite } from "./suites/markdown-commit";
 import { rightPaneSuite } from "./suites/right-pane";
 import { threadMessagesSuite } from "./suites/thread-messages";
 import { timeoutSuite } from "./suites/llm-timeout";
@@ -80,7 +81,7 @@ import { settingsSessionsSuite } from "./suites/settings-sessions";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, trajectorySuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, trajectorySuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -579,7 +580,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// AGENTS.md files become (its title is the first `Instructions from:` line, not the intro
 /// sentence in front of it), and the one card kind that SURVIVES a folded turn -- a compaction,
 /// which is the boundary where history stopped being messages.
-const EXPECTED_CASES = 202;
+/// ...202 -> 203: the `markdown-commit` suite's one, from `.scratch/conversation-render-cost`
+/// ticket 01. It pins the WIRING and not the effect: the answer that is still arriving is
+/// rebuilt on an interval rather than on every animation frame, and what a node run can hold is
+/// that the interval is there, that it is wide enough to be one (at least two frames), and that
+/// `markdown-text.tsx` actually hands those options to the primitive -- read off that file's own
+/// text, because asserting on two constants defined next to each other stays green when the prop
+/// between them is deleted, which is the regression the case exists for. The parse rate it buys
+/// is a browser's measurement (that ticket's `spec.md`), not a suite's.
+const EXPECTED_CASES = 203;
 
 
 let total = 0;

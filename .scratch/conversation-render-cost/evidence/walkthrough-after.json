@@ -1,0 +1,18 @@
+{
+  "updates": 6816,
+  "chatSeconds": 168.1,
+  "updatesPerSecond": 40.5,
+  "medianGapMs": 18.2,
+  "largestGapMs": 7865.6,
+  "medianStepChars": 4,
+  "largestStepChars": 36,
+  "stepsBackwards": 10,
+  "finalChars": 36139,
+  "elements": {
+    "paragraphs": 37,
+    "bold": 91,
+    "code": 91,
+    "markdownContainers": 1
+  },
+  "screenshots": "C:/Users/zhouteng/AppData/Local/Temp/shots-before"
+}

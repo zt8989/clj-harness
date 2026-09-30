@@ -38,6 +38,38 @@ const useShallowStable = <T extends Record<string, unknown> | undefined>(
   return ref.current;
 };
 
+// LOCAL (ticket 01 of `.scratch/conversation-render-cost`): HOW OFTEN A MESSAGE THAT IS STILL
+// BEING WRITTEN MAY BE REBUILT, in milliseconds.
+//
+// WHY IT EXISTS. `defer` below, the memoized components and `lib/coalesce.ts`'s one delivery per
+// animation frame were all already in place, and the page was still spending about two thirds of
+// its streaming JavaScript in ONE place: the markdown parse of the answer that is growing. The
+// parse cannot be made cheaper -- the whole answer is re-read every time -- so the lever is how
+// often it happens, and it was happening on every commit the smooth reveal made, which is once
+// per animation frame: about 56 parses a second of a document that only ever gets longer. The
+// readings and the CPU profile that say so are in that ticket's `spec.md` and
+// `evidence/README.md`; this file only spends them.
+//
+// `minCommitMs` IS THAT LEVER AND IT IS THE LIBRARY'S OWN: the reveal keeps advancing every frame
+// while the value handed to the renderer -- and therefore the re-render and the re-parse it
+// triggers -- is committed at most once per interval. Its last frame always commits, so what the
+// reader ends up looking at is the finished answer either way.
+//
+// WHY 60. A reader stops seeing the difference somewhere above twenty updates a second, and this
+// is ~17; the reveal's own step is then a few characters at a vendor's pace and some tens of them
+// on a stream as dense as the scripted one in that evidence directory. Anything below a couple of
+// animation frames would not be an interval at all -- 33ms is the floor
+// `test/suites/markdown-commit.ts` pins.
+//
+// IT LIVES ON THE SHARED COMPONENT, so the reasoning row's markdown (`Reasoning` in
+// `reasoning.aui.tsx`) is rebuilt on the same interval, and on the same argument: it is text that
+// streams, and it is parsed the same way. The live thinking line above it is a different path
+// and is not affected.
+export const STREAM_COMMIT_MS = 60;
+
+/// THE OPTIONS THIS PAGE HANDS THE SMOOTH REVEAL, named rather than spelled inline so the suite
+/// can read this file's own text and find it where the primitive is given it.
+export const MARKDOWN_SMOOTH = { minCommitMs: STREAM_COMMIT_MS } as const;
 const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
   const stableComponents = useShallowStable(components);
   const markdownComponents = useMemo(() => {
@@ -54,6 +86,11 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
       className="aui-md"
       components={markdownComponents}
       defer
+      // LOCAL (ticket 01 of `.scratch/conversation-render-cost`): the smooth reveal may not
+      // COMMIT more than once per interval. See `STREAM_COMMIT_MS` above -- the marker is the
+      // second deliberate edit to this copied file, and the reason is a measurement rather than
+      // a change of heart.
+      smooth={MARKDOWN_SMOOTH}
     />
   );
 };
