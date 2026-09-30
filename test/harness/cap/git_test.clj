@@ -228,10 +228,25 @@
       (let [answer (git/switch! repo "side")]
         (is (= "side" (:branch (:ok answer))))))))
 
+(deftest a-branch-name-with-a-quote-in-it-is-read-and-moved-to
+  ;; git allows a `'` in a ref name, and under the old shell shape this was exactly the name
+  ;; the quoting dance (`quoted`) existed for. It is one argv element now, and this is the
+  ;; case that says so end to end: made, listed whole, and switched to.
+  (let [repo  (scratch-repo (str dir "-quote"))
+        named "it's"]
+    (is (= 0 (:exit (shell/run-program {:argv ["git" "branch" named] :dir repo})))
+        "the branch with the quote could be made")
+    (is (some #(= % named) (:branches (git/state repo)))
+        "the listing carries the name whole, quote and all")
+    (let [answer (git/switch! repo named)]
+      (is (nil? (:error answer)))
+      (is (= named (:branch (:ok answer)))))))
+
 (deftest a-branch-this-worktree-does-not-have-is-refused-by-name
-  ;; The refusal is also the guard: the name that reaches the shell is one git
-  ;; printed a moment ago. A name that gets through anyway must not be able to
-  ;; smuggle anything into the command line built from it.
+  ;; The refusal is by name, against the LIST git just printed. There is no command line to
+  ;; smuggle into any more -- `git` hands argv straight to the program -- but the listing is
+  ;; still what makes a refusal happen before anything runs, and the metacharacter below is
+  ;; why it has to.
   (let [repo (scratch-repo (str dir "-refuse"))]
     (testing "an ordinary unknown name"
       (let [answer (git/switch! repo "no-such-branch")]
@@ -243,7 +258,7 @@
       (let [answer (git/switch! repo "main; touch /tmp/harness-git-pwned")]
         (is (some? (:error answer)))
         (is (not (.exists (io/file "/tmp/harness-git-pwned")))
-            "a branch name must never reach a shell as more than one word")))
+            "a branch name is a name, never a command line")))
     (testing "and nothing moved"
       (is (= "main" (:branch (git/state repo)))))))
 

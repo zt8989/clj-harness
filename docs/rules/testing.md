@@ -75,6 +75,13 @@ developer's real home"）指向一个根本不存在的代码路径。两半一�
   `harness.edge.http-test` 那两条 git 用例原先各建一个真仓库（`git init` + 三条 `git config` + `add` +
   `commit` + 两次 `branch`，**八个 `shell/run`**），合成一条 `&&` 链之后仍是八条 git 命令、只付一个
   profile：两条用例从 43.5s / 16.6s 落到 17.1s / 12.0s，`http-test` 单跑从约 130s 落到约 114s。
+- **不需要 shell 的命令，别付 shell 的钱**：`harness.infra.shell/run-program` 收 `:argv` 直接起程序，
+  没有 profile 这回事。`harness.cap.git` 的一次读原先两条 `shell/run`（本机约 **1.6s**），改成 argv 之后
+  约 **0.13s**（12×，2026-09-30 实测；被测的 `cap.git-test` 也跟着从 45.8s 落到 18.5s）。判断法很简单：
+  里面有管道 / `&&` / 重定向 / 要 shell 解读的引号就是**命令行**，走 `run`；程序加参数就是 **argv**，
+  走 `run-program`。前提是「程序自己怎么读 Windows 命令行」——原生程序（`git.exe` 是 MINGW、`node`、
+  `java`）整着收；**MSYS 程序（Git Bash 与它旁边的 coreutils）会重新解析**，空格会拆、`'` 会吃，
+  所以带这两种字符的参数别喂给 MSYS 程序（`dev/scratch_argv_probe.clj` 是那条实测）。
 - **同一台机器再量一次（2026-09-30 更晚、负载更轻）：全量 69 家合计约 614s、最慢仍是
   `harness.edge.http-test` 约 134.5s**（改动之后同一轮里 120.0s；再复核又回到 134.5s）。三次全量彼此
   差三百秒上下，差的是

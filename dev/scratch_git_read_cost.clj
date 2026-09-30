@@ -1,8 +1,9 @@
 (ns scratch-git-read-cost
   "What ONE `/api/git` read costs the PRODUCT on this machine: `harness.cap.git/state` is
-  two `shell/run` calls (`status --porcelain=v2 --branch` then `branch --format`), and each
-  of those is a `bash -lc`. The composer's branch strip asks for this whenever a session's
-  directory is opened.
+  two DIRECT `git` spawns (`status --porcelain=v2 --branch` then `branch --format`) -- argv,
+  no shell, since `.scratch/git-read-cost`. The composer's branch strip asks for this
+  whenever a session's directory is opened. Measured 2026-09-30: 1609-1744ms before (two
+  `bash -lc`), **127-132ms** after.
 
   isolate! first, per AGENTS.md."
   (:require [clojure.string :as str]

@@ -161,6 +161,60 @@
                 (str "asked for cmd, got: " (pr-str lines))))
           (finally ((:close! h))))))))
 
+
+(deftest a-program-is-handed-its-arguments-as-argv
+  ;; `run-program` puts NO SHELL between this process and the program, so nothing in an
+  ;; argument can be INTERPRETED. The shell is used here only as an ordinary PROGRAM to
+  ;; print `$@`: had the argument been spliced into a command line, the `;`, the `|`, the
+  ;; `>` and the `$(...)` would have run instead of arriving whole.
+  ;;
+  ;;
+  ;; NO SPACE AND NO QUOTE IN THE PROBE, deliberately: the JVM hands each argument to the
+  ;; OS intact, but an MSYS program (Git Bash among them) re-parses that Windows line and
+  ;; can split on a space or eat a quote -- see `run-program`'s note, and `cap/git-test`
+  ;; for the program that actually matters here (git.exe is MINGW, and does neither).
+  (when-let [sh (shell/resolution)]
+    (let [tricky "a;b|c>d$(echo)q"
+          {:keys [exit out]} (shell/run-program
+                              {:argv [(:command sh) "-c" "printf '%s\\n' \"$@\"" "x" tricky]
+                               :timeout-ms 20000})]
+      (is (= 0 exit))
+      (is (= [tricky] (remove str/blank? (str/split-lines (str out))))
+          (str "the argument arrived whole: " (pr-str out))))))
+
+(deftest a-program-runs-where-it-was-told-to
+  (when-let [sh (shell/resolution)]
+    (let [dir (support/temp-dir "shell-program")]
+      (shell/run-program {:argv [(:command sh) "-c" "echo ok > proof.txt"] :dir dir})
+      (is (.exists (io/file dir "proof.txt"))
+          "the file landed in :dir, which is the only thing that put it there"))))
+
+(deftest a-program-that-is-not-there-is-127-and-not-a-throw
+  ;; The split from `run`: a shell this process cannot find is 'there was no question to
+  ;; ask' and throws, while a program that is simply not installed is a fact a caller
+  ;; asked about -- 127 is what a shell answers for a command that is not there.
+  (let [{:keys [exit]} (shell/run-program {:argv ["no-such-program-harness-suite"]})]
+    (is (= 127 exit))))
+
+(deftest a-program-that-does-not-finish-is-stopped-with-what-it-started
+  ;; The same claim the shell shape is held to (`a-command-that-does-not-finish-...`):
+  ;; killing what we hold is not killing what it started. `await-program!` is shared, but a
+  ;; shared helper is not an assertion -- and this is the shape `cap.git` now uses.
+  (when-let [sh (shell/resolution)]
+    (let [dir      (support/temp-dir "program-tree")
+          pid-file (io/file dir "child.pid")
+          started  (System/currentTimeMillis)
+          res      (shell/run-program {:argv [(:command sh) "-c" (support/child-command pid-file)]
+                                       :timeout-ms 8000})
+          elapsed  (- (System/currentTimeMillis) started)
+          pid      (support/child-pid pid-file 5000)]
+      (is (true? (:timeout res)))
+      (is (nil? (:exit res)) "a process that never finished has no exit code")
+      (is (< elapsed 20000) (str "it came back at the limit, not when the command did ("
+                                 elapsed "ms)"))
+      (is (some? pid) "the program really did start a child")
+      (is (support/gone-within? pid 5000)
+          (str "pid " pid " outlived the call that started it")))))
 (deftest a-login-shells-logout-does-not-clear-the-pipe
   ;; Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN `exit`
   ;; ends it -- every COMPOUND command, since the last `exit` makes bash itself the
