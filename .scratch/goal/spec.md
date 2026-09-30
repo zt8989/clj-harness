@@ -4,190 +4,202 @@
 
 ## 要解决什么
 
-一个人想让这场会话朝一个方向走，模型聊到一半却跑偏了：他只好把同一句话再说一遍
-（「还是那个登录模块」「别的先放放，把测试补上」）。仓里今天没有地方存这句话——
+一个人想让这场会话朝一个方向走，模型聊到一半却跑偏了；更麻烦的是**长任务**——他不得不一直坐在
+前面喊「接着做」。仓里今天没有地方存这句话：
 
-- `todo_write` 是**模型自己**拆的步骤：模型写、模型改，横条只看不写；
-- `AGENTS.md` 是**每场会话都成立**的规矩，不随这次要做什么变；
-- 输入框里那句话是**一次性**的，说出去就沉进对话里。
+- `todo_write` 是**模型自己**拆的步骤（模型写、模型改，横条只看不写）；
+- `AGENTS.md` 是每场会话都成立的规矩，不随这次要做什么变；
+- 输入框里那句话是一次性的，说出去就沉进对话里。
 
-**目标**补的是这一格：**人**给这场会话立的一个方向，一句话、会话级、人立人撤；**模型每一轮都看得到它**，
-可以报告进展、做成了可以**标完成**，但不能替人立一个新的、也不能改掉或删掉人立的那个。
+**目标**补这一格：一个**跨多轮/多步的完成目标**，一句话、会话级、人立人撤，**而且它自己会往前走**——
+每一轮模型都看得到它，一轮结束、目标还活着、上一轮真有进展，就自动开下一轮，直到完成 / 卡住 / 撞上限 / 人喊停。
 
-目标是「去哪儿」，任务清单是「这一步怎么走」——两者不互相覆盖，各自有家。
+目标是「去哪儿」，任务清单是「这一步怎么走」，两者不互相覆盖，各自有家。
 
-参考实现是 DeepSeek Harness（dsh）的 `/goal`：`/goal <目标>` 立、单打 `/goal` 看、`/goal edit <目标>` 改、
-`/goal pause` / `resume` / `clear`。本仓**照搬它的语义**，落到本仓自己的骨架（状态进库、每轮派生注入、
-存量 + 推送）上。唯一加的一处是 dsh 没有的：模型也能动它（见决定 3）。
+## 参考实现：dsh 的三件套
+
+DeepSeek Harness 的 goal 不是一条提醒，是一个机制（`@deepseek-ai/dsh-goal`、`dsh-tool-goal`、
+`dsh-goal-round-driver`），我们**照搬它的语义**：
+
+| 部件 | dsh 的样子 |
+|---|---|
+| 工具 | `get_goal()` / `create_goal(objective, max_goal_rounds?)` / `update_goal(goal_id, revision, action, objective?, max_goal_rounds?, blocked_reason?)`，`action` ∈ `edit`/`pause`/`resume`/`complete`/`block` |
+| 栅栏 | 每次改带 `GoalRef{id, revision}`，compare-and-set；模型必须先 `get_goal` 抄下准确的 ref |
+| 相位 | `edit` / `pause` / `resume` / `complete` / `block` / `clear`；`block` 是**统一的阻塞相位**（kebab-code + 说明） |
+| 上限 | `maxGoalRounds`（dsh 默认 256），一轮一轮地数 |
+| 续跑许可 | `armed` / `disarmed`，**不是 revision**：会话 resume/fork 后自动 disarmed，要人再说「继续」才 rearm |
+| 人的命令 | `/goal`（看）/ `/goal <目标>`（建，未完成的目标不被顶掉）/ `/goal edit <目标>`（只改文字）/ `/goal pause` / `/goal resume` |
+| 续轮驱动 | `goal-round-driver`：active+armed 的目标 → 连续 goal round，直到 complete/block/撞上限 |
+
+两条 dsh 定死的规矩我们照抄：**人暂停的目标，只有人能恢复**（模型的 `resume` 只对
+「active 但 disarmed」有效）；**模型的 `block` 要同一个 blocker 连续若干轮才成立**。
+
+本仓要适配的只有一处：dsh 的 goal 住在**会话日志**里，本仓正好有 ADR 0008「记录是真相、sqlite 是其投影」，
+所以照搬——`goal/change` 事件进 jsonl，`goals` 行是投影。
 
 ## 决定
 
-### 1. 一个会话一个目标，一行状态，住在库里
+### 1. 目标是记录 + 投影，不是一行状态
 
-`goals` 表，`thread_id` 是主键，**整个目标是一个 JSON 值，装在一列里**（照 `todos.items` 与
-`sessions` 那一列统计同一形状）：会被改写的状态进库，而「一行一个字段」意味着每加一个字段一次迁移、
-以及一个要把列拼回记录的读者。
+`goal/change` 事件行进会话的 jsonl（append-only，**带完整后态快照**；`clear` 是一条带 revision 的墓碑行），
+`harness.edge.replay` 的 fold 把它折成「现在的目标」，`goals` 表那一行是这个 fold 的**投影**——
+照 `sessions.numbers` 那条既有形状：挂载时一次 SELECT，**fold 是修复路径**。
 
-**没有行 = 没有目标 = 清掉之后。** 「从没立过」与「立过又 clear 了」在库里是两个事实，对一个读者
-是同一个答案（`todos` 的 `items-for` 早就这样收口），目标照同一条走。
+**为什么与 `todos` 分家。** `todos` 是纯状态，因为它整体替换、没有历史价值。目标不一样：
+**两只手并发写**（人在 run 之外按，模型在 run 里写），需要一个可比较的序号来挡陈旧写；
+**要回答「改过几次、为什么 block、跑了几轮」**，那些是记录才答得出的问题；dsh 自己也这么做。
+改一次就追加一行、外加一行投影，代价是两处要一致——一致性由 fold 兜底（crash 之间的窗口，重建时折回来）。
 
-### 2. 字段只有四个，三处不许漂
+**`goals` 那一行按 `sessions.numbers` 那条既有形状申报**：它是「一条 fold 物化进一行」——写整份、就地改、
+无历史、fold 是修复路径——所以进的是 `declared-state-columns`（带这条论证），**不是**
+`declared-projected-columns`：那条 allowance 是给「镜像日志内容」的（`messages`/`tool_calls`），
+而这是一条派生摘要。同时配一条「折记录 = 那一行」的验收（`sessions.numbers` 那条同款）。
+
+### 2. `{id, revision}` 是栅栏，不是装饰
+
+每次写都带一个 `GoalRef{:id .. :revision ..}`。`id` 在 create 时铸一次（clear 后新建就是新 id）；
+`revision` 是快照里的单调计数（create 是 1，每次改 +1），**fold 能把它重建出来**。
+ref 与当下不符就按名字拒绝（`:goal-moved`），句子让人/模型先 `get_goal` 再抄一遍。
+
+**没有这道栅栏会怎样**：人的 `POST /api/goal` 与模型在 run 里的写**不串行**（本仓只把 run 之间串起来），
+于是模型一次基于旧认知的 `complete` 能悄悄盖掉人刚按的 `pause`。栅栏把这种写变成一次响亮的拒绝，
+而不是一次静默覆盖——这正是 dsh「paused 只有人能 resume」立得住的原因。
+
+### 3. 相位与字段
 
 ```
-{:text        "重构登录模块，补齐测试和迁移说明"   ; 人的原话，一字不改
- :status      "active" | "paused" | "completed"     ; 三个状态，就是全部词汇
- :progress    "已经拆出 auth 包，测试写到一半"       ; 模型写的一句进展，可为 nil
- :updated-at  1696...                                ; 毫秒
-}
+{:id          "g-8f3a…"          ; create 时铸一次
+ :revision    3                   ; 每次改 +1，快照里带着
+ :objective   "把登录模块重构完，补齐测试和迁移说明"
+ :phase       "active" | "paused" | "blocked" | "completed"
+ :rounds      7                   ; 已经跑过的 goal round 数
+ :max-rounds  25                  ; 上限（见决定 9）
+ :blocked     {:code "no-progress" :reason "…"}   ; 只有 phase=blocked 时
+ :updated-at  1696…}
 ```
 
-这份字段清单只有一份答案，被三处消费：`harness.cap.goal/write!` 读写的键 = `GET …/goal` 与
-`goal` 推送帧报出的键 = 前端 `lib/goal.ts` 的类型。加一个字段必须三处都动，漏一处即失败——
-与技能那三处同一条纪律（`.scratch/commands` 决定 7 的同款），由一个会失败的测试守着。
+`phase` 是**数据不是 cond**（照 `todos/statuses`）：每个拒绝都说出合法集合。
+`clear` 不产生 readonly 相位，它就是墓碑行——**没有变更过的会话与 clear 过的会话，对读者是同一个 `nil`**。
 
-`status` 是**数据不是 cond**（照 `harness.cap.todos/statuses`）：每个拒绝都要说出合法集合，
-手写的一句话就是两份会漂的答案。
+**`armed` 不进记录、不是 revision，它是进程内存**（`harness.cap.goal` 里一张按会话的表，
+与待决审批、作业注册表同族）：它是「这个进程还允许替你把下一轮开起来」，
+**重启即失**、会话 resume/fork 后自动失——正是 dsh 那条，也正是「人没说话，就不要再烧钱」那道闸。
 
-### 3. 两只手，分开：文字与开关归人，进展与完成归模型
+### 4. 三个工具、一个管理边、一条人的命令——同一套动词
 
-| | 立 / 改文字 | 暂停·恢复·清除 | 写进展 | 标完成 |
-|---|---|---|---|---|
-| **人**（`/goal`、目标条） | ✓ | ✓ | | |
-| **模型**（`goal` 工具） | | | ✓ | ✓ |
+`harness.cap.goal` 是**唯一**的规则处，五个门都调它，拒绝不写第二份：
 
-这不是礼貌，是**两种写的语义不同**：人是**下达**，模型是**汇报**。一个模型能自己立目标、自己改文字、
-自己撤掉的会话，「目标是人的意思」这句话就不成立了；反过来，让模型只能汇报、不能标完成，
-人就得每做完一个目标回来自己点一下。所以界线画在这里，各自只碰自己那半边：
+- 模型：`get_goal` / `create_goal(objective, max_goal_rounds?)` / `update_goal(goal_id, revision, action, …)`；
+- 人：`POST /api/goal`（`action` ∈ `show`/`create`/`edit`/`pause`/`resume`/`clear`）+ `GET …/goal`；
+- 人（输入框）：`/goal …`（票 08，落到同一个 `POST`）。
 
-- `set` / `edit` **清空 `progress`**（那句进展属于旧文字，留着就是一句对不上号的话）；
-  `pause` / `resume` / `complete` **保留** `progress`（还是同一个目标）。
-- 模型**不能** `set` / `edit` / `pause` / `resume` / `clear`。工具里根本没有这些动作。
+**`show` 是读**：`GET` 与 `/goal` 单打都走它，答一份快照。
 
-### 4. 五个动词在 `harness.cap.goal`，校验也在那里
+### 5. 模型可以从人的直接请求立目标，但顶不掉未完成的目标
 
-`set!` / `edit!` / `pause!` / `resume!` / `clear!` 是人那半边；`progress!` / `complete!` 是模型那半边。
-两个门（`POST /api/goal` 与 `goal` 工具）都调这里，**拒绝只写一份**——照 `harness.cap.todos`
-「校验在这里，不在工具里」那条既有纪律，一个 eval、一个测试、一个未来的端点拿到的是同一套规则。
+dsh 的规则照抄：`create_goal` **可以从人的直接请求推断出目标**（任何语言），
+但**一次性的小活儿不要建**（描述里写死）；**已有一个未完成的目标时拒绝**，
+告诉它先 `update_goal complete` 或等人 `clear`。
 
-前置条件写死、按名字拒绝（`:no-goal` / `:already-set` / `:not-paused` / `:not-active` / `:no-text` …）：
+这条修正了我上一版的「人立、模型只汇报」——dsh 是两只手都能立，靠的是**栅栏 + 相位**兜底，
+而不是靠一方不给写。人仍然随时能 `pause` / `clear`。
 
-- `set!`：**已经有一个目标（任何状态）就拒绝**，告诉人先 `edit` 或 `clear`。这条是 `/goal edit`
-  存在的理由——「顺手再打一句」不该静默顶掉上一个。
-- `edit!`：没有目标就拒绝；有则换文字、清进展、**置 active**（人此刻说什么是「现在要做的」）。
-- `pause!`：只有 `active` 能暂停；`resume!`：只有 `paused` 能恢复。
-- `clear!`：删掉那一行。**没有目标时不是错误**，是一句「这场会话没有目标」加一次不写。
-- `progress!`：只有 `active` 的目标能记进展（暂停了、做完了都不是「正在做」）。
-- `complete!`：只有 `active` 能标完成（人暂停过的目标，模型不能替人了结）。
+### 6. 暂停只有人能解除；模型的 resume 只 re-arm
 
-每个动词答**存进去的那份**（规范化后的四个字段，或 nil），让两个调用者都拿到「记成了什么」
-而不是「我发了什么」——`todos/write!` 的收据同一条理由。
+- `update_goal(pause)`：模型可以暂停（它发现自己卡住、要走别的路）。
+- `update_goal(resume)`：**只对 `active` 但 `disarmed` 的目标有效**（会话 resume/fork 之后）。
+- **`paused` 的目标，模型的任何动作都不能让它回 `active`**——只有人的 `POST`/`/goal resume` 能。
+  按名字拒绝（`:paused-by-human`），句子说清「人暂停的目标等人恢复」。
 
-### 5. 每一次写都推一个 `goal` 帧，存量先拉一次
+### 7. `block` 要同一个 blocker 连续若干轮
 
-**第五族帧**，与右栏的 `task` 帧同形：`{:type "goal", threadId, goal}`，**整份载荷、一个帧一次变、没有游标**。
-理由与 `task` 那条一字不差：目标住在**库**里，不是记录的一行，没有 `seq` 可编号、没有东西可按游标重放，
-所以「谁要画它，谁把自己那一格改掉」。
+模型可以在 `update_goal` 里报 `blocked_reason`（kebab-code + 说明）。它**不是**一次调用就生效：
+同一个 `code` 必须连续出现 **`block-rounds`（默认 3，一个 knob）** 轮才写进 `phase: blocked`；
+在此之前那条 reason 作为**挂起的阻塞**留在快照里（`:pending-block`），相位不动。
+理由就是 dsh 那条：一个模型因为一次报错就宣布目标阻塞，是把「这一轮不顺」写成「这件事做不成」。
 
-服务端：`harness.edge.http/goal-send!`，把这份载荷发给**所有在看这场会话**的连接（`mux/channels-for`）。
+`blocked` 之后：driver 停（决定 9），提醒照旧注入（要告诉模型「卡在哪」），人的 `resume` 清掉 blocker、
+`revision +1`、相位回 `active`。
 
-客户端：`ui/src/lib/mux.ts` 的 `familyOf` 多认一个 `"goal"`，多一张订阅表；**存量那一半照
-`docs/rules/panel-data.md`**——挂载一次 `GET …/goal`、换会话再拉一次、**重连之后 `onDownlinkOpen` 再拉一次**。
+### 8. 每轮提醒：派生注入、按内容幂等、只在 active 时注入
 
-**模型那一半的写不发帧**（那是 `harness.cap.goal` 的，不该反向 require 边），由目标条照样在
-`model/start` 与 `turn/end` 两个 fact 上补一次存量——与任务横条同一处、同一条理由：
-`goal` 工具跑在一次模型调用结束之后、下一次开始之前，所以下一个 `model/start` 是它第一个可见的边界。
-
-### 6. 每轮提醒是派生注入，按内容幂等，只提醒活着的目标
-
-模型每一轮读到的是 pre-LLM 缝（`harness.cap.project/before-llm`）追加的**一条 `role=user` 消息**，
+模型每一轮读到的是 pre-LLM 缝（`harness.cap.project/before-llm`）追加的一条 `role=user` 消息，
 与技能正文、作业结局同一个缝、同一种形状（`.scratch/skills-and-instructions`）：
 
 ```
-<goal>
-重构登录模块，补齐测试和迁移说明
-progress: 已经拆出 auth 包，测试写到一半
-朝着这个目标推进。用 `goal` 工具报告进展，做到时把它标为完成。
+<goal revision="3">
+把登录模块重构完，补齐测试和迁移说明
+round 7/25
+朝着这个目标推进。用 `get_goal` 看清现状、`update_goal` 报进展或标完成；做不下去就说明卡在哪。
 </goal>
 ```
 
-- **只在 `active` 时注入。** `paused` 的意思是「别再推我」——一条还挂在模型眼前的提醒说的正好相反；
-  `completed` 已经了结。两种状态都不注入，目标条照旧画它。
-- **按内容幂等**：历史里已经有一条与当前提醒**逐字相同**的 `<goal>` 块，就不再追加。
-  这让这个缝在每次模型调用前被调用也不长胖（`.scratch/skills-and-instructions` 的幂等理由），
-  而目标一改、`progress` 一动，就在**末尾**追加一条新的（旧的留着——模型确实读过那一版）。
-- **派生，不落盘**：每个模型调用现算。一次压缩把旧的提醒折掉之后，下一次调用把它带回来。
-- **夹在 pre-LLM 追加的末尾**（技能正文、作业结局之后），离问题最近：它是**此刻**要看的立场，
-  技能正文与作业结局是这个问题**用到的材料**。
-- **在 `:run/start` 时作为一张注入卡**随其他注入一起发给客户端（`injected-frame`，id 前缀 `-pre<i>`），
-  于是人能在对话栏里看到「这一轮模型被提醒了什么」，而客户端**不回发**它。
+- **只在 `active` 时注入**：`paused`（别再推我）、`blocked`（已经说了卡在哪）、`completed` 都不注入。
+- **按内容幂等**：历史里已有一条与当前提醒**逐字相同**的 `<goal>` 块就不再追加；目标一改、
+  轮数一动，就在末尾追加一条新的（旧的留着——模型确实读过那一版）。
+- **派生、不落盘**：每次模型调用现算；一次压缩把它折掉，下一次调用带回来。
+- 注入在 `:run/start` 作为一张注入卡发给客户端（`injected-frame`，id 前缀 `-pre<i>`），客户端**不回发**。
 
-**说清楚代价**：一条提醒里带着那一刻的 `progress`，于是它**只在那版目标/进展出现时追加一次**，
-在很长、目标一直没动的会话里会退到历史中段，而不是每轮都贴在队尾。换来的是不随轮数无界增长
-（每轮贴一条 = 平方级 token）。若「漂移」日后被证明是真问题，出路是把这条提醒改走
-`.scratch/instruction-updates` 的 `developer` 那条尾链（每轮重发、不落进对话），
-本仓选择先不做——那是给「指令更新」修的通道，不是给目标修的。
+**兑现代价**：按内容幂等意味着一条提醒**写在它的目标版本出现处**，长会话里会退到中段。
+**driver 那一半正是为此存在的**：每一轮由 driver 追加一条**新的** round 开场（决定 9），
+把目标重新带到队尾；人自己驱动、没有 driver 时，靠目标条与控制命令把目标改一下也就刷新了。
 
-### 7. 工具叫 `goal`，一个工具两个动作
+### 9. `goal-round-driver`：一轮收尾后自动开下一轮
 
-`goal`，参数 `{"action": "progress" | "complete", "text": "…"}`（`text` 只有 `progress` 要用）：
+**触发**：一场 run 以正常终局收尾（`:run/done`，不是 interrupt、不是 error）时，看这个会话的目标：
+`active` **且 armed** **且 `rounds < max-rounds`** **且上一轮有进展** → 追加一条 round 开场、开下一轮；
+任何一个条件不成立就什么都不做。
 
-- `progress` → `harness.cap.goal/progress!`，答一句收据（写成什么、现在是什么状态）。
-- `complete` → `complete!`，答一句「目标标记完成」。
-- **没有目标时拒绝**，句子告诉模型「目标由人立」——模型不能凭空造一个出来。
-- **一条消息最多调一次**（`todo_write` 的 `sole-call-of-its-name?` 同款）：状态是**整体替换**的，
-  一条消息里两次调用没有东西可合并，两次都不生效。
+- **round 开场**是一条**真的 user 消息**（进对话、进记录），内容由 `harness.cap.goal` 一处产出：
+  带 objective、round 序号、上限，以及那句「做到就 complete，做不下去就说卡在哪」。
+  它不进 `prompt.md`，不碰 system 前缀。
+- **有进展** = 刚刚这一轮的记录里至少有一次**通过的、改文件的工具调用**（`write`/`edit` 那一家）。
+  没有一个，就是**零进展**：driver **不开下一轮**，把目标置 `blocked`（`code: no-progress`）并停下，
+  在目标条上告诉人。这不是保守，是 dsh 那次 642M token 事故的直接教训——
+  「模型原地打转还一直续」是这套机制唯一的真危险。
+- **上限**：`rounds` 每开一轮 +1（写进记录，重启后还在）。默认 **25**（`harness.edn` 的
+  `:goal {:max-rounds 25}`），不是 dsh 的 256——上限是**保险丝不是目标值**，
+  256 轮配上一次坏压缩就能烧掉一场会话（dsh issue #7894）。
+- **人随时能停**：每一轮开始前重读一次相位与 armed，`pause`/`clear` 立刻生效；进程重启后 armed 是空的，
+  所以**重启不会自己接着烧钱**——要人再说一句（发一条消息，或 `/goal resume`）。
+- **多开一轮的机制**照 `harness.edge.http/run-subagent!`：本仓已经有「服务端主动开一场 run、
+  自己的帧汇、经 mux 广播给看客」的先例，driver 不再造第二套。
 
-**不加 `goal_read` 工具**：提醒每轮都在它眼前，没有「手里没有、要回来讨」的场面——
-与 `todo_read` 存在的理由正好相反（那张清单会被压缩掉、会被后来的进程读到）。
-
-### 8. `/goal` 是输入框指令，不是一条消息
-
-人在输入框里打 `/goal …`，**composer 在发送前认出来、当一次动作执行、不把这句话发给模型**：
+### 10. `/goal` 是输入框指令，不是一条消息
 
 ```
-/goal <文字>      立一个新目标（已有目标则拒绝，提示用 edit / clear）
-/goal edit <文字> 改现有目标的文字
-/goal             看（把目标条展开/聚焦；没有目标就画那个空态）
-/goal pause | resume | clear
+/goal                 看（快照：相位、轮数/上限、阻塞原因、可用的后续命令）
+/goal <目标>          建（未完成的目标不被顶掉，要人先 clear）
+/goal edit <目标>     只改文字，**不动相位、不动激活**（dsh 那条，修正上一版）
+/goal pause|resume    暂停 / 恢复
+/goal clear           清（墓碑）
 ```
 
-- **触发形状与技能斜杠同一形状**（`/` 在消息开头、名字后有空白或行尾），复用
-  `harness.cap.skills/slash-pattern` 那条规矩的客户端副本，不新造一套。
-- **解析只有一个模块**（`ui/src/lib/goal-command.ts`）：它把一句话答成 `{:action .. :text ..}` 或 nil。
-  目标条的按钮走**同一个** `POST /api/goal`（`ui/src/lib/goal.ts`），于是「`/goal pause`」与「点暂停」
-  是同一条实现的两次入口。
-- 打出去的 `/goal …` **不进对话**：它不是人说给模型的话，是一次对会话状态的写。
-  （这与 `/name` 技能斜杠**刻意不同**——那个是「给模型加材料」，正文要进对话；这是「改一个开关」。）
-- **`goal` 这个名字被保留**：一个叫 `goal` 的技能不能用 `/goal` 触发（它在 `/` 菜单里照旧列出、
-  模型照旧能用 `skill` 工具加载）。这是一处写下来的代价，不是漏洞。
+解析只有一个模块（`ui/src/lib/goal-command.ts`），composer 在**发送前**认出来、执行、**不发 run**，
+形态与技能斜杠同一形状。`goal` 这个名字被保留（一个叫 `goal` 的技能不能用 `/goal` 触发，代价写下来）。
 
-### 9. 目标条在输入框之上、任务横条之上
+### 11. 目标条在输入框之上、任务横条之上
 
-`ui/src/components/composer-goal.tsx`，挂在 composer 上方。**没有目标就什么都不画**——
-与任务横条「空列表不占地方」同一条理由（一行「暂无目标」是给一个不存在的东西摆家具）。
+画**相位、objective、round n/max、blocked 原因**，按相位给按钮（暂停/恢复/编辑/清除），
+没有目标就什么都不画。存量 + 推送（`goal` 帧）+ 两个 fact 补一次 + 重连补一次，照 `docs/rules/panel-data.md`。
 
-有目标时画：一行 `🎯 状态 · 文字`（文字过长截断），展开是全文 + `progress`，右侧按状态给按钮：
+### 12. `prompt.md` 一个字不动
 
-- `active`：暂停 / 清除 / 编辑
-- `paused`：恢复 / 清除 / 编辑
-- `completed`：清除（「完成」是模型给的，人这里只有「清掉」）
-
-**它不看只写各半**：状态词给无障碍树，模型写的 `progress` 原样画出、不翻译（是模型的话，同任务横条）。
-
-### 10. `prompt.md` 一个字不动
-
-目标**不进 system 消息**：它是会中途变的事实，冻进那条前缀就是一句会过期的话，而且每改一次目标
-换来一次冷前缀（`.scratch/instruction-updates` 的代价）。它走注入那一半，与技能正文同族。
+目标不进 system 消息：它会中途变，冻进前缀就是一句会过期的话，而且每改一次换来一次冷前缀。
+它走注入那一半（决定 8）。
 
 ## 代价（写清楚，不藏）
 
-- **多一张表、多一族帧名**：`goals` 进库要有人写下它是状态还是记录（`harness.infra.db-test`
-  那条元断言守着），`goal` 这个名字要进 `ui/src/lib/mux.ts` 的 `familyOf` 与 `frames.ts`
-  那条读 wire 的测试——两处有一处漏了，帧会掉进 run 家族、把整个 run 弄挂（`task` 帧那条注释
-  早写过这个坑）。
-- **提醒的漂移**：见决定 6 末段，收下来，出路也写在那里。
-- **目标改在 run 中间**：`progress!` / `complete!` 在下一次模型调用前生效（pre-LLM 缝每调用一次），
-  不是同一轮里立刻；这正是 pre-LLM 缝的设计。
-- **`/goal` 保留名**：一个叫 `goal` 的技能在斜杠这条路上够不着（决定 8）。
-- **人不能标完成**：只有模型能 `complete`，人只有 `clear`。「做得不对，我自己了结」这件事，
-  人要 `clear` 再立一个——收下来，因为 `complete` 的意义正是「模型认为做到了」。
+- **记录 + 投影两处**：crash 之间会不一致，靠 fold 重建兜底（与 `sessions.numbers` 同一条）。
+- **driver 是这套里最重、最险的一块**：它让服务端主动开 run、烧的是按量计费的钱。
+  上限默认小、零进展即停、进程重启即 disarmed、人随时能停——四条刹车一条都不能省。
+- **多一族帧名 + 多一张表 + 多处文档**：`goal` 帧要进 `ui/src/lib/mux.ts` 的 `familyOf` 与那条读 wire 的测试；
+  `goals` 要在 `db_test` 的 `declared-state-columns` 里申报（物化 fold 那条论证）；`CONTEXT.md` /
+  `panel-data.md` / `overview.md` 三处文档要跟着。
+- **零进展的判据只认改文件的工具调用**：靠 `bash`（`git apply`、构建产物）改的东西**不算进展**，
+  一轮纯 bash 的推进会被判成零进展、把目标置 blocked。这是选便宜判据的代价；人 `resume` 一句就接着走。
+- **`/goal` 保留名**：一个叫 `goal` 的技能在斜杠这条路上够不着。
+- **`block` 的三轮规则**：模型第一次报到 blocker 不会立刻停，相位要第三轮才变——
+  拿「晚一点停」换「不因一次报错停」。
+- **会话 resume/fork 后 disarmed**：人回到一个跑过一半的会话，目标还是 active，但不会自己续——
+  要他说一句。这是特性不是缺陷（别让「打开页面」等于「继续烧钱」）。
