@@ -9,6 +9,7 @@
             [harness.edge.sessions :as sessions]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
+            [harness.infra.stream :as stream]
             [harness.kernel.event :as ev]
             [harness.kernel.session :as session]))
 
@@ -70,6 +71,14 @@
                                                               (ev/run-end)]))))
                 "\n")
           :encoding "UTF-8")
+    f))
+
+(defn- ring-file
+  "A file for the RING cases to push into: it is the record's own shape (`push!` writes the line
+  there), so the case can also check that what landed is a FILE fact and never a ring one."
+  [thread-id]
+  (let [f (io/file (home/projects-dir) "sessions-test" (str (home/sanitize thread-id) ".jsonl"))]
+    (.mkdirs (.getParentFile f))
     f))
 
 (defn- forget-everything! []
@@ -235,6 +244,30 @@
       (is (not (contains? (set (sessions/prune-watches!)) "t-live"))
           "a conversation whose readers are all alive is not a name it answers with")
       (sessions/unwatch! "t-live" live))))
+
+(deftest putting-a-session-away-takes-its-record-ring-with-it
+  ;; (`.scratch/memory-hygiene/` 票 03) THE RING IS A CACHE OF JUST NOW, NOT OF HISTORY: a
+  ;; conversation that leaves this process leaves nothing in `harness.infra.stream`'s ring. Before
+  ;; this, those rows outlived their sessions -- 18 conversations' worth (11.19 MB) in a
+  ;; six-hour-old process, for ids nobody could name any more.
+  (sessions/touch! "t-ring")
+  (let [f (ring-file "t-ring")]
+    (stream/push! "t-ring" f "{\"type\":\"event\"}\n" nil
+                  {:row {:type "event"} :producer :request})
+    (is (= 1 (count (stream/after "t-ring" nil)))
+        "the ring keeps the line the writer just landed")
+    (sessions/drop! "t-ring")
+    (is (= [] (stream/after "t-ring" nil))
+        "and a session put away takes its row with it")
+    (is (str/includes? (slurp f :encoding "UTF-8") "event")
+        "while the line itself is where it always was -- the FILE (a reader with a cursor pulls it)")
+    (testing "and a conversation reborn under the same id starts its ring empty, like a fresh process"
+      (sessions/touch! "t-ring")
+      (is (= [] (stream/after "t-ring" nil)))
+      (stream/push! "t-ring" f "{\"type\":\"event\",\"n\":2}\n" nil
+                    {:row {:type "event" :n 2} :producer :request})
+      (is (= [1] (mapv :seq (stream/after "t-ring" nil)))
+          "and the numbering carries on from the file's own offset, not from zero"))))
 
 (deftest bytes-that-have-not-reached-the-record-hold-a-session
   (sessions/touch! "t-pending")

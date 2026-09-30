@@ -22,10 +22,13 @@
                      The records stay where they are -- an ending outlives the id that named
                      it -- while the commands go, because a session this process no longer
                      serves is one whose background commands nothing here could reach again.
-    :put-away!        `harness.infra.stream/fsync!`: the other half of the same moment -- the PROCESSES
+    :put-away!        `harness.infra.stream`: the other half of the same moment -- the PROCESSES
                       stop, and the BYTES this process was the only one holding get their promise
                       (ticket 04 of `.scratch/event-persistence`). A record is not a command: it
-                      stays, and it should stay on the platter.
+                      stays, and it should stay on the platter. AND THE SAME MOMENT TAKES THE
+                      CONVERSATION'S IN-MEMORY RING ROW (`stream/forget-kept!`, ticket 03 of
+                      `.scratch/memory-hygiene`): what this process keeps is a cache of JUST NOW,
+                      and history is what the file is for.
 
   THE IRON LAW RIDES ON `:build`: the mechanism never reads a record during a run, and the one
   read -- the walk a session is BORN by -- is the fold installed here."
@@ -166,7 +169,14 @@
    :hand-over! claims/hand-over!}
 
   :stop-jobs! jobs/stop-session!
-  :put-away!  stream/fsync!})
+  :put-away!  (fn [thread-id]
+                ;; TWO FACTS, ONE MOMENT, and the second one is why this is a function rather than
+                ;; `stream/fsync!` itself: THE BYTES GET THEIR PROMISE, and the IN-MEMORY RING ROW
+                ;; for this conversation goes with it (`forget-kept!` -- a reader with a cursor pulls
+                ;; the file, so nothing askable is lost). `.scratch/memory-hygiene/` ticket 03.
+                (stream/fsync! thread-id)
+                (stream/forget-kept! thread-id)
+                nil)})
 
 (defn install!
   "Install the adapter's half of the session mechanism (tickets 08-10): the map above,
