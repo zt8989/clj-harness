@@ -438,6 +438,36 @@
                    (dissoc folded :incomplete))
                 "and the record's own fold agrees with both, key for key")))))))
 
+(deftest the-numbers-are-assembled-once-per-model-fact
+  ;; THE PUSH AND THE STORE WRITE ARE ONE ANSWER (2026-09-30). Both used to ask `live-numbers`
+  ;; for it inside the same `model/end` callback -- the stats, the context section and the band's
+  ;; price built twice in a row -- and the ring's split is what made it visible (~50ms per
+  ;; assembly on a 2 MB conversation, `harness.edge.context/shares`).
+  ;;
+  ;; WHAT THE FIVE ARE, so the next person knows what they are changing: one per `model/start`,
+  ;; one per `model/end` (the push and the store write now take the SAME one), and one when the
+  ;; run's tail lands (the closing write at `log-messages!`). COUNTED RATHER THAN TIMED: a
+  ;; duration would be this machine's answer, and this is the code's own.
+  (let [calls (atom 0)
+        live  (ns-resolve 'harness.edge.http 'live-numbers)
+        orig  @live]
+    (with-redefs-fn {live (fn [stem] (swap! calls inc) (orig stem))}
+      (fn []
+        (with-server "one-assembly"
+          ;; TWO MODEL CALLS, not one: an answer that asks for a tool keeps the run going
+          ;; (a plain answer ends it, and then the count below would only exercise one end).
+          [{:content "" :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}]
+            :usage {:prompt_tokens 100 :completion_tokens 40 :total_tokens 140}}
+           {:content "done" :usage {:prompt_tokens 200 :completion_tokens 8 :total_tokens 208}}]
+          (fn [port]
+            (send-run! port "one-assembly")
+            ;; THE FACTS RIDE THE DOWNLINK, a beat behind the SSE body `send-run!` returned.
+            (let [deadline (+ (System/currentTimeMillis) 5000)]
+              (while (and (< (System/currentTimeMillis) deadline) (< @calls 5))
+                (Thread/sleep 25)))))))
+    (is (= 5 @calls)
+        "two model calls and the run's closing write: 2 + 2 + 1 -- two, not three, at each end")))
+
 (deftest the-push-carries-the-turn-count-and-not-only-the-calls
   ;; TICKET 01's follow-up, and it is a BUG'S test: `live-numbers-slice` used to omit `:turns`,
   ;; on the reasoning that a turn is counted where a run is opened while the push is about a
