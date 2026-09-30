@@ -4840,14 +4840,62 @@
       (assoc read :ok (sessions/revive-parks! stem es))
       read)))
 
+;; ----------------------------------------------------- the record, read one pass at a time
+
+(defonce ^:private record-folds
+  ;; thread-id -> {:path .. :bytes .. :lines .. :rows .. :fold ..}: HOW FAR THIS PROCESS HAS ALREADY
+  ;; FOLDED a conversation's record. See `record-entries-resumed` for what keeps it and what drops it.
+  (atom {}))
+
+(defn- record-entries-resumed
+  "STEM's entries AS THE RECORD HAS THEM, folded over what has been APPENDED since the last pass --
+  the same answer `record-entries` gives, without reading again the bytes it has already read.
+
+  WHY IT EXISTS: a run in flight writes its answer a line at a time, and the window's doorbell asks
+  again on every tick of the sweeper's clock (`growth-interval-ms`, ten times a second) so that a
+  reader watches the answer grow. Re-reading the record each time cost A PARSE OF THE WHOLE
+  CONVERSATION PER TICK -- measured on this machine, 2026-09-30: a 23.7 MB record of 53,732 rows
+  took 254-321 ms a pass against a 100 ms interval, so the thread never got to sleep, and a
+  conversation that only grows makes it worse. The bytes that changed are the whole answer; the
+  fold is resumed over those, and `replay/entries-fold` says why the two readings agree entry for
+  entry.
+
+  A COLD CURSOR READS THE WHOLE RECORD ONCE: no cursor for this thread-id, a record at another path,
+  or a SHORTER file -- a record replaced or truncated is not the continuation of a stream of bytes,
+  so it is read again from the beginning. A record that cannot be read at all THROWS, and the caller
+  answers from memory, which is what the window did before this existed.
+
+  IT ANSWERS ENTRIES, not the `{:ok ..}` / `{:error ..}` shape `record-entries` answers: this is one
+  half of the door `window-page` uses, and the other half of that door is memory."
+  [stem]
+  (let [log   (replay/locate (home/projects-dir) stem)
+        path  (.getAbsolutePath log)
+        at    (get @record-folds stem)
+        ;; THE SAME FILE, STILL GOING FORWARD -- a file that is shorter than what we read of it is a
+        ;; different stream of bytes, and so is one that moved.
+        same? (and (some? at) (= path (:path at)) (<= (long (:bytes at)) (.length log)))
+        from  (if same? at {:path path :bytes 0 :lines 0 :rows 0 :fold (replay/entries-fold)})
+        [pairs bytes lines] (replay/rows-after log (long (:bytes from)) (long (:rows from))
+                                             (long (:lines from)))
+        fold  (if (seq pairs) (replay/entries-fold (:fold from) pairs) (:fold from))]
+    (swap! record-folds assoc stem
+           {:path  path
+            :bytes (long bytes)
+            :lines (long lines)
+            :rows  (+ (long (:rows from)) (count pairs))
+            :fold  fold})
+    (replay/entries-of-fold fold)))
 (defn- window-page
   "A LIVE conversation's window: {:entries [..] :baseSeq N :hasMore bool} for the tail page
   (`since` nil) or for what arrived after `since`.
 
   THE SAME CHOICE `read-entries` MAKES, AT THE STREAMING DOOR: the record while a run of it
   is in flight here, else the session's own entries (`sessions/tail` / `sessions/since`).
-  Re-reading on every ring is the point -- the delta has to be computed against the file as
-  it is NOW, which is what makes a reader's own cursor sufficient (ADR 0003 decision 7).
+  READING THE RECORD IS THE POINT; RE-READING IT IS NOT. The delta has to be computed against
+  the file as it is NOW, which is what makes a reader's own cursor sufficient (ADR 0003
+  decision 7) -- but a pass now pays only for the bytes APPENDED since the last one
+  (`record-entries-resumed`). Before that it re-read and re-parsed the whole record on every
+  100 ms tick, whatever had grown.
 
   A RECORD THAT CANNOT BE READ FALLS BACK TO MEMORY. This is a stream that has already
   begun, and refusing the whole window mid-flight would leave the reader holding half of it
@@ -4855,7 +4903,14 @@
   BY NAME (`read-entries`)."
   [stem since]
   (reconcile-numbers! stem)
-  (let [from-record (when (running? stem) (:ok (record-entries stem true)))
+  (let [running-here? (running? stem)]
+    ;; A CURSOR BELONGS TO THE RUN THAT MADE IT NEEDED: the record is what the window reads only
+    ;; while a run of this conversation is in flight HERE (`read-entries-raw` says why), so a cursor
+    ;; its run has outlived is dropped -- otherwise this map would hold a fold for every
+    ;; conversation the process ever watched.
+    (when-not running-here? (swap! record-folds dissoc stem))
+    (let [from-record (when running-here?
+                        (try (record-entries-resumed stem) (catch Throwable _ nil)))
         page (cond
                (nil? from-record)
                (if (nil? since)
@@ -4871,7 +4926,7 @@
     ;; `sessions/tail`, and a nil window has nothing to repair.
     (if-some [es (:entries page)]
       (assoc page :entries (sessions/revive-parks! stem es))
-      page)))
+      page))))
 
 (defn- number-param
   "A query parameter that is meant to be a record offset, or nil when it is absent.

@@ -380,6 +380,64 @@
   [^java.io.File f]
   (fold-records f [] (fn [acc [_ row]] (conj acc row))))
 
+(defn rows-after
+  "A log FILE, read BY BYTES: [FILE BYTE-OFFSET ROW-OFFSET LINE-OFFSET] -> [PAIRS NEXT-BYTE-OFFSET
+  NEXT-LINE-OFFSET].
+
+  PAIRS are `[row-index row]` for every COMPLETE line after BYTE-OFFSET -- the same pairs
+  `fold-records` makes, numbered the same way: the index counts ROWS (one per line, more when the
+  line is an old `input` row, which is why a caller cannot count lines and get this right).
+  LINE-OFFSET is the LINE count, which `read-line-rows` needs for its two own uses (the line an
+  error names, and the `:old-contract` mark an old row carries) -- so a caller keeps both numbers,
+  and NEXT-BYTE-OFFSET / NEXT-LINE-OFFSET are where the next pass reads on from.
+
+  READING BY BYTES INSTEAD OF FROM THE START is the whole reason an offset is kept: a caller that
+  has already read a log reads only what has been APPENDED to it. That is what makes this usable
+  on a clock over a conversation that is still being written, where the file changes under the
+  reader twice a second (`.scratch/record-window/` ticket 01 -- the window's push used to re-read
+  and re-parse the whole record on every tick). The offset only ever advances past a newline, so
+  the next decode starts on a character boundary -- and A LINE STILL BEING FLUSHED IS NOT A LINE
+  YET, which is the same rule `read-records` spells from the other side.
+
+  A COMPLETE LINE THAT WILL NOT PARSE STOPS THE PASS, and the offset stays AT it rather than at
+  its end. That is `read-records`' own tolerance read from the other end: that reader holds the
+  last line back and swallows its failure (the writer was mid-flush), so what it answers is
+  'everything but the last line'. This one answers the same entries and loses nothing if the line
+  is later made good -- it is retried, not swallowed. A line that will not parse in the MIDDLE is
+  the corruption `read-line-rows` refuses by name and it throws out of here, exactly as it does
+  out of `fold-records`."
+  [^java.io.File f ^long byte-offset ^long row-offset ^long line-offset]
+  (with-open [raf (java.io.RandomAccessFile. f "r")]
+    (let [len (.length raf)]
+      (if (<= len byte-offset)
+        [[] byte-offset line-offset]
+        (let [buf  (byte-array (- len byte-offset))
+              _    (.seek raf byte-offset)
+              _    (.readFully raf buf)
+              text (String. buf "UTF-8")
+              nl   (.lastIndexOf text "\n")]
+          (if (neg? nl)
+            [[] byte-offset line-offset]
+            ;; ONE LINE AT A TIME, so that the offset of each line's END is known without a
+            ;; second pass -- and so that a line the reader refuses can be left for the next one.
+            (loop [lines (str/split-lines (subs text 0 nl))
+                   at    byte-offset
+                   line  line-offset
+                   row   row-offset
+                   pairs []]
+              (let [l      (first lines)
+                    end    (+ at (alength (.getBytes (str l "\n") "UTF-8")))
+                    last?  (nil? (next lines))
+                    ;; THE LINE IS READ OUTSIDE THE `recur`: a failure becomes an answer here and
+                    ;; the loop decides what it means. `nil` is that answer -- no line of a record
+                    ;; ever reads as nil.
+                    parsed (try (read-line-rows line l)
+                                (catch Throwable e (if last? nil (throw e))))]
+                (if (or (nil? l) (nil? parsed))
+                  [pairs at line]
+                  (recur (next lines) end (inc line) (+ row (count parsed))
+                         (into pairs (map-indexed (fn [k r] [(+ row k) r]) parsed))))))))))))
+
 (declare runs-init runs-step)
 (defn- runs
   "Every run a log holds, in the order its first MESSAGE row opened it: {:run-id .. :frames
@@ -1021,6 +1079,34 @@
   caller that has some of the rows must not ask."
   [pairs]
   (entries-answer (reduce entries-step (entries-init) pairs)))
+
+(defn entries-fold
+  "THE ENTRIES FOLD AS A STATE, for a reader that must CONTINUE it instead of starting it again.
+
+  `(entries-fold)` is the empty state; `(entries-fold state pairs)` folds more `[row-index row]`
+  pairs into it and answers the state to fold into next; `(entries-of-fold state)` answers the
+  entries folded so far. THE PAIRS CARRY THE RECORD'S OWN INDICES, and that is the whole trick:
+  folding a log in two pieces gives ENTRY FOR ENTRY the answer `entries` gives it whole, because
+  it is the same fold over the same rows with the same numbers -- a reduce, split (`replay/rows-after`
+  is the reader that hands them over the way `fold-records` does).
+
+  THE ANSWER DOES NOT TOUCH THE STATE. `entries-of-fold` flushes the trailing group -- the run the
+  record stopped in the middle of, which is exactly what a live conversation has -- and the state
+  it was handed keeps that group pending, so a caller may answer as often as it likes and then fold
+  further. WITHOUT THAT, a clock over a growing conversation would either re-read the whole log
+  every tick or put a half-answered run on the screen.
+
+  WHAT IT COSTS IS MEMORY, and it is the caller's to bound: the state holds the entries folded so
+  far, so a caller that keeps a state per conversation keeps a copy of that conversation (the
+  window keeps one per RUNNING conversation, and drops it when the run ends -- see
+  `harness.edge.http/record-entries-resumed`)."
+  ([ ] (entries-init))
+  ([state pairs] (reduce entries-step state pairs)))
+
+(defn entries-of-fold
+  "STATE -> the entries it has folded. See `entries-fold`."
+  [state]
+  (entries-answer state))
 (defn entries
   "Parsed log records -> the conversation's entries IN ORDER, each numbered:
   [{:seq N :message M} ..].

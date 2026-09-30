@@ -850,6 +850,59 @@
       ;; WHICH IS THE POINT: one number for the whole run is the coarser reading the live session
       ;; used (`settle!`'s fourth argument), and it is a DIFFERENT answer about the same record.
       (is (< 1 (count (distinct (map :seq (mine alone)))))))))
+
+(deftest a-record-read-in-pieces-folds-entry-for-entry-as-one-read
+  ;; THE PREMISE THE WINDOW'S PRICE RESTS ON (`.scratch/record-window/` ticket 01): the entries
+  ;; fold is a `reduce`, and `replay/rows-after` hands it the same `[row-index row]` pairs a whole
+  ;; read would -- so a reader that keeps its offsets and folds only WHAT WAS APPENDED answers
+  ;; exactly what a reader that starts over answers. Without that, the window's doorbell (ten times
+  ;; a second) has to re-parse the whole conversation to stay honest, which is what it used to do.
+  (let [tid   "read-in-pieces"
+        part1 (vec (concat (action-lines "r1" [seed])
+                           (event-lines "r1" [(ev/run-start) (ev/text-delta "half an answer")])))
+        part2 (vec (concat (event-lines "r1" [(ev/run-end)])
+                           (action-lines "r2" [seed])
+                           (event-lines "r2" [(ev/run-start) (ev/text-delta "second")
+                                             (ev/run-end)])))
+        f     (log-file tid)]
+    (write-log! tid part1)
+    (let [[pairs bytes lines] (replay/rows-after f 0 0 0)
+          folded              (replay/entries-fold (replay/entries-fold) pairs)]
+      (testing "one pass over a record answers what the whole-file reader answers"
+        (is (= (replay/entries (replay/read-records f)) (replay/entries-of-fold folded))))
+      (testing "and it stops on a line boundary, with the row and line counts beside it"
+        (is (= (count pairs) (count (replay/read-records f))))
+        (is (= lines (count part1))))
+      (spit f (str (str/join "\n" part2) "\n") :encoding "UTF-8" :append true)
+      (let [[more bytes2 lines2] (replay/rows-after f bytes (count pairs) lines)
+            resumed              (replay/entries-fold folded more)]
+        (testing "the appended lines continue the SAME fold, numbered as the whole file numbers them"
+          (is (= (count more) (count part2)))
+          (is (= lines2 (+ lines (count part2))))
+          (is (= bytes2 (.length f)) "the second pass read to the end of the file")
+          (is (= (replay/entries (replay/read-records f)) (replay/entries-of-fold resumed))
+              "what was folded in two pieces is what the whole file folds to, entry for entry"))))))
+
+(deftest a-line-still-being-flushed-is-not-a-row-and-is-not-lost
+  ;; THE OTHER HALF OF THE SAME BARGAIN: an offset may only advance past a newline, so a half-flushed
+  ;; line is left for the next pass instead of being parsed into something nobody wrote -- and leaving
+  ;; it is not LOSING it, which is what makes 'keep an offset' safe on a live record.
+  (let [tid   "torn-tail"
+        f     (log-file tid)
+        whole (vec (concat (action-lines "r1" [seed])
+                           (event-lines "r1" [(ev/run-start)])))
+        tail  (first (event-lines "r1" [(ev/text-delta "half an answer")]))
+        cut   (quot (count tail) 2)]
+    (spit f (str (str/join "\n" whole) "\n" (subs tail 0 cut)) :encoding "UTF-8")
+    (let [[pairs bytes lines] (replay/rows-after f 0 0 0)]
+      (is (= (count whole) (count pairs)) "the half-written line is not a row yet")
+      (is (= (count whole) (count (replay/read-records f)))
+          "which is the same answer the whole-file reader gives")
+      (spit f (str (subs tail cut) "\n") :encoding "UTF-8" :append true)
+      (let [[more bytes2 _] (replay/rows-after f bytes (count pairs) lines)]
+        (is (= 1 (count more)) "and once the line is whole the next pass reads it")
+        (is (= (inc (count whole)) (count (replay/read-records f))))
+        (is (= bytes2 (.length f)) "the offset lands on the end of the file")))))
 (deftest a-second-run-is-numbered-by-its-own-line-not-by-the-first-runs
   (let [q2  {:id "u2" :role "user" :content "second question"}
         raw (vec (concat (one-run-lines)
