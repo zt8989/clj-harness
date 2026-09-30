@@ -71,7 +71,6 @@ is not itself an error."
    :grep        true
    :require-path       false
    :strict-input       false
-   :boundary-dedup     :on
    :diff-context-lines 1})
 
 (def ^:private vocab
@@ -85,8 +84,6 @@ is not itself an error."
    :grep        {:ok    boolean? :legal "true or false"}
    :require-path       {:ok    boolean? :legal "true or false"}
    :strict-input       {:ok    boolean? :legal "true or false"}
-   :boundary-dedup     {:ok    #(contains? #{:on :strict :off} %)
-                        :legal ":on, :strict or :off"}
    :diff-context-lines {:ok    #(and (integer? %) (<= 0 % 10))
                         :legal "an integer 0-10"}})
 

@@ -19,11 +19,10 @@
   is decided by position -- and would show the untouched line as a removal and an
   addition in the diff.
 
-  NO BOUNDARY DEDUP. `:boundary-dedup` exists for the replace slip where a model
-  deletes a line and writes it back at the edge of its own range; it is about an
-  UNINTENDED repeat. Inserting a line identical to its neighbour is the whole point
-  of an insert, so this tool never dedups, whatever the session is configured to
-  do."
+  AN INSERTED LINE IDENTICAL TO ITS NEIGHBOUR IS INSERTED. Edits are applied literally
+  -- there is no boundary dedup to fight -- and in an insert a repeat of the
+  neighbour is the whole point, so nothing here ever removes a line the model asked
+  for."
   (:require [clojure.string :as str]
             [harness.cap.hashline.edit :as edit]))
 

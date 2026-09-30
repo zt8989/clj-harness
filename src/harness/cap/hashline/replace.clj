@@ -433,7 +433,7 @@
 
 (defn- plan-edit
   "ONE call of a batch, resolved against the batch's base TEXT: {:range :lines
-  :stripped :args :path}, ready for the arithmetic.
+  :args :path}, ready for the arithmetic.
 
   WHICH SHAPE IT IS comes from the payload, not from the tool's name: an `insert`
   carries an `anchor`, a `replace` carries `remove_from`, and neither key appears in
@@ -463,15 +463,11 @@
                       :anchors (:anchors target) :checksums (:checksums target)
                       :served (:served target)}
            :lines    (vec lines)
-           :stripped 0
            :args     args
            :path     path})
-        (let [range (guard! thread-id path from to text config warnings owner?)
-              dedup (edit/dedup-edges (vec (:lines (edit/lines-of text))) range lines
-                                      (:boundary-dedup config))]
+        (let [range (guard! thread-id path from to text config warnings owner?)]
           {:range    range
-           :lines    (:lines dedup)
-           :stripped (:stripped dedup)
+           :lines    (vec lines)
            :args     args
            :path     path})))
     (catch Throwable t
@@ -635,7 +631,6 @@
                      :anchors  (:anchors change)
                      :spans    spans
                      :context  (context-lines config)
-                     :stripped (reduce + 0 (map :stripped plans))
                      :added    (reduce + 0 (map (comp count :lines) plans))
                      :removed  (reduce + 0 (map (fn [p] (- (:end (:range p))
                                                            (:start (:range p))))
