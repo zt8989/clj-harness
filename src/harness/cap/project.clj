@@ -709,6 +709,27 @@
                       {:thread-id thread-id :reason :no-such-session})))
     (boolean archived?)))
 
+(defn delete-session!
+  "Take THREAD-ID's ROW out of the store, and answer the id.
+
+  THE ROW ONLY, and that boundary is the point rather than an omission: what a conversation leaves in
+  the other tables (its task list, its claim, its anchors, the content copy) and the record file
+  itself each have an owner, and `harness.edge.forget` is the one place that knows the whole list and
+  calls them in an order that can be retried. A second implementation of that list here would be free
+  to disagree with it.
+
+  A SESSION THIS HOME HAS NEVER HEARD OF IS REFUSED BY NAME, like `archive!` and for the same
+  reason: 'I deleted it' about a conversation that was never here is a lie the caller cannot
+  detect."
+  [thread-id]
+  (let [id      (str thread-id)
+        removed (db/with-transaction
+                  (fn [^Connection c] (db/execute! c "DELETE FROM sessions WHERE id = ?" id)))]
+    (when (zero? (long removed))
+      (throw (ex-info (str "no session " id " in this home, so there is nothing to delete")
+                      {:thread-id id :reason :no-such-session})))
+    id))
+
 (defn remove-project!
   "Take directory CANONICAL out of this home's project list. Answers
   {:path .. :unbound <n>} -- how many sessions stopped being bound.

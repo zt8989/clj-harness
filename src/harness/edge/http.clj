@@ -104,6 +104,7 @@
             [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.projection :as projection]
+            [harness.edge.forget :as forget]
             [harness.edge.compaction :as compaction]
             [harness.edge.llm-timeout :as llm-timeout]
             [harness.edge.prune :as prune]
@@ -3687,6 +3688,82 @@
           (api-response 404 {:error error :threadId stem})
           (rung (api-response 200 {:threadId stem :archived (:ok written)})))))))
 
+(defn- batch-body
+  "A batch route's body -> {:ids [..] :archived <bool?> :had-archived? <bool>}, or {:refusal
+  <response>}.
+
+  THE IDS ARE ASKED FOR BY NAME (`threadIds`), and a body that names none -- or names something that
+  is not a list of strings -- is REFUSED rather than read as 'nothing to do': a batch that quietly did
+  nothing looks exactly like a batch that worked, and the caller would draw every row as done.
+
+  `:had-archived?` IS NOT `:archived`, because `false` and 'absent' are two different statements
+  about that flag, and only one of them is a direction to write."
+  [req]
+  (let [body (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)}
+                  (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} body
+        ids (:threadIds ok)]
+    (cond
+      bad
+      {:refusal (api-response 400 {:error "request body is not valid JSON"})}
+
+      (not (and (sequential? ids) (seq ids) (every? string? ids)))
+      {:refusal (api-response 400 {:error "threadIds must be a non-empty list of conversation ids"})}
+
+      :else
+      {:ids (vec ids) :archived (:archived ok) :had-archived? (contains? ok :archived)})))
+
+(defn- archive-batch-post
+  "POST /api/sessions/archive {threadIds: [..] archived: true|false} -- set the archive flag on MANY
+  conversations in one request: the batch form of `/api/threads/<stem>/archive`.
+
+  Answers {:results [..]}, ONE ROW PER ID AND IN THE ORDER THEY WERE SENT: {:threadId .. :archived
+  bool} for one that was written, {:threadId .. :error <sentence>} for one this home refused. NOTHING
+  IS ROLLED BACK ACROSS THEM, deliberately: the flag is a statement about each conversation on its
+  own, and a batch that rolled back would take the six that worked down with the three that did not
+  -- leaving the caller nothing to draw on the rows that did not fail."
+  [req]
+  (let [{:keys [ids archived had-archived? refusal]} (batch-body req)]
+    (cond
+      (some? refusal)
+      refusal
+
+      (or (not had-archived?) (not (boolean? archived)))
+      (api-response 400 {:error "archived must be true or false"})
+
+      :else
+      (rung (api-response 200
+                          {:results
+                           (mapv (fn [id]
+                                   (try {:threadId id :archived (project/archive! id archived)}
+                                        (catch Throwable t
+                                          {:threadId id :error (ex-message t)})))
+                                 ids)})))))
+
+(defn- delete-batch-post
+  "POST /api/sessions/delete {threadIds: [..]} -- TAKE THESE CONVERSATIONS BACK: the record and
+  everything this home kept about them (`harness.edge.forget` says what that is, and what it
+  deliberately leaves).
+
+  Answers {:results [..]}, one row per id, in the order they were sent: {:threadId .. :forgotten
+  <id>} for one that went, {:threadId .. :error <sentence>} for one that was REFUSED -- a
+  conversation with a run in flight here, or an id this home has never seen.
+
+  THIS IS NOT AN ARCHIVE, and the two must not be confused: an archive writes a column and leaves
+  every byte of the record where it is (its own docstring, and a case that pins the file's length and
+  mtime), while this takes the conversation out of the home for good."
+  [req]
+  (let [{:keys [ids refusal]} (batch-body req)]
+    (if (some? refusal)
+      refusal
+      (rung (api-response 200
+                          {:results
+                           (mapv (fn [id]
+                                   (try {:threadId id :forgotten (forget/forget! id)}
+                                        (catch Throwable t
+                                          {:threadId id :error (ex-message t)})))
+                                 ids)})))))
+
 ;; `live-numbers` is defined just below its one caller, and a `defn-` has to be known before it is
 ;; read: a plain `declare` rather than moving it up, because the live answer reads like the
 ;; fallback it guards -- the record read comes second, only when there is no live answer.
@@ -4840,14 +4917,62 @@
       (assoc read :ok (sessions/revive-parks! stem es))
       read)))
 
+;; ----------------------------------------------------- the record, read one pass at a time
+
+(defonce ^:private record-folds
+  ;; thread-id -> {:path .. :bytes .. :lines .. :rows .. :fold ..}: HOW FAR THIS PROCESS HAS ALREADY
+  ;; FOLDED a conversation's record. See `record-entries-resumed` for what keeps it and what drops it.
+  (atom {}))
+
+(defn- record-entries-resumed
+  "STEM's entries AS THE RECORD HAS THEM, folded over what has been APPENDED since the last pass --
+  the same answer `record-entries` gives, without reading again the bytes it has already read.
+
+  WHY IT EXISTS: a run in flight writes its answer a line at a time, and the window's doorbell asks
+  again on every tick of the sweeper's clock (`growth-interval-ms`, ten times a second) so that a
+  reader watches the answer grow. Re-reading the record each time cost A PARSE OF THE WHOLE
+  CONVERSATION PER TICK -- measured on this machine, 2026-09-30: a 23.7 MB record of 53,732 rows
+  took 254-321 ms a pass against a 100 ms interval, so the thread never got to sleep, and a
+  conversation that only grows makes it worse. The bytes that changed are the whole answer; the
+  fold is resumed over those, and `replay/entries-fold` says why the two readings agree entry for
+  entry.
+
+  A COLD CURSOR READS THE WHOLE RECORD ONCE: no cursor for this thread-id, a record at another path,
+  or a SHORTER file -- a record replaced or truncated is not the continuation of a stream of bytes,
+  so it is read again from the beginning. A record that cannot be read at all THROWS, and the caller
+  answers from memory, which is what the window did before this existed.
+
+  IT ANSWERS ENTRIES, not the `{:ok ..}` / `{:error ..}` shape `record-entries` answers: this is one
+  half of the door `window-page` uses, and the other half of that door is memory."
+  [stem]
+  (let [log   (replay/locate (home/projects-dir) stem)
+        path  (.getAbsolutePath log)
+        at    (get @record-folds stem)
+        ;; THE SAME FILE, STILL GOING FORWARD -- a file that is shorter than what we read of it is a
+        ;; different stream of bytes, and so is one that moved.
+        same? (and (some? at) (= path (:path at)) (<= (long (:bytes at)) (.length log)))
+        from  (if same? at {:path path :bytes 0 :lines 0 :rows 0 :fold (replay/entries-fold)})
+        [pairs bytes lines] (replay/rows-after log (long (:bytes from)) (long (:rows from))
+                                             (long (:lines from)))
+        fold  (if (seq pairs) (replay/entries-fold (:fold from) pairs) (:fold from))]
+    (swap! record-folds assoc stem
+           {:path  path
+            :bytes (long bytes)
+            :lines (long lines)
+            :rows  (+ (long (:rows from)) (count pairs))
+            :fold  fold})
+    (replay/entries-of-fold fold)))
 (defn- window-page
   "A LIVE conversation's window: {:entries [..] :baseSeq N :hasMore bool} for the tail page
   (`since` nil) or for what arrived after `since`.
 
   THE SAME CHOICE `read-entries` MAKES, AT THE STREAMING DOOR: the record while a run of it
   is in flight here, else the session's own entries (`sessions/tail` / `sessions/since`).
-  Re-reading on every ring is the point -- the delta has to be computed against the file as
-  it is NOW, which is what makes a reader's own cursor sufficient (ADR 0003 decision 7).
+  READING THE RECORD IS THE POINT; RE-READING IT IS NOT. The delta has to be computed against
+  the file as it is NOW, which is what makes a reader's own cursor sufficient (ADR 0003
+  decision 7) -- but a pass now pays only for the bytes APPENDED since the last one
+  (`record-entries-resumed`). Before that it re-read and re-parsed the whole record on every
+  100 ms tick, whatever had grown.
 
   A RECORD THAT CANNOT BE READ FALLS BACK TO MEMORY. This is a stream that has already
   begun, and refusing the whole window mid-flight would leave the reader holding half of it
@@ -4855,7 +4980,14 @@
   BY NAME (`read-entries`)."
   [stem since]
   (reconcile-numbers! stem)
-  (let [from-record (when (running? stem) (:ok (record-entries stem true)))
+  (let [running-here? (running? stem)]
+    ;; A CURSOR BELONGS TO THE RUN THAT MADE IT NEEDED: the record is what the window reads only
+    ;; while a run of this conversation is in flight HERE (`read-entries-raw` says why), so a cursor
+    ;; its run has outlived is dropped -- otherwise this map would hold a fold for every
+    ;; conversation the process ever watched.
+    (when-not running-here? (swap! record-folds dissoc stem))
+    (let [from-record (when running-here?
+                        (try (record-entries-resumed stem) (catch Throwable _ nil)))
         page (cond
                (nil? from-record)
                (if (nil? since)
@@ -4871,7 +5003,7 @@
     ;; `sessions/tail`, and a nil window has nothing to repair.
     (if-some [es (:entries page)]
       (assoc page :entries (sessions/revive-parks! stem es))
-      page)))
+      page))))
 
 (defn- number-param
   "A query parameter that is meant to be a record offset, or nil when it is absent.
@@ -6498,6 +6630,21 @@
     ;; `/api/project(s)` deliberately -- those two move a conversation to a DIRECTORY,
     ;; and this one is the other statement a caller can make about a conversation:
     ;; that it exists at all.
+    ;; THE COLLECTION'S TWO MUTATING VERBS: the batch form of `/api/threads/<stem>/archive`, and the
+    ;; deletion that has no single-conversation route at all. A BATCH IS ASKED FOR AS A BATCH
+    ;; (`.scratch/session-lifecycle/`): the settings panel manages a SELECTION, and a panel that had to
+    ;; fire one request per row would be inventing its own answer to 'three of my nine clicks failed'
+    ;; -- which is exactly what these two answer, one row per id.
+    (= "/api/sessions/archive" (:uri req))
+    (case (:request-method req)
+      :post (archive-batch-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/sessions/delete" (:uri req))
+    (case (:request-method req)
+      :post (delete-batch-post req)
+      (api-response 405 {:error "method not allowed"}))
+
     (= "/api/sessions" (:uri req))
     (case (:request-method req)
       :post (sessions-post req)
@@ -6719,6 +6866,14 @@
                    ;; all. THAT IS THE DISCIPLINE DECISION 4 LEFT UNSTATED: the projection holds a
                    ;; connection for the length of a round and never a handle across ticks (`fsync!`
                    ;; and every write still go through `harness.infra.db`'s own doors).
+                   ;;
+                   ;; TICKET 02 OF `.scratch/record-window/` CHANGED THE TRIGGER, NOT THE DECISION: this
+                   ;; is no longer a 2-second clock. `projection/start!` attaches the write stream's
+                   ;; doorbell (`harness.infra.stream/listen-every!`); the listener only MARKS the
+                   ;; conversation dirty and a short coalesced round copies what was marked. An idle
+                   ;; process therefore runs NO round at all (the clock's 100-127 ms a round, ~5% of
+                   ;; a core, is gone), and a streaming answer's thousands of lines are a couple of
+                   ;; transactions rather than thousands.
                    ;;
                    ;; IT STILL HAS A TEARDOWN, unlike the writer: a process that stops serving stops
                    ;; copying, and the next one resumes at the offset it left (`projection_offsets`).

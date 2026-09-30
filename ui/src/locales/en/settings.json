@@ -20,7 +20,8 @@
     "general": "General",
     "models": "Models",
     "mcp": "MCP servers",
-    "subagents": "Subagents"
+    "subagents": "Subagents",
+    "sessions": "Sessions"
   },
   "panel": {
     "title": "Settings",
@@ -177,5 +178,20 @@
     "errorNote": "Nothing was written — config.edn's :session is exactly as it was.",
     "problemLead": "config.edn's :session :subagents block says something that could not be honoured: ",
     "problemTail": " The built-ins are still what this session uses."
+  },
+  "sessions": {
+    "title": "Conversations",
+    "hint": "Every conversation this home keeps, in one list. Tick the ones you mean, then archive, unarchive or delete them in one go; a row the server refused says why underneath it.",
+    "selectAll": "Select all",
+    "delete": "Delete",
+    "deleteRunning": "A conversation here is still running — delete it once it settles.",
+    "empty": "This home has no conversations yet.",
+    "loading": "Reading the conversations…",
+    "deleteTitle": "Delete these conversations?",
+    "deleteBody": "Deleting takes a conversation out of this home for good: its record (the jsonl file), its anchors, its todos and its claim all go with it. Archiving would only have hidden it.",
+    "deleteCount_one": "{{count}} conversation will go.",
+    "deleteCount_other": "{{count}} conversations will go.",
+    "deleteCancel": "Keep them",
+    "deleteSubmit": "Delete for good"
   }
 }

@@ -360,6 +360,27 @@
       (db/execute! c "DELETE FROM hashline_snapshots WHERE thread_id = ? AND path = ?"
                    (str thread-id) path))))
 
+(defn forget-thread!
+  "Forget EVERYTHING THREAD-ID was ever shown or did, in every file: the anchors it owned, the views
+  it had of them, and the row that says it has ever looked at anything.
+
+  THE TOTAL ONE, and the difference from `forget-file!` is the noun: that one is 'this thread is done
+  with PATH', this one is 'this thread is GONE'. A conversation being taken back
+  (`.scratch/session-lifecycle/`) has no next edit to serve, so nothing here is worth keeping -- and
+  the anchors must go with it, or they would stay out of circulation (`release!`) for a session that
+  no longer exists.
+
+  `hashline_undo` IS NOT TOUCHED, and it is the one table here keyed by PATH rather than by thread:
+  the last edit of a file is undoable by whoever holds that file next, and clearing it while deleting
+  one conversation would take back an undo that belongs to another."
+  [thread-id]
+  (let [id (str thread-id)]
+    (db/with-transaction
+      (fn [c]
+        (db/execute! c "DELETE FROM hashline_ownership WHERE thread_id = ?" id)
+        (db/execute! c "DELETE FROM hashline_snapshots WHERE thread_id = ?" id)
+        (db/execute! c "DELETE FROM hashline_sessions WHERE thread_id = ?" id)))))
+
 ;; ------------------------------------------------------------------ the locks
 
 (defonce ^:private path-locks (ConcurrentHashMap.))

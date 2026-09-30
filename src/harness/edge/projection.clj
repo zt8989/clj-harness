@@ -4,11 +4,20 @@
   ADR 0008 (`docs/adr/0008-the-log-is-the-truth-and-sqlite-projects-it.md`) is the decision, and its
   two halves are what this namespace is shaped by:
 
-    IT IS NOT ON THE WRITE PATH. Nothing here is called by `harness.infra.stream` or by `log!`: the
-    reader walks each session's NEW BYTES, projects the complete lines it finds, and advances a byte
-    offset. A run that is mid-flight is fine -- the projection is simply behind it -- and a process
-    that dies mid-pass loses nothing but the pass (the offset is written with the rows it accounts
-    for, in one transaction).
+    IT IS NOT ON THE WRITE PATH, BUT IT LISTENS TO IT (`.scratch/record-window/` ticket 02):
+    the reader walks each session's NEW BYTES, projects the complete lines it finds, and advances a
+    byte offset; WHAT STARTS THAT WALK is a line landing in the record, handed over by
+    `harness.infra.stream/listen-every!`. The listener only MARKS the conversation dirty (two
+    `atom` operations) and a coalesced round -- at most one every `coalesce-ms` -- reads what was
+    marked. A run that is mid-flight is fine: the projection is simply behind it, and how far
+    behind is the number `lag` answers. A process that dies mid-pass loses nothing but the pass
+    (the offset is written with the rows it accounts for, in one transaction).
+
+    WHY A LISTENER RATHER THAN THE CLOCK THIS USED TO HAVE: a 2-second `scheduleAtFixedRate` ran a
+    whole-store pass on a fixed beat whether or not a byte had been written, and a round walked
+    the session list and `stat`ed every conversation -- measured 100-127 ms a round, ~5% of one
+    core, for ever, on an IDLE process. Nothing is written when nobody is running, so the write
+    stream is the only honest trigger, and an idle process now runs no round at all.
 
     EVERY ROW HERE IS RECOMPUTABLE FROM THE RECORD. `rebuild!` is that claim as an action: delete a
     session's rows, put its offset back to 0, project again, and the result is row for row what was
@@ -34,7 +43,8 @@
             [harness.edge.replay :as replay]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
-            [harness.infra.log :as log])
+            [harness.infra.log :as log]
+            [harness.infra.stream :as stream])
   (:import (java.io File RandomAccessFile)
            (java.util.concurrent Executors ScheduledExecutorService ThreadFactory TimeUnit)))
 
@@ -272,18 +282,31 @@
   on the round's own connection: `{:id … :path … :byte-offset … :line-offset …}`, with path/offsets nil
   for a session that has never been projected. THE STORE DECIDES WHICH CONVERSATIONS EXIST -- a log
   sitting in the tree that no row names is not one -- and the offsets ride along because asking per
-  session is exactly what made this clock expensive: two store connections PER CONVERSATION per tick,
+  session is exactly what made the 2-second clock expensive: two store connections PER CONVERSATION per tick,
   every one of them opening the file and walking the migration chain (`.scratch/memory-hygiene/`
-  ticket 04, measured at 3,914 ms a round against a 2,000 ms interval)."
-  [^java.sql.Connection c]
-  (db/query c "SELECT s.id AS id, o.path AS path, o.byte_offset AS byte_offset,
+  ticket 04, measured at 3,914 ms a round against a 2,000 ms interval).
+
+  A LISTENER'S ROUND ASKS FOR THE IDS IT WAS MARKED WITH, in the same query and on the same
+  connection: `IN (…)` over the marked conversations, so a round that copies one reads the store
+  once -- the whole-store pass's discipline applied to the half a listener knows about. IDS EMPTY
+  IS NOT 'EVERYTHING' (that is NIL, and it belongs to `project!`): it is no ids at all, and the
+  round it describes has nothing to do."
+  ([^java.sql.Connection c] (listed-sessions c nil))
+  ([^java.sql.Connection c ids]
+   (let [base "SELECT s.id AS id, o.path AS path, o.byte_offset AS byte_offset,
                       o.line_offset AS line_offset
                  FROM sessions s
-                 LEFT JOIN projection_offsets o ON o.session_id = s.id
-                ORDER BY s.id"))
-
-(defn project! []
-  "One pass: feed every session's new bytes into the store. Answers the totals.
+                 LEFT JOIN projection_offsets o ON o.session_id = s.id"]
+     (if (seq ids)
+       (apply db/query c
+              (str base " WHERE s.id IN ("
+                   (str/join "," (repeat (count ids) "?")) ") ORDER BY s.id")
+              ids)
+       (db/query c (str base " ORDER BY s.id"))))))
+(defn- project-round!
+  "One pass over the sessions IDS names: feed their new bytes into the store. Answers the totals.
+  IDS NIL MEANS EVERY SESSION THE STORE LISTS, which is what `project!` is; a collection means
+  exactly those, which is the round a listener's marks describe.
 
   IT IS SAFE TO CALL AS OFTEN AS ANYONE LIKES, AND IT IS CHEAP BECAUSE IT TOUCHES WHAT CHANGED
   (`.scratch/memory-hygiene/` ticket 04): ONE connection for the whole round (`db/with-connection` -- the
@@ -299,6 +322,7 @@
 
   `:sessions` COUNTS WHAT THIS ROUND TOUCHED -- conversations with new bytes, which is what 'only the
   ones that changed' means. It used to count every conversation that could be read."
+  [ids]
   (let [work (db/with-connection
                (fn [c]
                  (vec (keep (fn [listed]
@@ -309,7 +333,7 @@
                                   ;; is still the store's, and the next pass sees whatever is there then.
                                   (try (read-session! (:id listed) log listed)
                                        (catch Throwable _ nil)))))
-                            (listed-sessions c)))))]
+                            (listed-sessions c ids)))))]
     ;; EACH SESSION COMMITS ITSELF, IN CHUNKS (see `write-session!`): a pass that took one lock for
     ;; everything it had to write is exactly the long transaction the chunks exist to avoid.
     (doseq [w work] (write-session! w))
@@ -317,6 +341,13 @@
      :rows     (reduce + 0 (map :total work))
      :skipped  (reduce + 0 (map :skipped work))
      :bytes    (reduce + 0 (map :bytes work))}))
+
+(defn project! []
+  "One pass over EVERY session this home lists: the whole-store form of `project-round!`, kept
+  because it is the shape a test and a repair call reach for -- `harness.edge.projection-test` drives it
+  directly and never starts the trigger. Answers the same totals; a listener's round is the same
+  function with the ids it was handed."
+  (project-round! nil))
 
 (defn lag []
   "HOW FAR BEHIND THE COPY IS, per session and in total, in bytes (ADR 0008 decision 5): the record's
@@ -351,44 +382,204 @@
      (db/with-transaction (fn [c] (forget! c (str session-id)))))
    (project!)))
 
-;; ------------------------------------------------------------------ the clock
+(defn forget-session!
+  "Drop everything this projection holds for SESSION-ID -- the rows AND the offset, both.
 
-(def interval-ms
-  "How often the background pass runs, in milliseconds. Two seconds is a compromise the lag number
-  makes measurable rather than a promise: a reader of the projection is never more than this behind a
-  run, and an idle home pays one `exists` per session per tick."
-  2000)
+  WHAT IT IS NOT, and it is the whole reason it is not `rebuild!`: a rebuild forgets and then
+  projects the record again, because the record is still there. This is the door for a record that is
+  GOING AWAY (`.scratch/session-lifecycle/`), where projecting again would be making a copy of a
+  conversation nobody has."
+  [session-id]
+  (db/with-transaction (fn [c] (forget! c (str session-id)))))
 
-(defonce ^:private clock (atom nil))
+;; ------------------------------------------------ the trigger is the write stream, not a clock
 
-(defn- run-once! []
-  (try (project!)
-       (catch Throwable t (log/warn! :projection/failed {:reason (ex-message t)}))))
+;; TICKET 02 OF `.scratch/record-window/`: THE CLOCK IS GONE. It used to be a 2-second
+;; `scheduleAtFixedRate` running `project!` -- a walk of the whole session list and a `stat` per
+;; conversation -- whether or not a single byte had been written. Measured on an idle process:
+;; 100-127 ms a round, ~5% of one core, for ever. The thing that can be pushed IS the record, and
+;; it is pushed: `harness.infra.stream/listen-every!` hands every written line to this namespace,
+;; so a line landing is the trigger and an idle process has nothing at all to do.
+;;
+;; A LINE DOES NOT BUY A ROUND (`coalesce-ms`). A streaming answer writes thousands of lines, and a
+;; transaction per line would be the clock's cost with a worse shape -- so the listener only MARKS
+;; the conversation dirty, and the round that copies it runs on the small scheduler below, ONCE,
+;; `coalesce-ms` after the first mark. Marks that land while a round is running belong to the next
+;; round, which is scheduled when this one ends; that is what keeps a burst of lines a couple of
+;; small transactions instead of thousands, and it is also why a round can never pile up behind
+;; itself the way `scheduleAtFixedRate` did.
+;;
+;; THE LISTENER RUNS ON THE WRITER'S THREAD (`harness.infra.stream`'s own rule), so `mark-dirty!`
+;; does the two cheap things and returns: a `swap!` into a set and -- only when no round is already
+;; waiting -- a `schedule` on an executor, which does not block. It never touches the store, the
+;; log tree or a connection; the round does that, on its own thread.
+
+(def coalesce-ms
+  "How long the first mark of a burst waits before a round picks it up, in milliseconds.
+
+  IT IS A DEBOUNCE, NOT AN INTERVAL: nothing is scheduled when nothing is written, so this number
+  says how long a reader of the projection can be behind a run AT MOST, not how often the process
+  wakes up. A quarter of a second is the compromise between 'the store keeps up with a stream'
+  and 'a burst of lines is one transaction': a streaming answer's lines arrive far faster than
+  this, so they coalesce, and a reader of the copy is a quarter-second behind what was written."
+  250)
+
+(defonce ^:private dirty
+  ;; The conversations the write stream has told this namespace about since the last round. A SET,
+  ;; because what a round needs is WHICH sessions, not how many lines each one wrote: the bytes are
+  ;; on the file, and the per-session offset is what decides which of them are new.
+  (atom #{}))
+
+(defonce ^:private scheduled
+  ;; Is a round already waiting (or running)? THE ONE THING THAT TURNS A BURST INTO A ROUND: the
+  ;; listener's `compare-and-set!` on this is what makes the second..thousandth line of a stream
+  ;; cheap, and the round clears it BEFORE it reads so that the marks arriving during the round
+  ;; get a round of their own.
+  (atom false))
+
+(defonce ^:private rounds-run
+  ;; How many rounds this trigger has run. FOR A TEST, and it is the honest observable for both
+  ;; claims the ticket makes: an idle process runs ZERO of them, and a burst of lines runs one (or
+  ;; two) rather than one per line. Counting connections would say the same thing less directly --
+  ;; the test's own reads open connections too.
+  (atom 0))
+
+(defonce ^:private clock
+  ;; The one thread a round runs on, or nil when nothing is listening. REPLACED, not added to, when
+  ;; `start!` is called again -- the session sweeper's own clock keeps the same shape.
+  (atom nil))
+
+(defonce ^:private listening
+  ;; The way to stop this trigger's listener, held beside the thread it belongs to: stopping the
+  ;; projection must unplug its own doorbell, or a suite that starts a hundred servers would leave a
+  ;; hundred listeners swapping into `dirty` for the rest of the process.
+  (atom nil))
+
+(declare run-round!)
+
+(defn- schedule-round!
+  "Make the scheduler run one round in `coalesce-ms`, unless one is already waiting or running or
+  there is nothing marked. Answers whether THIS call is the one that scheduled it."
+  [^ScheduledExecutorService s]
+  (and (seq @dirty)
+       (compare-and-set! scheduled false true)
+       (try
+         (.schedule s ^Runnable (fn [] (run-round!)) coalesce-ms TimeUnit/MILLISECONDS)
+         true
+         (catch Throwable _
+           ;; THE THREAD WAS ALREADY GOING AWAY when the mark arrived (`stop` landed between the
+           ;; mark and this call): the mark stays in `dirty`, and the next `start!` picks it up.
+           ;; Clearing the flag is what keeps a rejection from wedging every later mark behind a
+           ;; round that will never run.
+           (reset! scheduled false)
+           false))))
+
+(defn- drain-dirty!
+  "Take the sessions marked dirty and EMPTY the set in one atomic step: a mark that lands while the
+  round is reading its bytes belongs to the NEXT round, not this one, and losing it would be a line
+  nobody ever copies." []
+  (let [[before _] (swap-vals! dirty (constantly #{}))]
+    before))
+
+(defn- mark-dirty!
+  "The doorbell: THREAD-ID's record just grew. RUNS ON THE WRITER'S THREAD, so it does the two cheap
+  things and returns -- see the section note above. ANY LINE COUNTS, row or not: this namespace
+  reads the FILE, and a header line grows it exactly like a message does."
+  [thread-id]
+  (when (some? thread-id)
+    (swap! dirty conj (str thread-id))
+    (when-some [^ScheduledExecutorService s @clock]
+      (schedule-round! s))))
+
+(defn- run-round! []
+  (let [ids (drain-dirty!)]
+    (swap! rounds-run inc)
+    (try
+      (when (seq ids) (project-round! ids))
+      (catch Throwable t
+        ;; A ROUND THAT THREW DID NOT COPY WHAT IT DRAINED, and those marks are already gone from
+        ;; `dirty` -- so they go back, and the round this one schedules tries again. A store that is
+        ;; momentarily locked is the case this is for: the clock used to retry the same work two
+        ;; seconds later, and a listener must not silently drop it.
+        (swap! dirty into ids)
+        (log/warn! :projection/failed {:reason (ex-message t)}))
+      (finally
+        ;; MARKS THAT LANDED WHILE THIS ROUND RAN GET A ROUND OF THEIR OWN. Nothing is scheduled
+        ;; when there are none, which is what makes an idle process idle.
+        (reset! scheduled false)
+        (when-some [^ScheduledExecutorService s @clock]
+          (schedule-round! s))))))
 
 (defn start!
-  "Start the projection's clock and answer the fn that stops it. Idempotent, like the session sweeper:
-  a second start answers the first one's stop fn.
+  "Start the projection and answer the fn that stops it.
 
-  A BACKGROUND THREAD RATHER THAN A STEP ON THE WRITER, which is ADR 0008 decision 2 spelled as a
-  mechanism: `stream/push!` must not wait for a database write, and a projection that misses a tick
-  is simply a little further behind -- the number `lag` answers."
-  []
-  (if-some [s @clock]
-    (do (.shutdown ^ScheduledExecutorService s) (compare-and-set! clock s nil) (start!))
-    (let [s (Executors/newSingleThreadScheduledExecutor
-             (reify ThreadFactory
-               (newThread [_ r] (doto (Thread. ^Runnable r "harness-projection")
-                                  (.setDaemon true)))))]
-      ;; THE FIRST PASS WAITS ONE TICK, and that is a MEASURED decision rather than politeness: this
-      ;; clock belongs to every process that serves, and a suite starts hundreds of servers. With a
-      ;; first pass at 0, each of them walked the store and the log tree immediately, took the store's
-      ;; write lock while the test was using it, and `harness.edge.http-test` went past its 300s
-      ;; limit (measured: three namespaces never got to run). A server that has been up for one tick
-      ;; has a projection that is one tick behind, which is the number `lag` answers -- and a test
-      ;; that wants a projection NOW calls `project!`.
-      (.scheduleAtFixedRate ^ScheduledExecutorService s
-                            ^Runnable (fn [] (run-once!))
-                            interval-ms interval-ms TimeUnit/MILLISECONDS)
-      (if (compare-and-set! clock nil s)
-        (fn [] (.shutdown s) (compare-and-set! clock s nil) nil)
-        (do (.shutdown s) (start!))))))
+  WHAT IT STARTS IS A LISTENER, NOT A CLOCK (ticket 02 above): attaching the write stream's
+  doorbell is the whole of it, and NO PASS RUNS HERE. The first pass waits for the first written
+  line, which is a stronger version of the decision the clock made by waiting one 2-second tick:
+  this trigger belongs to every process that serves and a suite starts hundreds of servers, so a
+  `project!` at 0 meant each of them walked the store and the log tree immediately, took the
+  store's write lock while the test was using it, and `harness.edge.http-test` went past its 300s
+  limit (measured: three namespaces never got to run). An idle server now pays for one listener
+  that is never called -- and an idle process runs no round at all.
+
+  WHAT IT GIVES UP, SAID OUT LOUD: a line a PREVIOUS process wrote and never copied before it stopped
+  has nobody left to ring the bell, so it waits for that conversation's next line -- the narrow window
+  the clock used to close on its next tick. It is bounded by the thing the whole design rests on: a
+  live record is APPENDED to, `read-session!` reads from the stored offset to the end of the file, and
+  the next line therefore carries the offset past everything before it. A home that wants the copy
+  current with no write to wait for calls `project!` or `rebuild!`, both of which are still the whole
+  store.
+  IDEMPOTENT IN THE WAY THE SWEEPER IS: a second `start!` REPLACES the first trigger (thread and
+  listener) rather than stacking a second one, and answers a stop fn for the trigger it made.
+  That fn is the teardown `harness.edge.http/start!` keeps: a process that stops serving stops
+  copying, and the next one resumes at the offset it left (`projection_offsets`)." []
+  ;; THE PREVIOUS TRIGGER GOES FIRST (its listener and its thread), so a second `start!` is a
+  ;; replacement rather than a second doorbell nobody ever unplugs.
+  (when-some [l @listening]
+    (l)
+    (compare-and-set! listening l nil))
+  (when-some [s @clock]
+    (.shutdown ^ScheduledExecutorService s)
+    (compare-and-set! clock s nil))
+  (let [s (Executors/newSingleThreadScheduledExecutor
+           (reify ThreadFactory
+             (newThread [_ r] (doto (Thread. ^Runnable r "harness-projection")
+                                (.setDaemon true)))))]
+    (if (compare-and-set! clock nil s)
+      (let [unlisten (stream/listen-every! (fn [{:keys [thread-id]}] (mark-dirty! thread-id)))]
+        (reset! listening unlisten)
+        (reset! scheduled false)
+        ;; A MARK THAT WAS ALREADY IN `dirty` (a trigger replaced while a line was in flight) WOULD
+        ;; OTHERWISE SIT UNTIL THE NEXT LINE, so the window is closed by trying once here.
+        (schedule-round! s)
+        (fn []
+          (unlisten)
+          (when (identical? unlisten @listening) (compare-and-set! listening unlisten nil))
+          (.shutdown ^ScheduledExecutorService s)
+          (compare-and-set! clock s nil)
+          nil))
+      (do (.shutdown ^ScheduledExecutorService s) (start!)))))
+
+(defn pending
+  "WHAT THE TRIGGER IS HOLDING, as of this instant: the conversations marked dirty and not yet
+  copied, whether a round is waiting or running, and how many rounds this trigger has run.
+
+  IT IS HERE FOR THE TWO CLAIMS THAT ARE OTHERWISE INVISIBLE. 'An idle process does not walk the
+  store' is `:dirty` empty AND `:rounds` zero; 'a burst of lines is one round, not one per line'
+  is `:rounds` a small number beside a large one. A store-side number (connections, rows) would
+  say the same thing less directly, because the test's own reads move it too. A SNAPSHOT IS NOT A
+  FACT ABOUT A LATER MOMENT (`docs/rules/concurrency.md`): the round runs on another thread, so
+  this answers what was true when it was asked." []
+  {:dirty      (vec (sort @dirty))
+   :scheduled? (boolean @scheduled)
+   :rounds     (long @rounds-run)})
+
+(defn reset-trigger!
+  "Forget the marks and the schedule, and count rounds from zero. FOR TESTS, in the spirit of
+  `harness.infra.stream/reset-readers!`: a case that starts the projection in a home of its own
+  must not inherit the previous case's dirty conversations, and a case about coalescing has to be
+  able to say how many rounds IT caused. It does NOT stop a running trigger -- `start!`'s stop fn
+  is that." []
+  (reset! dirty #{})
+  (reset! scheduled false)
+  (reset! rounds-run 0))

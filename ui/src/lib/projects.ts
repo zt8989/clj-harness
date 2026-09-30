@@ -324,3 +324,81 @@ export async function setArchived(threadId: string, archived: boolean, t: Transl
   const body = (await res.json()) as { archived: boolean };
   return body.archived;
 }
+
+/// ONE ROW OF A BATCH ANSWER, and the shape is the whole contract: a row is EITHER a write that
+/// landed (`archived` / `forgotten`, echoed back as the store now holds it) OR a refusal carrying
+/// THE SERVER'S OWN SENTENCE (`error`). The two are told apart by the field and not by a status,
+/// because the batch itself answers 200 either way -- and that is the point of it: "eight of the
+/// nine went" is a sentence this panel must be able to draw, and a request that failed as a whole
+/// could not say which eight.
+///
+/// ONE ROW PER ID, IN THE ORDER THE IDS WENT OUT, which is what lets a caller put an answer back
+/// on the row it acted on without a second lookup of its own.
+export type ArchiveResult =
+  | { threadId: string; archived: boolean }
+  | { threadId: string; error: string };
+
+/// The same row shape for the verb that removes things, whose one field is the id it took back.
+/// `forgotten` rather than a boolean because there is nothing to echo: the session is not there
+/// any more, and the id coming back is the proof that it was THE id acted on.
+export type DeleteResult =
+  | { threadId: string; forgotten: string }
+  | { threadId: string; error: string };
+
+/// Archive MANY conversations in one request, or bring them all back
+/// (POST /api/sessions/archive).
+///
+/// THE BATCH FORM OF `setArchived` ABOVE, with the same promise kept per row: the flag is one
+/// column in the store and NOTHING HERE TOUCHES THE LOG -- the jsonl keeps its bytes and its
+/// mtime, which is what makes an archive "hidden" rather than "gone".
+///
+/// ONE REQUEST FOR THE WHOLE SELECTION, because a selection is what was acted on: a screen that
+/// ticked nine rows and sent nine requests would report nine outcomes of its own, and the tenth
+/// row's refusal would have nowhere to land. NOTHING IS ROLLED BACK ACROSS THE ROWS (the route
+/// argues that): the answer is one row per id, and a caller draws each sentence where its row is.
+///
+/// THE REQUEST IS REFUSED AS A WHOLE when the thing wrong is about the request rather than about
+/// a conversation -- an empty selection, or a missing direction. That throws with the server's
+/// sentence like every other refusal here, and it is a bug in the caller rather than a fact about
+/// a session.
+export async function archiveSessions(
+  threadIds: readonly string[],
+  archived: boolean,
+  t: Translate,
+): Promise<readonly ArchiveResult[]> {
+  const res = await fetch(`${API_BASE}sessions/archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadIds, archived }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { results: readonly ArchiveResult[] };
+  return body.results;
+}
+
+/// TAKE MANY CONVERSATIONS BACK at once (POST /api/sessions/delete): the batch form of the one
+/// verb that removes a session's row, its anchors, its todos, its claim AND ITS OWN jsonl.
+///
+/// THIS IS THE ONLY THING IN THIS FILE THAT DESTROYS ANYTHING, and it must not be confused with
+/// its two neighbours: `setArchived` writes a column and leaves the record where it is, and
+/// `removeProject` takes a directory out of the list and opens nothing. A row that landed answers
+/// with the id AS FORGOTTEN; a row this home refused answers with the server's sentence -- a
+/// conversation with a run in flight HERE is refused BY NAME, so the panel can draw why rather
+/// than guess.
+///
+/// THERE IS NO DELETE METHOD HERE, deliberately: a destructive verb is a POST like every other
+/// management call in this file, and the confirmation a person reads is the interface's rather
+/// than the method's.
+export async function deleteSessions(
+  threadIds: readonly string[],
+  t: Translate,
+): Promise<readonly DeleteResult[]> {
+  const res = await fetch(`${API_BASE}sessions/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadIds }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  const body = (await res.json()) as { results: readonly DeleteResult[] };
+  return body.results;
+}

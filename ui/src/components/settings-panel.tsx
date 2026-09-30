@@ -51,6 +51,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
 import { BASELINE_LABELS, DefinitionButtons } from "@/components/subagent-list";
+import { SessionsBatchPanel } from "@/components/session-management";
 import {
   Dialog,
   DialogContent,
@@ -62,6 +63,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { applyLanguage } from "@/lib/i18n";
 import { saveLanguage } from "@/lib/languageSetting";
 import { SUPPORTED_LANGUAGES, isLanguage, type Language } from "@/lib/language";
+import {
+  archiveSessions,
+  deleteSessions,
+  listSidebar,
+  type SessionSummary,
+  type SidebarListing,
+} from "@/lib/projects";
 import {
   probeModels,
   putDefaults,
@@ -1642,6 +1650,175 @@ const SubagentsPage: FC = () => {
     </div>
   );
 };
+// -------------------------------------------------------------------- Sessions
+
+/// ONE VERB, THREE DIRECTIONS: archive and unarchive are the same column write, and delete is
+/// the one that takes the conversation back (`lib/projects.ts` has both calls).
+type BatchVerb = "archive" | "unarchive" | "delete";
+
+/// THE PAGE: every conversation this home keeps, a checkbox each, and three batch verbs.
+///
+/// IT PULLS ITS OWN LIST RATHER THAN READING THE SIDEBAR'S, and that is the one thing about it
+/// worth saying out loud. The sidebar's listing arrives by push (`events.host`), and this page is
+/// not in that conversation: it is a modal somebody opened, so it READS when it opens and READS
+/// AGAIN after every write -- a batch just changed rows, and what is on screen has to be the state
+/// that came back rather than the one that was asked for. A panel that trusted the push would have
+/// to be mounted wherever the push goes; one that trusts nothing but its own read is correct for
+/// as long as it is open, at the price of one SELECT.
+///
+/// THE READ IS `listSidebar`, the same call the sidebar makes -- NOT a second endpoint that could
+/// disagree with it about which conversations exist. Its two halves are flattened here because
+/// this page's unit is a conversation, and a task is one with no project.
+///
+/// A REFUSED WRITE IS DRAWN AT TWO SCALES: the sentence for one row lands on that row (the server
+/// answers one row per id -- see `lib/projects.ts`), and a request that failed whole lands above
+/// the list, where there is no row to put it on. NOTHING IS ROLLED BACK and nothing is retried
+/// behind the person's back: the rows that landed are drawn as landed, and what is left ticked
+/// after a batch is exactly what did NOT go through.
+const SessionsPage: FC = () => {
+  const { t } = useTranslation("settings");
+  const { t: tErrors } = useTranslation("errors");
+  const [listing, setListing] = useState<SidebarListing | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [selected, setSelected] = useState<readonly string[]>([]);
+  const [rowErrors, setRowErrors] = useState<Readonly<Record<string, string>>>({});
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+
+  /// THE PULL, in one place: the read on mount and the read after every write are the same read.
+  ///
+  /// A FAILED RE-READ LEAVES THE LIST IT HAD, unlike the panel's first read elsewhere on this
+  /// page -- and the difference is what is on screen: blanking a list somebody is looking at
+  /// because a re-read went wrong would present a failed DELETE as a failed LIST. The sentence
+  /// says which it was, and the rows stay readable under it.
+  const load = useCallback(async () => {
+    try {
+      setListing(await listSidebar(tErrors));
+      setFailure(null);
+    } catch (f: unknown) {
+      setFailure(f instanceof Error ? f.message : String(f));
+    }
+  }, [tErrors]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /// BOTH HALVES AS ONE LIST, in the listing's own order: the projects (each with its sessions,
+  /// as the server ordered them) and then the tasks. THAT ORDER IS THE ENDPOINT'S and not this
+  /// page's to normalize -- it is what the sidebar draws, and a second sorting rule here would be
+  /// a second answer to "which one is newer".
+  const sessions: readonly SessionSummary[] =
+    listing === null
+      ? []
+      : [...listing.projects.flatMap((project) => project.sessions), ...listing.tasks];
+  const chosen = sessions.filter((session) => selected.includes(session.threadId));
+
+  /// TOGGLE ONE, BY ID rather than by index: a re-read can reorder the list without changing
+  /// which conversations were ticked.
+  const toggle = (threadId: string) =>
+    setSelected((was) =>
+      was.includes(threadId) ? was.filter((id) => id !== threadId) : [...was, threadId],
+    );
+
+  /// SELECT ALL, or clear when everything already is -- one control for both, because the box it
+  /// draws already says which of the two it is.
+  const toggleAll = () =>
+    setSelected((was) =>
+      sessions.length > 0 && sessions.every((session) => was.includes(session.threadId))
+        ? []
+        : sessions.map((session) => session.threadId),
+    );
+
+  /// THE ONE WRITE. It answers nothing; what it leaves on screen is the state the server came
+  /// back with, which is why the re-read is not optional.
+  const write = useCallback(
+    async (threadIds: readonly string[], verb: BatchVerb) => {
+      if (threadIds.length === 0) return;
+      setBusy(true);
+      setFailure(null);
+      setRowErrors({});
+      try {
+        const results =
+          verb === "delete"
+            ? await deleteSessions(threadIds, tErrors)
+            : await archiveSessions(threadIds, verb === "archive", tErrors);
+        // ONE ROW PER ID, in the order they were sent, and a row carrying an error is the
+        // SERVER'S OWN SENTENCE about that one conversation -- kept under the id it arrived
+        // with, so the row it lands on is the row it belongs to.
+        const refused: Record<string, string> = {};
+        for (const row of results) {
+          if ("error" in row) refused[row.threadId] = row.error;
+        }
+        setRowErrors(refused);
+        // WHAT STAYS TICKED IS WHAT DID NOT GO THROUGH: retrying the whole batch because two
+        // rows were refused would ask the server to do the seven that already worked again --
+        // which archiving tolerates and deleting does not (the second delete refuses by name).
+        setSelected(threadIds.filter((id) => refused[id] !== undefined));
+        // AND THE LIST IS READ AGAIN: a deleted row has to LEAVE it, and the sidebar's push is
+        // not this page's to rely on (see the header).
+        await load();
+      } catch (f: unknown) {
+        setFailure(f instanceof Error ? f.message : String(f));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [tErrors, load],
+  );
+
+  // TWO ANSWERS BEFORE THERE IS A LIST, and neither is the panel: the server's sentence when the
+  // read was refused, and the spinner while it is still out. The empty list is NOT drawn here --
+  // `"" conversations"` and `"this home has none"` are different things, and only the panel is
+  // in a position to say the second.
+  if (listing === null) {
+    return failure !== null ? (
+      <p
+        role="alert"
+        data-slot="settings-sessions-error"
+        className="text-destructive text-xs break-words"
+      >
+        {failure}
+      </p>
+    ) : (
+      <p
+        data-slot="settings-page-sessions-loading"
+        className="text-muted-foreground flex items-center gap-2 text-xs"
+      >
+        <Loader2Icon className="size-3.5 animate-spin" />
+        {t("sessions.loading")}
+      </p>
+    );
+  }
+
+  return (
+    <SessionsBatchPanel
+      sessions={sessions}
+      selected={selected}
+      errors={rowErrors}
+      busy={busy}
+      confirming={confirming}
+      failure={failure}
+      onToggle={toggle}
+      onToggleAll={toggleAll}
+      onArchive={(archived) =>
+        void write(
+          chosen.map((session) => session.threadId),
+          archived ? "archive" : "unarchive",
+        )
+      }
+      // THE CONFIRMATION IS A STEP, NOT A DECORATION: this opens it, and nothing is destroyed
+      // until `onConfirmDelete` below.
+      onDelete={() => setConfirming(true)}
+      onConfirmDelete={() => {
+        setConfirming(false);
+        void write(chosen.map((session) => session.threadId), "delete");
+      }}
+      onCancelDelete={() => setConfirming(false)}
+    />
+  );
+};
+
 
 // ------------------------------------------------------------------- the rest
 
@@ -1663,14 +1840,20 @@ const SubagentsPage: FC = () => {
 /// and because a list of definitions plus a form that rewrites a file is not a row in
 /// somebody else's report.
 ///
-/// `general` / `models` / `mcp` / `subagents`.
-type Page = "general" | "models" | "mcp" | "subagents";
+/// `general` / `models` / `mcp` / `subagents` / `sessions`.
+///
+/// SESSIONS IS THE FIFTH, and it is the one page about the LIST rather than about the
+/// configuration: what conversations this home keeps, and filing them away or taking them back
+/// in batches. It is here rather than in the sidebar because a batch is not a row action -- the
+/// sidebar's own verb is per row, and it stays there.
+type Page = "general" | "models" | "mcp" | "subagents" | "sessions";
 
 const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "general", label: (t) => t("page.general") },
   { id: "models", label: (t) => t("page.models") },
   { id: "mcp", label: (t) => t("page.mcp") },
   { id: "subagents", label: (t) => t("page.subagents") },
+  { id: "sessions", label: (t) => t("page.sessions") },
 ];
 
 /// THE PANEL HAS TWO SHAPES, and `sm` is the whole of the difference. From `sm` up it is
@@ -1873,6 +2056,11 @@ export const SettingsPanel: FC<{
                 and must give the same answer -- which is what "the settings form
                 writes the user level only" is for (see subagents.clj). */}
             {page === "subagents" && <SubagentsPage />}
+            {/* THE SESSIONS PAGE, and it needs nothing from this panel's own state: it reads
+                the listing itself (see `SessionsPage` for why a pull rather than the sidebar's
+                push) and it takes no `threadId`, because a batch about conversations is not
+                about the one on screen. */}
+            {page === "sessions" && <SessionsPage />}
             </div>
           </div>
         </div>
