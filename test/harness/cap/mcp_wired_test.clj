@@ -204,6 +204,14 @@
     (with-server thread script
                  (fn []
                    (io/delete-file (log-file thread) true)
+                   ;; THE RECORD STARTS EMPTY **AND THE CONNECTION CACHE STARTS COLD**, and both halves of
+                   ;; that premise are needed for what this case asserts: the audit line is written for a
+                   ;; connection THIS RUN makes. `note-outcome!` queues a fact only when it is NEWS, so a
+                   ;; server already connected before the run (by whatever asked for the roster on the way
+                   ;; here) leaves its `mcp/server` line with the connect that already happened -- the
+                   ;; documented rule is that such a line waits for the next run, and it is not the line
+                   ;; this case is about.
+                   (mcp/shutdown!)
                    (post-run thread)
                    (let [ls (wait-for (log-file thread) ran-server-tool? 5000)]
                      (testing "the call ran and the server's text is the tool result"
