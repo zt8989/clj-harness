@@ -15,6 +15,8 @@
             [harness.cap.providers :as providers]
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
+            [harness.edge.pressure :as pressure]
+            [harness.edge.sessions :as sessions]
             [harness.fake :as fake]
             [harness.infra.home :as home]))
 
@@ -105,6 +107,77 @@
                 "no rows, no model call")
             (is (= [] @said)
                 "and nothing is said to the client: a run under the threshold is not told anything"))
+          (finally
+            (providers/use-provider! thread-id nil)
+            (io/delete-file log true))))
+      (finally (stop)))))
+
+(deftest the-fold-takes-the-array-the-trigger-measured
+  ;; TICKET 05 OF `.scratch/compaction-shape`, with the real session in the loop.
+  ;;
+  ;; A COMPACTION HAS TWO HALVES AND THEY HAVE TO MEASURE ONE THING: the trigger asks 'is the array
+  ;; the MODEL is about to be handed too full?' (`pressure/live-surface`: the session's own
+  ;; messages, the system message, this run's injections), and the plan says WHAT TO FOLD. The
+  ;; record's fold is NOT that array -- it drops every run's injections except the last -- so a
+  ;; plan over the record fold answers a head for a surface nobody measured. On the real thread
+  ;; `62f30024-…` (2026-09-30) that head was ONE summary: the fold re-wrote a summary of the same
+  ;; size, the surface did not move, and the trigger fired again 2 min 22 s worth of compactions
+  ;; later.
+  ;;
+  ;; THE ARITHMETIC, once (the window is scaled up on purpose: the RATIO is what the case is
+  ;; about, and the scripted provider's own 128,000 is too small to hold a conversation of this
+  ;; shape -- retain 16% = 160,000, threshold 70% = 700,000):
+  ;;
+  ;;   the record's own fold   160 x 1008 = 161,280  -- a hair over the retain budget, so a plan
+  ;;                                                   over it can fold ONE entry (1,008 tokens)
+  ;;   the live array          + 550 x 1008 = 715,680 -- over the threshold, so the trigger fires
+  ;;
+  ;; A plan over the RECORD fold therefore asks for 1,008 tokens of relief on a request that is
+  ;; 15,680 over its threshold: the relief guard refuses it (`:min-head-tokens`, which the trigger
+  ;; hands all the way down through `run-compaction!` and `perform!`), nothing is written, and the
+  ;; NEXT model call asks again. A plan over the LIVE array folds its excess (554,400) and the array
+  ;; comes back to ~166k -- ONE compaction, under the threshold, which is the whole difference
+  ;; between this and a loop.
+  (let [stop (http/start! {:port 0})]
+    (try
+      (let [thread-id "relieve-two-surfaces"
+            log       (plant! thread-id (big-rows 160))
+            provider  (assoc (fake/scripted [{:content "MID SUMMARY"}]) :context-window 1000000)]
+        (providers/use-provider! thread-id provider)
+        (try
+          ;; THE INJECTIONS OF EARLIER RUNS: only a live conversation has them (they enter the
+          ;; session and never a row), and they carry the record lines their own runs numbered them
+          ;; with -- `settle!` gives every entry the line it arrived in (`.scratch/entry-numbering`).
+          (sessions/append! thread-id "injected"
+                            (vec (map (fn [i] {:id (str "inj" i) :role "user"
+                                               :content (apply str (repeat 4000 "b"))})
+                                      (range 550))))
+          (sessions/number-entries! thread-id "injected"
+                                    (into {} (map (fn [i] [(str "inj" i) (+ 5000 i)]))
+                                                 (range 550)))
+          (let [array  (sessions/messages thread-id)
+                before (pressure/estimate-messages array)
+                said   (atom [])
+                view   (#'http/relieve-pressure! thread-id
+                                                 ;; THE SAME WINDOW the session's provider was given,
+                                                 ;; or the trigger would measure a different one than
+                                                 ;; the plan folds against.
+                                                 (assoc (fake/scripted [{:content "MID SUMMARY"}])
+                                                        :context-window 1000000)
+                                                 array
+                                                 (fn [frame] (swap! said conj frame)))]
+            (is (> before 700000)
+                "the live array is over seven tenths of the window -- the trigger fires")
+            (is (some? view) "and a compaction happens at all")
+            (is (some #{"context/compacted"} (mapv replay/kind (replay/read-records log)))
+                "the summary reached the record")
+            (is (= ["compacted-context"] (mapv :name @said)) "one card, named for the card")
+            (let [after (pressure/estimate-messages (sessions/messages thread-id))]
+              (is (< after (* 0.5 before))
+                  "the array the model is handed really did shrink -- the fold took the live excess")
+              (is (< after 700000)
+                  "and ONE compaction left it under the threshold: no second round is due"))
+            (is (< (count view) (count array)) "which the caller is handed as a shorter array"))
           (finally
             (providers/use-provider! thread-id nil)
             (io/delete-file log true))))

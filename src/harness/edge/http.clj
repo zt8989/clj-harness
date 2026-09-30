@@ -6268,6 +6268,20 @@
                                        :environment  (compaction/environment-block
                                                       (compaction/environment
                                                        (project/binding-for stem)))
+                                       ;; AND THE SURFACE THE PLAN PLANS OVER: the array the MODEL is
+                                       ;; handed, when this process holds the session -- which is the
+                                       ;; array the triggers MEASURE (`pressure/live-surface`). The
+                                       ;; record's own fold is a different (smaller) array, and planning
+                                       ;; over it while the trigger measured this one is what let a
+                                       ;; compaction fold one summary into another and leave the pressure
+                                       ;; exactly where it was (`.scratch/compaction-shape` ticket 05). NIL
+                                       ;; FOR A SESSION THIS PROCESS DOES NOT HOLD, and then the record's
+                                       ;; fold is the honest reading.
+                                       :surface      (sessions/model-nodes stem)
+                                       ;; AND THE RELIEF THE TRIGGER ASKED FOR, which rides the same
+                                       ;; way: a caller that named a number hands it to the plan, or
+                                       ;; the guard below is a comment (`plan`'s `:min-head-tokens`).
+                                       :min-head-tokens (:min-head-tokens opts)
                                        :blocks       (:blocks pre)})]
       (when (seq @written)
         (sessions/set-compactions!
@@ -6401,7 +6415,13 @@
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
                   before  (pressure/estimate-messages history)]
-              (when-some [compacted (run-compaction! stem provider records window ratios nil)]
+              (when-some [compacted (run-compaction! stem provider records window ratios
+                                                   ;; THE RELIEF THIS TRIGGER ASKS FOR, off the very
+                                                   ;; reading that fired it: what is over the threshold
+                                                   ;; is what has to come off (`plan`'s `:min-head-tokens`),
+                                                   ;; or the fold would buy nothing and burn a summary call.
+                                                   {:min-head-tokens (- (:pressureTokens answer)
+                                                                        (:thresholdTokens answer))})]
                 ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
                 ;; The rows are written and the session's own model view has already moved, so the
                 ;; conversation IS compacted; the comparison below only decides whether THIS call
@@ -6456,7 +6476,12 @@
                          (>= (:pressureTokens answer) (:thresholdTokens answer))
                          (not (compaction/lock-active? records)))
                 (when-some [provider (providers/current-provider stem)]
-                  (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))))
+                  (run-compaction! stem provider records (:windowTokens answer) ratios
+                                   ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
+                                   ;; threshold must be what comes off, or the compaction is not
+                                   ;; worth a summary call (`plan`'s `:min-head-tokens`).
+                                   {:min-head-tokens (- (:pressureTokens answer)
+                                                        (:thresholdTokens answer))}))))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
       nil)))
