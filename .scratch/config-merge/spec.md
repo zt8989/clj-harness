@@ -87,6 +87,36 @@ instructions/skills 归 `ctx.systemPrompt` 那一带）。**config-merge 先落�
 5. 全量套件只增不减（本机跑不动的那几个——`http-test` / `shell-test` / `npm test` 的环境性红灯——如实记，
    见 `.scratch/security-sensitive-paths/spec.md` 那一节）。
 
+## 实现进度（2026-09-30：全部落地）
+
+**票 02–07 全部落地**（票按仓库规矩删掉，留下的只有这份 spec）。合并前的分支 `config-merge`
+上的票 01 也一并带过来了；`main` 已整个合进本分支（合并时只有一处冲突：`project.clj` 里两边各加了
+一个函数，`migrate-legacy-project-config!` 与 `listed-dir`，两个都留）。
+
+判据（合并后的树上，逐个命名空间）：
+
+| 批次 | 规模 | 结果 |
+|---|---|---|
+| 配置相关 15 个命名空间 | 425 tests / 2535 assertions | 0 失败（修掉两处**我的**断言：`skills`/`preamble` 的失败句子现在说 config.edn） |
+| 其余 47 个命名空间（edge.\* / kernel.\* / infra.\* / cap.\* / session-tools / evals / test-runner） | 743 tests / 10041 assertions | 1 失败，**在 main 上同样红** |
+| 更早那两批（edge 一批、其余一批） | 225 + 227 tests | 0 失败 |
+
+**两个与本次无关的既存失败（两条都在 main 上复现过）**：
+
+- `harness.kernel.hooks-test`：`PreCompact` 点带着 `:stdout :content`，而那条断言要求只有
+  `SystemPrompt` 带 `:stdout`——main 新加的 compaction 点没跟着改这条测试。
+- `harness.cap.claims-test`：`a-second-jvm-owns-a-conversation-until-it-goes-away` 里等子 JVM
+  写那行日志只给 5 秒，这台机器上不够。
+
+**这台机器上跑不动的那些（与本次无关，改前基线即如此）**：`harness.edge.http-test`（300s 撞墙，
+基线同样）、`harness.infra.shell-test`（基线时全量就是它先撞）、`harness.kernel.tools-test`（栈停在
+`bind!` 的 sqlite commit）、`harness.cap.mcp-wired-test`（8 条 run 用例，基线上同样 8 条）、
+`cd ui && npm test`（`SQLITE_BUSY` + 120s 超时，基线同样红）。
+
+**前端**：`npm run typecheck`、`npm run build` 绿。默认起服务那一步的浏览器走查见
+`.scratch/security-sensitive-paths/spec.md`（敏感路径那一轮做过；本轮改的是设置面板的文案与
+subagents 的写入路径，`npm run build` + 面板文案的人工核对已做，**没有**再走一遍完整走查）。
+
 ## 实现进度（2026-09-29）
 
 - **票 01 已落地并删票**（本分支，绿）：`providers` 的段表收进 `:session` / `:mcp`，形状检查只做
