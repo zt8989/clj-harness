@@ -158,8 +158,12 @@ const useTurnSteps = (): number => {
 /// A CARD IS NOT A STEP, and this is the one thing the answer above does not decide
 /// (`.scratch/compaction-frames`, `lib/card-parts`). The three answers here are about a
 /// MESSAGE's place in the turn; whether a message that is put away still shows something
-/// depends on its PARTS, so `thread.aui.tsx` draws a card part even in a folded step or
-/// head. This function's answer is unchanged by that -- a "step" is still a step.
+/// depends on its PARTS, and `thread.aui.tsx` draws exactly one kind of card in a folded
+/// turn: a COMPACTION (`isKeptCardPart`), because it is the boundary where history stopped
+/// being messages. An INJECTED CONTEXT is material the turn was handed -- an instruction
+/// file, a skill body, a job's ending -- so it goes away with the turn's steps, which is what
+/// 'fold the context injection together with the turn' means. This function's answer is
+/// unchanged by any of that -- a "step" is still a step.
 ///
 /// Every selector above returns a primitive, because `useAuiState` compares with
 /// `Object.is`: a fresh object would re-render this message on every store update,

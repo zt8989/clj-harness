@@ -30,7 +30,8 @@ import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { type Case, type Suite } from "../e2e";
-import { isCardOnly, keepCardParts } from "../../src/lib/card-parts";
+import { isCardOnly, isKeptCardPart, keepCardParts } from "../../src/lib/card-parts";
+import { COMPACTION_PART } from "../../src/lib/compactions";
 import {
   INJECTION_PART,
   injectionView,
@@ -385,6 +386,27 @@ const cases: readonly Case[] = [
       // would be swallowed by a test that only asked "is this a data part".
       expect(isCardOnly([{ type: "file", name: INJECTION_PART }])).toBe(false);
       expect(isCardOnly([{ type: "image", name: INJECTION_PART }])).toBe(false);
+    },
+  },
+  {
+    name: "only-a-compaction-card-survives-its-turn-s-fold",
+    run: async () => {
+      const injection = { type: "data", name: INJECTION_PART, data: {} };
+      const compaction = { type: "data", name: COMPACTION_PART, data: {} };
+
+      // A FOLDED TURN PUTS ITS MATERIAL AWAY: an injected context is something the turn was
+      // handed, so it goes with the steps (`turn-steps.tsx` says what that means).
+      expect(isKeptCardPart(injection)).toBe(false);
+
+      // THE COMPACTION CARD IS THE BOUNDARY where history stopped being messages, so it
+      // belongs on screen however the turn around it is folded (`.scratch/compaction-frames`).
+      expect(isKeptCardPart(compaction)).toBe(true);
+
+      // AND A KEYS-OFF TEST IS STILL AGAINST THE SAME NAMES: this narrows `isCardPart`
+      // rather than opening a second question about data parts.
+      expect(isKeptCardPart({ type: "text", text: "x" })).toBe(false);
+      expect(isKeptCardPart(null)).toBe(false);
+      expect(isKeptCardPart("not a part")).toBe(false);
     },
   },
 ];

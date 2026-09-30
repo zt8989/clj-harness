@@ -45,7 +45,7 @@ import { WindowTop, type WindowTopProps } from "@/components/window-top";
 // from something a person typed -- and, since `.scratch/compaction-frames`, that the same is true of
 // EVERY card the server sends: the rule is over the names, not over one of them (`lib/card-parts`).
 import { InjectionCard } from "@/components/context-card";
-import { isCardOnly, isCardPart } from "@/lib/card-parts";
+import { isCardOnly, isKeptCardPart } from "@/lib/card-parts";
 import { isOpeningEntryId, textOfParts } from "@/lib/injections";
 // LOCAL (`.scratch/composer-loading-state`): the new-chat question lives in `lib/` now, so
 // the view and the composer's chrome ask it once instead of twice -- see that module's head.
@@ -707,7 +707,10 @@ const AssistantMessage: FC = () => {
   // the steps around them. `hasCard` is what lets the head's own content survive the fold, and
   // `putAway` is the whole of the rule further down: while the turn is folded, a card and -- for
   // the conclusion -- its own words are all that is left.
-  const hasCard = useAuiState((s) => s.message.parts.some(isCardPart));
+  /// A CARD THAT SURVIVES THE FOLD IS A COMPACTION (`isKeptCardPart`): an injected context is
+  /// material the turn was handed, so it goes away with the turn's steps, while the compaction
+  /// card is a boundary and stays.
+  const hasCard = useAuiState((s) => s.message.parts.some(isKeptCardPart));
   const putAway = folded && !foldedAnswer;
 
   const ACTION_BAR_PT = "pt-1.5";
@@ -781,7 +784,7 @@ const AssistantMessage: FC = () => {
             // own prose and every step row go, and a card -- wherever it sits in the
             // message -- stays. The conclusion is the one message whose own words also
             // survive, and that is the `foldedAnswer` branch right below.
-            if (putAway && !isCardPart(part)) return null;
+            if (putAway && !isKeptCardPart(part)) return null;
             if (
               foldedAnswer &&
               (part.type === "group-chainOfThought" ||

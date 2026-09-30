@@ -523,7 +523,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// height, and the empty suggestions row is display:none instead of eating a `gap-4`. Both are
 /// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
 /// removes was measured in a real browser.
-const EXPECTED_CASES = 188;
+const EXPECTED_CASES = 189;
 
 let total = 0;
 for (const suite of SUITES) {
