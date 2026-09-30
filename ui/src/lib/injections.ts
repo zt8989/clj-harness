@@ -53,22 +53,40 @@ function tagOf(text: string): string | null {
   return match?.[1] ?? null;
 }
 
+/// THE LABEL LINES, as prefixes, in the order a reader tries them: every injection opens with
+/// one of these, and which one it is says what the block IS. KEPT IN STEP WITH
+/// `harness.cap.reminder/labels` -- one table on the other end of the same wire, for the same
+/// reason `REMINDER_OPEN` is spelled here: the two ends have to agree about the bytes and
+/// neither can import the other's table.
+const LABEL_PREFIXES = [
+  "Instructions from: ",
+  "Available skills",
+  "Skill ",
+  "Background job ",
+  "Session context",
+];
+
 /// The line inside a block that says what it is.
 ///
 /// EVERY INJECTION WEARS ONE FRAME NOW (`harness.cap.reminder`), `<system-reminder>` holding
-/// plain text, and the label is the first non-empty line INSIDE it. That is the whole reason
-/// this is not `tagOf(text)` any more: the frame is the same for a skill body and a job's
-/// ending, so reading the first line of the whole block would title every card
-/// `system-reminder`. A block that is not a reminder (an old record) keeps its own first line,
-/// which is its tag.
+/// plain text, and the label is the first line INSIDE it that the table names. That is the
+/// whole reason this is not `tagOf(text)` any more: the frame is the same for a skill body
+/// and a job's ending, so reading the first line of the whole block would title every card
+/// `system-reminder`.
+///
+/// NOT SIMPLY THE FIRST LINE, and the instruction block is why: it is ONE block holding
+/// several files, and it opens with dsh's intro SENTENCE before its first `Instructions from:`
+/// section. Titling the card with that paragraph is what this table is here to prevent.
+/// A block that names none of these (an old record) keeps its own first line, which is its tag.
 function labelLine(text: string): string {
   const lines = text.split("\n");
   const start = lines[0]?.trim() === REMINDER_OPEN ? 1 : 0;
+  const body: string[] = [];
   for (let i = start; i < lines.length; i += 1) {
     const line = lines[i]?.trim() ?? "";
-    if (line !== "" && line !== REMINDER_CLOSE) return line;
+    if (line !== "" && line !== REMINDER_CLOSE) body.push(line);
   }
-  return "";
+  return body.find((line) => LABEL_PREFIXES.some((prefix) => line.startsWith(prefix))) ?? body[0] ?? "";
 }
 
 /// The bytes of TEXT as UTF-8 -- what the model was actually handed.

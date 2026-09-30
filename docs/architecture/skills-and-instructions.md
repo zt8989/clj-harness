@@ -19,11 +19,18 @@
 [system  组装的 system 文本：prompt.md 的冻结开头 + 各 SystemPrompt 声明追加的文本]
 [user    提问]
 [user    出生那条 context（绑定了项目时才有，见「出生 context」）]
-[user    <instructions path="<os-home>/AGENTS.md">…</instructions>]        全局，先
-[user    <instructions path="<project>/AGENTS.md">…</instructions>]        项目，后（更具体、离提问更近）
-[user    <skills>…清单…</skills>]                                          能力菜单，开场块里的最后一块
-[user    <skill name="…">…正文…</skill>]                                    skill context，缺省没有（见「技能正文的派生注入只剩人的那一半」）
+[user    <system-reminder>Instructions from: <os-home>/AGENTS.md …</system-reminder>]   全局 + 项目，**一条**
+[user    <system-reminder>Available skills …</system-reminder>]                          能力菜单，开场块里的最后一块
+[user    <system-reminder>Skill <名字> …</system-reminder>]                              skill context，缺省没有（见「技能正文的派生注入只剩人的那一半」）
 ```
+
+**所有指令文件合成一条，内层只有纯文本**（`.scratch/system-reminder` 决定 3/4，照 dsh 实测的
+`Instructions from: <路径>` 分段）：一个 `<system-reminder>` 里每个文件一段，先全局后项目（更具体、离提问更近），
+不再是「一个文件一条消息、外面套 `<instructions path=…>`」。技能清单与技能正文各一条 reminder；
+**机器可读的那半从标签挪到首行标签行**——`Instructions from: <绝对路径>` / `Available skills` / `Skill <名字>` /
+`Session context` / `Background job <id> ended: <状态>`——记录里只有消息字节，别的读者（会话表、轨迹）也只认字节。
+写手是 `harness.cap.reminder`（只依赖 `clojure.string` 的叶子，谁都能用它而不成环）；旧记录里的老标签仍认得，
+读法是**一张表 + 一个函数**（`cap.reminder/kind-of` / `skill-name`），老标签兜底。
 
 **开场块写在提问之后，一次**（`.scratch/session-opening`；位置是 2026-09-21 的修正）：材料排在
 **它要回答的那句话后面**，这是 `.scratch/context-frames` 决定 7 起就有的规矩，出生那一轮也不例外。
@@ -65,8 +72,8 @@
 **system 消息只有一条，这一页说的那些块一律 `role=user`。** 两条理由：
 `ag_ui/inbound` 关于 system 的规则只有「对话开头那条是 system 就换成冻结的那条、不是就前置一条」——
 多加一条 system 会把那条规则变成「关于一族 system 消息的规则」；而 role 本身就是给模型的框架
-（这是被放进来的东西，不是人刚打的字），`<instructions>` / `<skills>` / `<skill>` 三个标签再补一层
-明确的边界。
+（这是被放进来的东西，不是人刚打的字），`<system-reminder>` 这副框（`harness.cap.reminder/wrap`）再补一层
+明确的边界——**框里不再嵌任何 XML**，来源是首行那几行纯文本。
 （system 那一条里**追加**的部分属于另一半，由 `harness.cap.system-prompt` 组装、`SystemPrompt` 点上的
 hook 决定——两半不可能交错，因为 role 不同。）
 
@@ -128,7 +135,8 @@ hook 决定——两半不可能交错，因为 role 不同。）
 ## 技能正文的派生注入只剩人的那一半
 
 一条纯函数：provider 形状的消息向量 → 同样的向量（`harness.cap.skills/derived-injections`）。它扫出**以
-`/name ` 开头的 user 消息**（人的那条路），在**历史末尾**追加 `<skill name="X">…</skill>` 的 user 消息。
+`/name ` 开头的 user 消息**（人的那条路），在**历史末尾**追加一条
+`<system-reminder>` 框着、首行是 `Skill X` 的 user 消息。
 **模型那条路不在这里**：`skill` 的结果就是正文本身，它作为那次调用的工具结果（jsonl 里 `role` = `tool`
 的那条 `message` 行）随对话走，派生没有东西可补。
 
@@ -139,7 +147,8 @@ hook 决定——两半不可能交错，因为 role 不同。）
 会话中途从根里消失时要换成一句点名说明（见下）。于是**人这条路的正文**每轮从会话自身重算，两条性质因此免费：
 
 - **幂等**：把它施加在自己的输出上不改变任何东西（正文已在原位），所以**每轮施加不需要任何簿记**。
-- **同名只注一次，只在它看得见的那条开口里**：同一个名字被人打了两次 `/name` 只贡献一份正文——加载它是为了拿到指令，拿两份只花上下文。**两条路是两个 ask，所以跨来源不成立**：模型已经加载过的名字再被人 `/name` 一次会追加**第二份**；`loaded-names` 认的是这条派生自己写下的 `<skill name="…">` 标签，而工具结果没有标签可认。
+- **同名只注一次，只在它看得见的那条开口里**：同一个名字被人打了两次 `/name` 只贡献一份正文——加载它是为了拿到指令，拿两份只花上下文。**两条路是两个 ask，所以跨来源不成立**：模型已经加载过的名字再被人 `/name` 一次会追加**第二份**；`loaded-names` 认的是这条派生自己写下的 `Skill <名字>` 首行（老记录里是 `<skill name="…">` 标签），
+而工具结果没有这个锚可认。
 
 **同一句话，「加载」有两个来源，而只有人的那条走派生：**
 
@@ -149,7 +158,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
 | 人 | 一条 user 消息**以 `/name ` 开头**（见「人也能加载」） | 历史末尾（追加，与上一条同一个位置） |
 
 它**不是「被记住的」**：`/name` 是人打出来的字，就在**会话**里，所以下一次施加时它还在——这正是「派生而
-非累积」在这里的用处。**它认得的只有自己写过的那对标签**：`loaded-names` 扫的就是 `<skill name="…">` 开头
+非累积」在这里的用处。**它认得的只有自己写下的那个首行**：`loaded-names` 扫的就是 `Skill <名字>` 那一行（老标签兜底）
 的 user 消息。这条判据从前是一对共用常量（`load-confirmations` 读工具体写下的 `loaded-prefix` 那句确认），
 随「工具结果就是正文」一起退休——今天没有第二处需要和工具商量「到底加载成功了没有」：正文在不在对话里，
 看一眼就知道。
@@ -168,7 +177,7 @@ hook 决定——两半不可能交错，因为 role 不同。）
 ## 人也能加载：`/name`
 
 模型有 `skill` 工具，人有**输入框**：一条消息以 `/name `（名字后面跟空白，或消息到此为止）开头，
-harness 就把那份正文加载进来——**由那条派生注入追加一条 `<skill name="…">` 的 user 消息**，
+harness 就把那份正文加载进来——**由那条派生注入追加一条 reminder（首行 `Skill <名字>`）**，
 追加在**历史末尾**。两条路到达的是同一批技能——**一份 SKILL.md 关不掉其中任何一条**（见「frontmatter
 只读两个键」）——剩下的差别只在「一个名字没加载到」怎么报（见「`skill` 工具」）。
 

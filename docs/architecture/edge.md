@@ -139,7 +139,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads/<stem>/frames` | GET | **子 agent 重放的半边**（JSON）：这场会话的帧按运行时要读的顺序（`RUN_STARTED` 起头、`MESSAGES_SNAPSHOT` 随后、记录的帧按序）加一个 `:running`。面板读它、再从 `events.mux` 取实时尾巴，两边靠帧自己的 `:seq` 对齐（ticket 04） | 无（只读） |
 | `/api/events.mux/subscribe` | POST | **改一条活着的下行的订阅集合**（socket 只下行，发不了订阅）：`{subscriber, subscribe: [{threadId, since, generation}], unsubscribe: [threadId]}`。连接已关闭或从未开 ⇒ 404 | 无（只读） |
 | `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存（**有 run 正在跑时读记录**，见下），不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
-| `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一轮一行，`fold-trajectory` 折完一轮就吐一轮。**这场会话有人订阅（一条活着的下行）时它保持连接并接着推**，没人订阅就给完折好的那一份、结束——见下面「门铃归连接所有」 | 无（只读） |
+| `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**payload 是一条平铺的账本**（`{:threadId :incomplete :cells}`，照 dsh 的平铺形状）：一格一件东西，`system` 格站在轮外、`turn-start` / `turn-end` 夹出每一轮、没有轮的格是「轮与轮之间」。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一行一批格——`{:from :cells}`：先是不再会变的那些（开放轮之前的），然后是整条开放尾部**再来一遍**；客户端按 `:from` 剪接，所以同一段尾部收到两次也只留下一份（`trajectory/drift` 是这条规则唯一一处）。**这场会话有人订阅（一条活着的下行）时它保持连接并接着推**，没人订阅就给完折好的那一份、结束——见下面「门铃归连接所有」 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度 + 上下文圈）。**三个来源按序**：进程内持有该会话时读它的活折；否则读 `sessions.numbers`（**一次 SELECT**，快照带 `:numbersAt` 说明它是哪个时刻写的）；都没有才折记录。`?fold=1` 强制折记录（修复/对照用的门）。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读，且**从不写**） |
 | `/api/threads/<stem>/jobs` | GET | **本进程为这一场跑着的后台作业**：id、命令、状态、起点、记录的路径。读的是**进程内的作业注册表**，不是日志——没有作业、或作业随上一个进程死掉，都是 `:jobs []`（**不 404**）；状态就是记录末行（`[running]` / `[exit N]` / `[stopped]`，与 `job_output` 同一处出处） | 无（只读） |
@@ -247,6 +247,13 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 [overview](overview.md#状态放在哪) 那张表）、
 拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果，以及每一轮发出去的工具表。
 它与 `stats` 是同一份文件的两个读者：`stats` 数数（不读一条消息），它看内容（不数一个数）。
+**它答的是一条平铺的账本**（`.scratch/system-reminder` 决定 5，照 dsh）：`:cells` 一格一件东西，按记录的顺序排，
+**格自己说它在第几轮**（`:turn`，`nil` 就是轮与轮之间）。三条边界格与内容格并列——`system`（**站在轮外**：
+它不是哪一轮说的话，是那一轮被交到手里的东西，位置在**它所属那条 `turn-start` 之前**）、`turn-start` / `turn-end`
+（**折出来的两条**：记录里没有这两行，见下面「事实」那张表），以及 `compacted`（压缩——它不是模型看到的东西，
+是**关于记录本身**的事实，按自己那一行的行号落在轮与轮之间）。**没有结束的轮没有 `turn-end`**：一条轮结束的
+凭据只有「后一轮开了」或「记录最后一帧是终态」。模型自己的话按 dsh 叫 `message`；一轮的模型调用骑在它的
+`turn-start` 上（条目的 `:call` 指向那里）。
 两半的边界是**轮的判据**：两处都调**同一个**「这段记录带来哪些用户消息 id」的实现
 （`stats/user-ids`），所以数出来的轮与分出来的组不会各说各话。
 **它按段判轮，不认某种行**：悬置恢复会在同一个 runId 下再写一条 `system-prompt` 行（没有新的用户消息），
@@ -254,8 +261,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **跑着的那一段读 `tools/*` 那几行**（2026-09-27）：一轮的**返回侧 `message` 行是 `:run/done` 之后才写的**
 （`log!` 一次把它们全交出去），所以只折 `message` 的读者**在一轮正在跑的时候画不出任何一次工具调用**——
 看到提问和注入块，看不到它在干什么。而 `tools/pre-execute` 那几行**是当场写的**。所以轨迹给**仍然开着的那一段**
-多折一次：**已到达、但这一段的返回侧还没有回答它的**调用画成一条 `tool` 条目（`trajectory/pending-tool-items`），
-名字取审计行自己的 `:toolName`，结果**缺席**（不是空串）——返回侧落盘后，条目换成 `message` 行折出来的那条
+多折一次：**已到达、但这一段的返回侧还没有回答它的**调用画成一条 `tool` 格（`trajectory/pending-tool-items`），
+名字取审计行自己的 `:toolName`，结果**缺席**（不是空串）——返回侧落盘后，格子换成 `message` 行折出来的那条
 （名字、参数、结果俱全），**一条调用始终只有一行**。**已经关掉的那一段不这么折**：它未回答的调用是**同一轮的
 后一段**回答的（悬置与恢复是两段、一条工具消息），两段都画就是一次调用画两遍，还会把恢复的裁决读进悬置那半里。
 
@@ -470,7 +477,7 @@ PNG / woff2 / `.gz` 本来就被压过，再折只会**更大**（实测 1 KB �
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同），加工具表的**签名**：`:tools-names-hash`（工具**名字**集合的 SHA-256——改描述不动它，加删工具才动）/ `:tools-count` / `:tools-bytes`（`context/size-of` 的字符数，给上下文圈画数）。**整张工具表不在这一行**（票 04：runtime 配置，一轮里一字不差重复几百遍，曾占整份日志四成）——它落在 system 那条 `message` 行的**信封**上（`:tools`，整张表，见下）。表为空时不写这三个键。**两处都在**：照旧进记录，**并且上会话那条下行**（ADR 0006 决策 4），线上的载荷就是这一行的载荷 |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象。**两处都在**（同上），而线上的那一份多一层 **`numbers`**：到这一刻的 `steps` / `usage` / `cacheHitPercent` / `outputTokensPerSecond` / `context`——它是**会话自己那几份折叠**当时的答案（`stats-get` 答的就是它们），所以线上不是第二份真相，是同一个答案早一点到 |
-| `turn/start` / `turn/end` | 一轮的两端。**只上会话那条下行，不进记录**：轮的边界在记录里由「没见过的 `:source "client"` user 行」算得出来（`harness.edge.stats/user-ids`），再写一行就是同一件事的第二份。`turn/start` 在那条 user 行**写入之前**发（行号就是它将要拿到的那一行）；`turn/end` 在**返回尾巴落地之后**发，带 `{turnId, calls, messages, seqFrom, seqTo}`——`calls` / `messages` 是 `harness.edge.turn` 那份**按轮**的折叠（客户端 `lib/turns.ts` 的 `turnCounts` 是同一套读数）。**parked 的一轮不收口**：`run/interrupt` 不是终局，带着人答复回来的那个 run 关的是**同一轮**（ADR 0006 决策 3） |
+| `turn/start` / `turn/end` | 一轮的两端。**只上会话那条下行，不进记录**：轮的边界在记录里由「没见过的 `:source "client"` user 行」算得出来（`harness.edge.stats/user-ids`），再写一行就是同一件事的第二份。**轨迹里那两条 `turn-start` / `turn-end` 格因此是折出来的**（`harness.edge.trajectory/turn-cells`），不是记录里的行：`trajectory` 把同一套轮判据作用在 `message` 行上，把结果画成两条边界。`turn/start` 在那条 user 行**写入之前**发（行号就是它将要拿到的那一行）；`turn/end` 在**返回尾巴落地之后**发，带 `{turnId, calls, messages, seqFrom, seqTo}`——`calls` / `messages` 是 `harness.edge.turn` 那份**按轮**的折叠（客户端 `lib/turns.ts` 的 `turnCounts` 是同一套读数）。**parked 的一轮不收口**：`run/interrupt` 不是终局，带着人答复回来的那个 run 关的是**同一轮**（ADR 0006 决策 3） |
 | `step/start` / `step/end` | **一步**的两端：一次模型请求，加上**它调的那些工具**（ADR 0011）。**两处都在**：各写一行记录，**并且上会话那条下行**——这一族的 `:seq` 是**它自己那一行**的行号（不像 `turn/*` 是借来的，因为它本来就在记录里）。`step/start` 在请求发出之前发（**停止检查之后**：一个被停的 run 不该开一步它收不了的步）；`step/end` 在这一步那些调用**都有了结局之后**发，带 `{:tools [{:id :name} …]}`——每个调用后来怎么了在**它自己**的 `tools/*` 行上（同一批 id），不在这里说第二遍。一次工具也没调的步，`step/end` 紧跟在 `model/end` 之后。收口有四条路，都收：工具都答了 / 停止（被切掉的调用先拿 cut-off 答案）/ **悬置** / 失败（内核那个 `catch`）。**悬置关的是同一步**：回答人的那次请求是**下一步**——步不跨 run，轮才跨。这条也不是 AG-UI 帧（`harness.edge.ag-ui/step` 对它是空操作） |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
@@ -491,7 +498,9 @@ PNG / woff2 / `.gz` 本来就被压过，再折只会**更大**（实测 1 KB �
   翻出来是空的条目（单独一条 `reasoning`）**不写行**。
 - **信封上的 `:source` 说这条是谁放进数组的**：`client` / `injection` / `opening` / `skill` / `job`
   （以上是数组进来的一侧），`system-prompt` / `model` / `tool` / `skill` / `job`（返回的一侧）。
-  屏幕上的卡因此能直接说出自己是哪一族，不必去猜标签。
+  **这一分类读的是注入正文自己的首行标签行**（`instructions from` / `Available skills` → `opening`、
+  `Skill <名字>` → `skill`、`Background job …` → `job`、其余 → `injection`；老记录里的标签兜底，
+  读法是一张表 + 一个函数：`harness.cap.reminder/kind-of`）。屏幕上的卡因此能直接说出自己是哪一族。
 - **`:id` 是条目的身份**（信封，不进 payload），与帧的 `messageId` 同一套命名：开场条目
   `session-opening-<i>`、出生 context `session-context`、客户端的 `u1`、助手的 `msg-*`。
 - **一次动作写了哪几条 = 那些 `message` 行**，顺序就是它们进数组的顺序；`input` 行不再存在，

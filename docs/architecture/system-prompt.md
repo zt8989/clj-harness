@@ -11,7 +11,7 @@
 | `<provider>` | SystemPrompt 点的一条内建 hook（见 `.scratch/system-prompt-blocks/issues/04`） | 每次 run 派生 |
 | `<project>` | 同上（`harness.cap.system-prompt/project-block`） | 每次 run 派生 |
 | `<env>` | 同上（`env-block`，机器事实来自 `harness.infra.env/lines`，语言来自 `harness.infra.language`） | 每次 run 派生 |
-| `<instructions>` / `<skills>` | 开场块（`harness.cap.preamble`），会话出生那一轮注入 | 只进一次，此后是历史 |
+| 注入物（`<system-reminder>`） | 开场块（`harness.cap.preamble`：指令文件、技能清单）、出生 context、技能正文、作业结束通知 | 开场只进一次，此后是历史；其余每轮现算 |
 
 顺序为什么这么排：**升降的东西排在后段**。冻结开头是前缀缓存的锚，一条随 run 变动的句子混进去，
 每次变动都要付一次冷前缀的价钱；反过来，把事实冻在开头，代价是那句会开始说谎。
@@ -70,10 +70,20 @@ language: Chinese (zh)
 
 ## 开场段（会话出生那一轮）
 
-<instructions path="/Users/zhouteng/Documents/workspace/clj-harness/AGENTS.md">
-…AGENTS.md 的全文，逐字注入（测试期 `~/.clj-harness` 只读、README 只四节等都在里面）…
-</instructions>
+<system-reminder>
+The following workspace instructions may be relevant to your work. Use them as guidance when applicable.
+…
 
-<skills>
+Instructions from: /Users/zhouteng/AGENTS.md
+
+…AGENTS.md 的全文，逐字注入（测试期 `~/.clj-harness` 只读、README 只四节等都在里面）…
+
+Instructions from: /Users/zhouteng/Documents/workspace/clj-harness/AGENTS.md
+
+…项目那一份…
+</system-reminder>
+
+<system-reminder>
+Available skills
 …本会话可见的 skill 索引（名字 + 一句话描述），正文按需用 `skill` 工具读…
-</skills>
+</system-reminder>

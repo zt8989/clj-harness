@@ -189,6 +189,51 @@ export function useTurnFolded(): boolean {
   return foldable && !unfolded;
 }
 
+/// The first ASSISTANT message after this one -- where the turn this message stands in front
+/// of begins. -1 when there is none.
+///
+/// IT HAS TO LOOK FORWARD because a CARD-ONLY user message is not a step of any turn:
+/// `turnBounds` groups assistant messages, and a user message is a turn of its own (`first ===
+/// last`, so nothing to fold). A session's opening blocks arrive exactly that way.
+const nextTurnIndex = (s: AssistantState): number => {
+  const { messages } = s.thread;
+  for (let i = s.message.index + 1; i < messages.length; i += 1) {
+    if (messages[i]?.role === "assistant") return i;
+  }
+  return -1;
+};
+
+/// The name of the turn that follows this message, by its first message's id -- the same name
+/// that turn's own summary line folds and unfolds.
+const followingTurnKeyOf = (s: AssistantState): string => {
+  const i = nextTurnIndex(s);
+  if (i < 0) return "";
+  const { messages } = s.thread;
+  return messages[turnBounds(messages, i).first]?.id ?? "";
+};
+
+const isFollowingFoldableOf = (s: AssistantState): boolean => {
+  const i = nextTurnIndex(s);
+  if (i < 0) return false;
+  const { messages } = s.thread;
+  const { first, last } = turnBounds(messages, i);
+  return last > first && turnIsSettled(messages, last, s.thread.isRunning);
+};
+
+/// WHETHER THE TURN THIS MESSAGE STANDS IN FRONT OF IS FOLDED -- the question an injected
+/// card asks (`thread.aui.tsx`'s `UserInjectionCard`), so that folding a turn takes the
+/// context it was handed with it: an opening's instruction file, the skill catalogue, a body
+/// a person asked for. Unfold the turn and the card is back, like any other step of it.
+///
+/// A CARD WITH NO TURN AFTER IT IS NEVER HIDDEN (`isFollowingFoldableOf` is false for it):
+/// there is nothing to fold it with, and hiding it would be the view losing a fact.
+export function useFollowingTurnFolded(): boolean {
+  const key = useAuiState(followingTurnKeyOf);
+  const foldable = useAuiState(isFollowingFoldableOf);
+  const unfolded = useTurnOpened(key);
+  return foldable && !unfolded;
+}
+
 
 /// Whether THIS message is the turn's conclusion WHILE the turn is folded -- the one
 /// message a folded turn still shows, and of which it shows only what was said. The

@@ -530,7 +530,9 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the turn goes, the context cell included, and nothing that is in no turn moves). The third
 /// drives the real endpoint through `trajectoryFor`, because the wire -- a header line and
 /// batches spliced at their `from` -- is the one thing a hand-written ledger cannot show.
-const EXPECTED_CASES = 192;
+/// 187 -> 188: the `injections` suite's, for the ONE block several AGENTS.md files become: its
+/// title is the first `Instructions from:` line, not the intro sentence in front of it.
+const EXPECTED_CASES = 193;
 
 let total = 0;
 for (const suite of SUITES) {

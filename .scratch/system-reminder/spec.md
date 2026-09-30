@@ -353,3 +353,70 @@ Skill tdd
   不新造判据。
 - 上游对照：`@deepseek-ai/dsh-client-ui-trajectory@0.1.0-rc.6` 与真记录 `session-edc108e2-…`。**照搬**的是
   指令合并的分段、账本形状与折叠；**不照搬**的（加严或不做）已列在非目标。
+
+---
+
+## 八、落地（2026-09-30）
+
+七张票全部落地；票按约定删除。分支 `system-reminder`，落地点见下面各条。
+
+### 报数
+
+- **后端**：`clojure -M:test -m harness.test-runner` → **1396 例 / 14393 断言 / 12 红 1 错**。
+  这 13 条**不是本特征带来的**：同一条命令在**主检出（未改动的 `main`）**上跑出同样的一批
+  （`tools_test` 的 278 / 605 / 142–145 / 693、`a-bound-session-roots-relative-paths-at-its-project`
+  的 NPE、`mcp_wired_test` 227–229、`claims_test` 382、`hooks_test` 108），逐条同名同位置。
+  根因是这台机器的会话配置（`grep` 不在这套编辑模式下服务）与既有的 `PreCompact` hook，
+  与注入物外形、轨迹账本无关。
+- **前端**：`npm run typecheck` 绿；`npm test` → **191/193**，两条红的（`elicitation` 的
+  `a-servers-question-parks-the-run-and-the-answer-finishes-it`、`subagents` 的
+  `the-endpoint-answers-in-the-shape-both-screens-read`）在主检出上**同样红**，既存；`npm run build` 绿。
+
+### 真浏览器走查（`node scripts/dev.mjs --scripted`，端口 OS 分配，临时家）
+
+1. **新会话出生**：会话栏里**只有一张注入卡**（两份 AGENTS.md 已在一条 reminder 里，512 B），
+   标题是 **`Instructions from: <绝对路径>`**，不再是 `system-reminder`、也不是每个文件一张。
+   记录里那一条 `message` 行的正文逐字核对过：`<system-reminder>` + 前言 + 每个文件一段
+   `Instructions from: …`，**内层没有任何 XML**。
+2. **会话栏折轮**：折上那一轮 → 注入卡**不画**；展开 → 回来。
+3. **作业结束**：`job` 起一条 `sleep 2`、等它结束、再发一句 —— 记录里多出的那条
+   `message` 行 `:source` 是 `job`，正文是
+   `<system-reminder>\nBackground job j1 ended: [exit 0]\nCommand: …\nRead what it said with job_output {"job": "j1"}.\n</system-reminder>`；
+   会话栏那张卡的标题是 **`Background job j1 ended: [exit 0]`**。
+4. **轨迹**：最上是 `系统` 格（**在任何轮之外**——牛总报的「系统提示词被包进第一轮」就是这条），
+   下面 `第 1 轮` / `第 2 轮` 的粗分割线；轮里是 `用户 → 上下文 → 助手 → 工具`；
+   工具栏的 **`折起全部轮`** 折上那一轮后，轮里的 `上下文` 格**一起消失**（只剩 `4 个条目 · 3 次模型调用`
+   的摘要行），而最上面那个 `系统` 格**不受影响**；`展开全部轮` 回来。
+   证据：`evidence/trajectory-ledger.png`。
+   **没走到的**：一条真的有压缩的会话（`compacted` 格落在 `Between turns`）——`trajectory-test` 的两条
+   用例钉着它（`a-compaction-is-a-cell-between-turns`），走查这一趟没有可压缩的记录。
+
+### 走查里发现并当场修掉的一条
+
+**票 06 的规矩漏了出生那一张卡。** `thread.aui.tsx` 的折法规矩按 `turnBounds` 算，而
+`turnBounds` 只把**连续的 assistant 消息**算作一轮——出生写的那条 opening entry 是 **user** 消息，
+自成一「轮」（`first === last`，不可折），所以折轮时它**照旧画**。补法是 `turn-steps.tsx` 的
+`useFollowingTurnFolded`：卡片**往前看**它下面那一轮折没折（卡片本来就不在任何轮里，只能往前看），
+折上就不画。`lib/turns.ts` 一行没改。
+
+### 与票面写的、或与计划的出入
+
+- **`fold-trajectory` / `trajectory-emit-step` 删了**。它们是「一轮一行」那套流式发射器，
+  账本之后没有「一轮」这个发射单位：取而代之是 `final-count`（开放轮之前的格不再变）+ `drift`
+  （这一批发什么：先是新定的格，然后整条开放尾部再来一遍），路由与客户端共用一个规则。
+- **「首行标签行」不等于「框里第一行」**。指令块照 dsh 是**一个** reminder 装**几个**文件，
+  前言那句先说，所以第一行是前言。`cap.reminder/labels` 与 `ui/lib/injections.ts` 的
+  `LABEL_PREFIXES` 是同一张表的两份，两边都**按表找第一行**（找不到才退回第一行 / 旧标签），
+  卡片标题因此是 `Instructions from: …` 而不是那段前言。这一条是票 01/03 的原话里没有点明的。
+- **I18n 只加了要用的键**：`between.label` / `summary.turn` / `toolbar.collapseTurns` /
+  `toolbar.expandTurns` / `kind.message`（原 `kind.assistant` 改名）/ `kind.compacted` /
+  `facts.written` / `facts.messages`。票 05 列过 `collapseCalls` / `expandCalls` 与
+  `system.initial`：这个视图没有「按次调用折叠」这件东西（`system` 格的标记照旧走 `kind.system`），
+  照 `lib/catalogs.ts` 的规矩**不加没人用的键**。
+- **`:calls` 骑在 `turn-start` 格上**（票面只说「字段原样保留」，没说落哪一格）：一次调用是**整轮**的事实，
+  而 `turn-start` 是开放轮里唯一一个会被重发的头，所以调用中途落下的那次也送得到读者手上；
+  条目的 `:call` 还是指向它。
+- **没结束的轮没有 `turn-end` 格**：一条轮结束的凭据只有「后一轮开了」或「记录最后一帧是终态」，
+  比这更弱的证据不足以让账本说「这轮完了」。视图因此得容得下「只有轮头」的一轮（`sectionsOf` 末尾收口）。
+- `.worktrees/trajectory-on-the-downlink` 那条线**没动**：它还没有代码（只有 spec 与票），
+  合的时候照本票的 `:cells` 来。

@@ -138,6 +138,32 @@ const cases: readonly Case[] = [
     },
   },
   {
+    name: "a-merged-instruction-block-is-titled-by-its-first-file",
+    run: async () => {
+      // THE ONE BLOCK SEVERAL FILES BECOME (`.scratch/system-reminder` 决定 4): it opens with
+      // dsh's intro SENTENCE, and the title is the first `Instructions from:` line rather than
+      // that paragraph. Reading 'the first line inside the frame' would title the card with a
+      // paragraph -- which is what the label table is for.
+      const merged = [
+        "<system-reminder>",
+        "The following workspace instructions may be relevant to your work. Use them as guidance when applicable.",
+        "",
+        "Instructions from: /Users/me/AGENTS.md",
+        "",
+        "# 全局 AGENTS.md",
+        "",
+        "Instructions from: /p/AGENTS.md",
+        "",
+        "# AGENTS.md",
+        "</system-reminder>",
+      ].join("\n");
+      const view = injectionView({ role: "user", text: merged });
+      expect(view?.title).toBe("Instructions from: /Users/me/AGENTS.md");
+      expect(view?.preview).toBe("Instructions from: /Users/me/AGENTS.md");
+      expect(view?.bytes).toBe(new TextEncoder().encode(merged).length);
+    },
+  },
+  {
     name: "a-rebuilt-conversation-gets-its-cards-back",
     run: async () => {
       // What the ADAPTER hands back for a rebuild: the card message survives with its

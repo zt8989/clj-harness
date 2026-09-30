@@ -36,7 +36,7 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
-import { TurnStepsTrigger, useFoldedAnswer, useStepFold, useTurnFolded } from "@/components/turn-steps";
+import { TurnStepsTrigger, useFoldedAnswer, useFollowingTurnFolded, useStepFold, useTurnFolded } from "@/components/turn-steps";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 // LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
@@ -1060,9 +1060,19 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 const UserInjectionCard: FC = () => {
   const cardOnly = useAuiState((s) => isCardOnly(s.message.parts));
   const continues = useAuiState(isStepAfter);
+  /// A CARD FOLLOWED BY A FOLDED TURN GOES WITH IT (ticket 06 of `.scratch/system-reminder`):
+  /// what the turn was handed -- an instruction file, the skill catalogue, a body a person
+  /// asked for -- is material for that turn, so folding the turn takes it too. A card-only
+  /// user message is not inside any turn (`lib/turns`), which is why the fold is read
+  /// FORWARD (`useFollowingTurnFolded`).
+  const folded = useFollowingTurnFolded();
   const text = useAuiState((s) =>
     isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
   );
+  /// EVERY HOOK ABOVE THE RETURN, EVERY TIME: a component that returns before its last
+  /// `useAuiState` renders a different number of hooks on the folded render than on the open
+  /// one, which React refuses (a blank page, not a wrong one).
+  if (folded) return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-injection-root"

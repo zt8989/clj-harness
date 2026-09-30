@@ -72,14 +72,46 @@
                (mapcat (fn [f] [(str "Instructions from: " (:path f)) "" (str (:content f)) ""])
                        files))))
 
-(defn- first-label
-  "The first line of TEXT that says what the block is: the first non-blank line after a
-  leading `<system-reminder>`, or the first non-blank line when there is no frame (a
-  record written before this namespace existed). nil when the block says nothing."
+(def labels
+  "THE LABEL LINES, as [prefix source] pairs, in the order a reader tries them: every
+  injection opens with one of these, and which one it is says what the block IS.
+
+  ONE TABLE, because both readers below are asking the same question about the same bytes --
+  and because the instruction block opens with dsh's intro SENTENCE before its first
+  `Instructions from:` section, so 'the first line' is not the same question as 'the label'."
+  [["Instructions from: " "opening"]
+   ["Available skills"  "opening"]
+   ["Skill "            "skill"]
+   ["Background job "   "job"]
+   ["Session context"   "injection"]])
+
+(defn- block-lines
+  "The lines of TEXT, without the frame: a leading `<system-reminder>` is dropped, and a
+  block written before this namespace existed has none to drop."
   [text]
-  (let [ls  (str/split-lines (str text))
-        ls  (if (and (seq ls) (= open-tag (str/trim (first ls)))) (rest ls) ls)]
-    (some (fn [line] (let [t (str/trim line)] (when (seq t) t))) ls)))
+  (let [ls (str/split-lines (str text))]
+    (if (and (seq ls) (= open-tag (str/trim (first ls)))) (rest ls) ls)))
+
+(defn- non-blank
+  "The first line that says anything, or nil."
+  [lines]
+  (some (fn [line] (let [t (str/trim line)] (when (seq t) t))) lines))
+
+(defn- first-label
+  "The first line of TEXT the TABLE names -- `Instructions from: …`, `Available skills`,
+  `Session context`, `Skill <name>`, `Background job <id> ended: …`. Nil when the block
+  opens with none of them (an old record: its tag is read by `legacy-kind` instead).
+
+  NOT SIMPLY THE FIRST LINE: the instruction block is one block holding several files, and it
+  opens with the intro sentence that states the precedence rule. Reading that as the label
+  would file every instruction block as a nameless injection -- and would title its card with
+  a paragraph."
+  [text]
+  (let [ls (block-lines text)]
+    (some (fn [pair]
+            (let [hit (non-blank (filter #(str/starts-with? (str/trim %) (first pair)) ls))]
+              (when (some? hit) hit)))
+          labels)))
 
 (defn- legacy-kind
   "The `:source` a block's OLD opening tag implies, or nil when it opens with none.
@@ -99,18 +131,16 @@
   "TEXT -> the record's own `:source` for the block: \"opening\", \"skill\", \"job\", or
   \"injection\" when it says none of those.
 
-  IT READS THE LABEL LINE, not the frame -- every injection now opens with the same tag,
-  so the tag is the one thing that cannot tell them apart. The old tag prefixes are read
-  too (see `legacy-kind`)."
+  IT READS THE LABEL LINE (the `labels` table), not the frame -- every injection now opens
+  with the same tag, so the tag is the one thing that cannot tell them apart. A block that
+  names none of them is read by its OLD tag instead (`legacy-kind`), and one that opens with
+  neither is an ordinary per-run injection."
   [text]
-  (let [line (or (first-label text) "")]
-    (or (legacy-kind line)
-        (cond
-          (str/starts-with? line "Skill ")          "skill"
-          (str/starts-with? line "Background job ") "job"
-          (or (str/starts-with? line "Instructions from")
-              (str/starts-with? line "Available skills")) "opening"
-          :else "injection"))))
+  (let [labelled (first-label text)
+        line     (or labelled (non-blank (block-lines text)) "")]
+    (or (some (fn [[prefix source]] (when (str/starts-with? line prefix) source)) labels)
+        (legacy-kind line)
+        "injection")))
 
 (defn skill-name
   "TEXT -> the skill name a `Skill <name>` label line carries, or nil when the block is
@@ -120,7 +150,7 @@
   the rest of a plain-text line. The legacy `<skill name=\"…\">` spelling is still read
   and still unescaped, for old records."
   [text]
-  (let [line (or (first-label text) "")]
+  (let [line (or (first-label text) (non-blank (block-lines text)) "")]
     (cond
       (str/starts-with? line "<skill name=\"")
       (some-> (second (re-matches #"<skill name=\"([^\"]*)\".*" line))
