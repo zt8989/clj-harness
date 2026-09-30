@@ -129,7 +129,39 @@ promise，然后 `(deref done 5000 nil)`：
 `Unsupported escape character: \U`）、`kernel.hooks-test` 的
 `the-system-prompt-point-was-added-as-one-row-of-the-same-table`（1 条）。
 
+## 票 01：`edge.http-test` 单点拆开与夹具 spawn（2026-09-30 完成，票已删）
+
+**结论：不是又一个排水屏障。** 它是 123 条真 HTTP 集成用例，每条至少跑一次真 run（真服务、真
+HTTP/SSE、真记录）。这台机器上：一次真 run 在客户端侧约 **300ms**（`dev/scratch_mux_cost.clj`），
+一次 `bash -lc` 约 **730ms**（其中约 700ms 是登录 profile）——这两条是工作的下界。
+
+**逐条量**（`dev/scratch_http_time.clj`：跑该家一遍，从 `:begin-test-var`/`:end-test-var` 读每条耗时）：
+单跑 **129.9s / 123 条**。最大两条是 git 用例
+（`a-directory-this-home-lists-is-read-and-moved-without-a-session` 26.9s、
+`the-git-endpoint-reads-and-moves-the-sessions-working-tree` 16.6s，合计 43.5s = 33%），其余 121 条
+合计约 86s（约 0.7s/条）。
+
+**修的是夹具的 spawn 次数**：`init-repo!` 原先八个 `shell/run`（八次 `bash -lc` = 八个登录 profile），
+合成一条 `&&` 链——仍是八条 git 命令，省掉的是 profile。那两条用例 43.5s → 29.1s。
+（`test/harness/cap/git_test.clj` 的 `build-repo!` 是同一形状、每个 namespace 一次，同一条修法可再省
+约 6s，未做——那不是这张票的账。）
+
+**全量对照（同一台机器，改动前后各一次干净全量；数字随负载漂，看量级）**：
+
+| | 改动前 | 改动后 |
+|---|---|---|
+| 各命名空间耗时合计 | 613.9s（69 家） | **596.5s** |
+| `edge.http-test`（整轮内） | 134.5s | **120.0s** |
+| 用例 / 断言 | 1397 / 14398 | **1397 / 14398** |
+| 失败 | 12 fail + 4 err | **11 fail + 4 err**（少的正是那条已知 flake） |
+
+**命名空间那一档留 300s 没动**：它还没响过；按 `docs/rules/testing.md` 的规矩（响了才调、调了要写清
+为什么），没响就不调。改动后 `http-test` 是 120s，仍是这条线的工作下界，不是可以点掉的等待。
+
+**证据脚本**：`dev/scratch_http_time.clj`（逐条耗时）、`dev/scratch_mux_cost.clj`（一次真 run 与一次
+spawn 的实测成本）。
+
 ## 还没做的（已量化，见 issues/）
 
-`edge.http-test` 210s 现在是最大单点；`tools/specs` 带线程时 127ms/次；`shell-test` 的
-~20s 固定超时；整轮 22% 的 CPU 占用指向跨命名空间并行；前端 80.5s 的串行是设计使然。
+`tools/specs` 带线程时 127ms/次；`shell-test` 的 ~20s 固定超时；整轮 22% 的 CPU 占用指向跨命名空间
+并行；前端 80.5s 的串行是设计使然。

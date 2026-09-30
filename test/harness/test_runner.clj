@@ -323,7 +323,10 @@
 ;; REMEMBERED. Healthy on this developer machine: ~110s for the whole suite and ~16s for its
 ;; slowest namespace on 2026-09-20, and -- measured again on 2026-09-30, same machine, four
 ;; cores -- ~960s for the whole suite and ~210s for its slowest namespace
-;; (`harness.edge.http-test`). The run budget is the suite times two; the namespace budget is
+;; (`harness.edge.http-test`). A third measurement, same day on a quieter machine: ~614s
+;; for the suite and ~134.5s for `http-test` -- a git fixture that stopped paying eight
+;; `bash -lc` profiles per repository then took that to ~120s in the same full run.
+;; The run budget is the suite times two; the namespace budget is
 ;; its slowest namespace times one and a half, which is thin, and the section in
 ;; docs/rules/testing.md says what to do about that and what NOT to do. BOTH ARE FOR A STUCK
 ;; RUN ONLY: a limit that fires on a merely slow machine gets raised until it is no limit at

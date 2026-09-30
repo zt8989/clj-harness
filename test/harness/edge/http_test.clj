@@ -4972,15 +4972,22 @@
   [dir]
   (let [run (fn [c] (shell/run {:command c :dir dir}))]
     (.mkdirs (io/file dir))
-    (run "git init -q")
-    (run "git config user.email test@example.invalid")
-    (run "git config user.name 'harness test'")
-    (run "git config commit.gpgsign false")
     (spit (io/file dir "README.md") "hello\n" :encoding "UTF-8")
-    (run "git add README.md")
-    (run "git commit -q -m first")
-    (run "git branch -m main")
-    (run "git branch side")
+    ;; ONE spawn, not eight. Every `shell/run` is a `bash -lc`, and its login profile is
+    ;; ~730ms of that spawn on this machine (measured 2026-09-30, see infra/shell.clj).
+    ;; Eight of those around eight git commands is eight profiles paid for nothing these
+    ;; cases assert -- what they are about is the repository that comes out, not how many
+    ;; shells it took to make. The commands are still separate git invocations; the eight
+    ;; profiles are what is saved. Measured: the two git cases 43.5s -> 29.1s (the
+    ;; test-suite-performance spec carries the full before/after).
+    (run (str "git init -q && "
+              "git config user.email test@example.invalid && "
+              "git config user.name 'harness test' && "
+              "git config commit.gpgsign false && "
+              "git add README.md && "
+              "git commit -q -m first && "
+              "git branch -m main && "
+              "git branch side"))
     dir))
 
 (defn- make-git-repo []
