@@ -1,0 +1,119 @@
+{
+  "url": "http://127.0.0.1:4811",
+  "rafPerSecond": 56,
+  "median": {
+    "streamedSeconds": 53.5,
+    "scriptMsPerSecond": 178.2,
+    "taskMsPerSecond": 275.2,
+    "styleMsPerSecond": 11.2,
+    "layoutMsPerSecond": 5.8,
+    "idleScriptMsPerSecond": 0.7
+  },
+  "runs": [
+    {
+      "run": 1,
+      "rafPerSecond": 53.5,
+      "profile": null,
+      "streamedSeconds": 45,
+      "frames": 4275,
+      "framesPerSecond": 95.1,
+      "frameBytes": 20686278,
+      "answerChars": 18635,
+      "startedFrom": {
+        "nodes": 181
+      },
+      "streamingMsPerSecond": {
+        "task": 289,
+        "script": 179.6,
+        "style": 11.5,
+        "layout": 7.7
+      },
+      "idleMsPerSecond": {
+        "task": 8,
+        "script": 0.6
+      },
+      "streamedTotalMs": {
+        "task": 13425.7,
+        "script": 8344.4
+      },
+      "nodes": {
+        "before": 181,
+        "after": 885
+      },
+      "listeners": {
+        "before": 200,
+        "after": 217
+      }
+    },
+    {
+      "run": 2,
+      "rafPerSecond": 56,
+      "profile": null,
+      "streamedSeconds": 55,
+      "frames": 4313,
+      "framesPerSecond": 78.4,
+      "frameBytes": 24489008,
+      "answerChars": 18635,
+      "startedFrom": {
+        "nodes": 199
+      },
+      "streamingMsPerSecond": {
+        "task": 275.2,
+        "script": 178.2,
+        "style": 9.7,
+        "layout": 5.8
+      },
+      "idleMsPerSecond": {
+        "task": 11.8,
+        "script": 0.8
+      },
+      "streamedTotalMs": {
+        "task": 15607.7,
+        "script": 10049.6
+      },
+      "nodes": {
+        "before": 199,
+        "after": 900
+      },
+      "listeners": {
+        "before": 202,
+        "after": 219
+      }
+    },
+    {
+      "run": 3,
+      "rafPerSecond": 56,
+      "profile": null,
+      "streamedSeconds": 53.5,
+      "frames": 4312,
+      "framesPerSecond": 80.7,
+      "frameBytes": 19754387,
+      "answerChars": 18635,
+      "startedFrom": {
+        "nodes": 215
+      },
+      "streamingMsPerSecond": {
+        "task": 251.6,
+        "script": 152.7,
+        "style": 11.2,
+        "layout": 5.7
+      },
+      "idleMsPerSecond": {
+        "task": 9.7,
+        "script": 0.7
+      },
+      "streamedTotalMs": {
+        "task": 13754.2,
+        "script": 8328.5
+      },
+      "nodes": {
+        "before": 215,
+        "after": 916
+      },
+      "listeners": {
+        "before": 204,
+        "after": 221
+      }
+    }
+  ]
+}

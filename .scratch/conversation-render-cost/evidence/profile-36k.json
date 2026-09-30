@@ -1,0 +1,280 @@
+{
+  "url": "http://127.0.0.1:4811",
+  "rafPerSecond": 53,
+  "median": {
+    "streamedSeconds": 93.2,
+    "scriptMsPerSecond": 575.8,
+    "taskMsPerSecond": 741.1,
+    "styleMsPerSecond": 11.5,
+    "layoutMsPerSecond": 23.5,
+    "idleScriptMsPerSecond": 0.6
+  },
+  "runs": [
+    {
+      "run": 1,
+      "rafPerSecond": 53,
+      "profile": {
+        "sampleMs": 93276,
+        "top": [
+          {
+            "name": "(idle)  @ :0",
+            "ms": 24237.9,
+            "share": 0.26
+          },
+          {
+            "name": "(program)  @ :0",
+            "ms": 10125.4,
+            "share": 0.109
+          },
+          {
+            "name": "consume  @ assets/index-9sLBOzas.js:76994",
+            "ms": 4291.6,
+            "share": 0.046
+          },
+          {
+            "name": "areChildrenEqual  @ assets/index-9sLBOzas.js:67129",
+            "ms": 3763.5,
+            "share": 0.04
+          },
+          {
+            "name": "factory  @ assets/index-9sLBOzas.js:80465",
+            "ms": 2526.8,
+            "share": 0.027
+          },
+          {
+            "name": "main  @ assets/index-9sLBOzas.js:76970",
+            "ms": 2490.2,
+            "share": 0.027
+          },
+          {
+            "name": "(anonymous)  @ assets/index-9sLBOzas.js:39014",
+            "ms": 2311.3,
+            "share": 0.025
+          },
+          {
+            "name": "compile  @ assets/index-9sLBOzas.js:77740",
+            "ms": 2141.4,
+            "share": 0.023
+          },
+          {
+            "name": "visit  @ assets/index-9sLBOzas.js:80472",
+            "ms": 2085.8,
+            "share": 0.022
+          },
+          {
+            "name": "set DocumentPictureInPictureEvent  @ :0",
+            "ms": 1992.3,
+            "share": 0.021
+          },
+          {
+            "name": "(garbage collector)  @ :0",
+            "ms": 1699.3,
+            "share": 0.018
+          },
+          {
+            "name": "go  @ assets/index-9sLBOzas.js:76990",
+            "ms": 1334.6,
+            "share": 0.014
+          },
+          {
+            "name": "subtokenize  @ assets/index-9sLBOzas.js:72731",
+            "ms": 1023.9,
+            "share": 0.011
+          },
+          {
+            "name": "write  @ assets/index-9sLBOzas.js:76927",
+            "ms": 918.6,
+            "share": 0.01
+          },
+          {
+            "name": "flowContinue  @ assets/index-9sLBOzas.js:70788",
+            "ms": 832,
+            "share": 0.009
+          },
+          {
+            "name": "handler  @ assets/index-9sLBOzas.js:84283",
+            "ms": 732.5,
+            "share": 0.008
+          },
+          {
+            "name": "splice$2  @ assets/index-9sLBOzas.js:70101",
+            "ms": 715.5,
+            "share": 0.008
+          },
+          {
+            "name": "atBreak  @ assets/index-9sLBOzas.js:76624",
+            "ms": 710.4,
+            "share": 0.008
+          },
+          {
+            "name": "headRowData  @ assets/index-9sLBOzas.js:89496",
+            "ms": 641.1,
+            "share": 0.007
+          },
+          {
+            "name": "fromMarkdown  @ assets/index-9sLBOzas.js:77610",
+            "ms": 597.4,
+            "share": 0.006
+          }
+        ],
+        "byRegion": [
+          {
+            "name": "(other)",
+            "ms": 39957.7,
+            "share": 0.428
+          },
+          {
+            "name": "@assistant-ui/react-markdown",
+            "ms": 28028.2,
+            "share": 0.3
+          },
+          {
+            "name": "react-dom",
+            "ms": 4786.7,
+            "share": 0.051
+          },
+          {
+            "name": "unist-util-visit-parents",
+            "ms": 4676.3,
+            "share": 0.05
+          },
+          {
+            "name": "@assistant-ui/react",
+            "ms": 2769.8,
+            "share": 0.03
+          },
+          {
+            "name": "@assistant-ui/tap",
+            "ms": 1840.7,
+            "share": 0.02
+          },
+          {
+            "name": "@assistant-ui/store",
+            "ms": 1609.4,
+            "share": 0.017
+          },
+          {
+            "name": "micromark-extension-gfm-autolink-literal",
+            "ms": 978.8,
+            "share": 0.01
+          },
+          {
+            "name": "@ag-ui/client",
+            "ms": 912.2,
+            "share": 0.01
+          },
+          {
+            "name": "@assistant-ui/core",
+            "ms": 907.8,
+            "share": 0.01
+          },
+          {
+            "name": "mdast-util-find-and-replace",
+            "ms": 854.6,
+            "share": 0.009
+          },
+          {
+            "name": "micromark-extension-gfm-table",
+            "ms": 847.1,
+            "share": 0.009
+          },
+          {
+            "name": "unist-util-is",
+            "ms": 742,
+            "share": 0.008
+          },
+          {
+            "name": "micromark-extension-gfm",
+            "ms": 678.5,
+            "share": 0.007
+          },
+          {
+            "name": "ours: lib/mux.ts",
+            "ms": 478.7,
+            "share": 0.005
+          },
+          {
+            "name": "hast-util-to-jsx-runtime",
+            "ms": 451.6,
+            "share": 0.005
+          },
+          {
+            "name": "@assistant-ui/react-ag-ui",
+            "ms": 334.5,
+            "share": 0.004
+          },
+          {
+            "name": "i18next",
+            "ms": 287.8,
+            "share": 0.003
+          },
+          {
+            "name": "scheduler",
+            "ms": 188,
+            "share": 0.002
+          },
+          {
+            "name": "rxjs",
+            "ms": 177.1,
+            "share": 0.002
+          },
+          {
+            "name": "trim-lines",
+            "ms": 149.4,
+            "share": 0.002
+          },
+          {
+            "name": "ours: lib/agent.ts",
+            "ms": 141.4,
+            "share": 0.002
+          },
+          {
+            "name": "ours: app.tsx",
+            "ms": 139.2,
+            "share": 0.001
+          },
+          {
+            "name": "react",
+            "ms": 120.7,
+            "share": 0.001
+          },
+          {
+            "name": "lucide-react",
+            "ms": 117.5,
+            "share": 0.001
+          }
+        ]
+      },
+      "streamedSeconds": 93.2,
+      "frames": 8299,
+      "framesPerSecond": 89,
+      "frameBytes": 79164800,
+      "answerChars": 36139,
+      "startedFrom": {
+        "nodes": 263
+      },
+      "streamingMsPerSecond": {
+        "task": 741.1,
+        "script": 575.8,
+        "style": 11.5,
+        "layout": 23.5
+      },
+      "idleMsPerSecond": {
+        "task": 28.3,
+        "script": 0.6
+      },
+      "streamedTotalMs": {
+        "task": 69650.8,
+        "script": 53988.5
+      },
+      "nodes": {
+        "before": 263,
+        "after": 1535
+      },
+      "listeners": {
+        "before": 210,
+        "after": 226
+      }
+    }
+  ]
+}
