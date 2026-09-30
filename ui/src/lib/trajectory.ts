@@ -150,6 +150,14 @@ export function sectionsOf(cells: readonly TrajectoryCell[]): TrajectorySection[
   return sections;
 }
 
+/// THE TURNS of a cut ledger, in order -- what the strip lays its lanes out over and what the
+/// list's `Collapse turns` acts on. Both call it rather than each filtering the sections
+/// themselves: two filters are two answers, and a mark has to point at a row that is really
+/// where it says.
+export function turnsOf(sections: readonly TrajectorySection[]): TrajectoryTurn[] {
+  return sections.flatMap((section) => (section.kind === "turn" ? [section.turn] : []));
+}
+
 /// ONE ROW A READER CAN SEE: the cell, the turn it is in (nil for a cell in none) and that
 /// turn's calls, which is where an item's `call` pointer resolves.
 export type TrajectoryRow = { item: TrajectoryItem; turn: number | null; calls?: readonly TrajectoryCall[] };

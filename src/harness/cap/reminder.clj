@@ -97,21 +97,33 @@
   [lines]
   (some (fn [line] (let [t (str/trim line)] (when (seq t) t))) lines))
 
-(defn- first-label
-  "The first line of TEXT the TABLE names -- `Instructions from: …`, `Available skills`,
-  `Session context`, `Skill <name>`, `Background job <id> ended: …`. Nil when the block
-  opens with none of them (an old record: its tag is read by `legacy-kind` instead).
+(defn- label?
+  "Is LINE one the table names?"
+  [line]
+  (boolean (some (fn [[prefix _]] (str/starts-with? line prefix)) labels)))
 
-  NOT SIMPLY THE FIRST LINE: the instruction block is one block holding several files, and it
-  opens with the intro sentence that states the precedence rule. Reading that as the label
-  would file every instruction block as a nameless injection -- and would title its card with
-  a paragraph."
+(defn- source-of
+  "The `:source` the table gives LINE, or nil when it is not a label line."
+  [line]
+  (some (fn [[prefix source]] (when (str/starts-with? line prefix) source)) labels))
+
+(defn- first-label
+  "The FIRST LINE of TEXT the table names -- `Instructions from: …`, `Available skills`,
+  `Session context`, `Skill <name>`, `Background job <id> ended: …`. Nil when the block names
+  none of them (an old record: its tag is read by `legacy-kind` instead).
+
+  TWO THINGS THIS IS NOT, and each is a bug waiting:
+
+  - NOT SIMPLY THE FIRST LINE. The instruction block is one block holding several files and it
+    opens with the intro sentence that states the precedence rule; reading that as the label
+    would file every instruction block as a nameless injection and title its card with a
+    paragraph.
+  - NOT 'the first PREFIX in the table that appears anywhere in the block'. A label is the
+    block's own OPENING line, so the scan goes LINE BY LINE and asks the table about each --
+    a skill body that happens to quote an `Instructions from:` line is still a skill body, and
+    the other order would file it as an opening and lose its name (`skill-name` reads this)."
   [text]
-  (let [ls (block-lines text)]
-    (some (fn [pair]
-            (let [hit (non-blank (filter #(str/starts-with? (str/trim %) (first pair)) ls))]
-              (when (some? hit) hit)))
-          labels)))
+  (some (fn [line] (let [t (str/trim line)] (when (label? t) t))) (block-lines text)))
 
 (defn- legacy-kind
   "The `:source` a block's OLD opening tag implies, or nil when it opens with none.
@@ -136,9 +148,8 @@
   names none of them is read by its OLD tag instead (`legacy-kind`), and one that opens with
   neither is an ordinary per-run injection."
   [text]
-  (let [labelled (first-label text)
-        line     (or labelled (non-blank (block-lines text)) "")]
-    (or (some (fn [[prefix source]] (when (str/starts-with? line prefix) source)) labels)
+  (let [line (or (first-label text) (non-blank (block-lines text)) "")]
+    (or (source-of line)
         (legacy-kind line)
         "injection")))
 

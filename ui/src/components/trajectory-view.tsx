@@ -78,6 +78,7 @@ import {
   trajectoryFor,
   sectionsOf,
   rowsOf,
+  turnsOf,
 } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 import { KIND_HUE } from "@/components/trajectory-colors";
@@ -593,7 +594,10 @@ const TurnHead: FC<{ turn: number; items: number; calls?: number; collapsed: boo
   const { t } = useTranslation("trajectory");
   const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
   return (
-    <div className="flex items-baseline gap-1 border-y border-border bg-muted/40 px-2 py-1">
+    // 粗分割线: the boundary between turns is a THICKER rule than the hairline between two
+    // rows inside one (ticket 05: `Turn N` / `Between turns` are drawn as seams, not as
+    // another row of the same list).
+    <div className="flex items-baseline gap-1 border-y-2 border-border bg-muted/40 px-2 py-1">
       <button
         type="button"
         data-slot="trajectory-turn-toggle"
@@ -621,7 +625,7 @@ const BetweenHead: FC = () => {
   return (
     <div
       data-slot="trajectory-between"
-      className="border-y border-border bg-muted/40 px-3 py-1 text-[0.7rem] font-medium text-muted-foreground"
+      className="border-y-2 border-border bg-muted/40 px-3 py-1 text-[0.7rem] font-medium text-muted-foreground"
     >
       {t("between.label")}
     </div>
@@ -693,10 +697,7 @@ export const TrajectoryView: FC<{ threadId: string }> = ({ threadId }) => {
     () => (payload === null ? [] : sectionsOf(payload.cells)),
     [payload],
   );
-  const turns = useMemo(
-    () => sections.flatMap((section) => (section.kind === "turn" ? [section.turn] : [])),
-    [sections],
-  );
+  const turns = useMemo(() => turnsOf(sections), [sections]);
   /// EVERY ROW THE LIST DRAWS, in order, with the turn it is in and that turn's calls --
   /// flattened from the same cut, because the pane is opened by cell index and has to be
   /// able to resolve one.

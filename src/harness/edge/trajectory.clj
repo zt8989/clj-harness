@@ -952,17 +952,19 @@
   what decides whether the LAST turn is bracketed at its tail: every earlier turn has been
   superseded by the next one, and the last one has not."
   [turns between complete?]
-  (let [pending (atom (vec (sort-by :at-i between)))
-        last-i  (dec (count turns))
-        before  (fn [i]
-                  (let [[mine rest] (split-with #(< (:at-i %) i) @pending)]
-                    (reset! pending (vec rest))
-                    (map (comp #(assoc % :turn nil) :cell) mine)))]
-    (->> (concat (mapcat (fn [[i turn]]
-                           (concat (before (or (:opened-at turn) -1))
-                                   (turn-cells turn (or (< i last-i) complete?))))
-                         (map-indexed vector turns))
-                 (map (comp #(assoc % :turn nil) :cell) @pending))
+  (let [last-i        (dec (count turns))
+        ;; PURE, and deliberately so: the between-turns rows are CARRIED through the folds
+        ;; rather than parked in a mutable place beside them. A read-modify-write threaded
+        ;; through a lazy pipeline is the shape that breaks the moment two callers share it.
+        [cells loose] (reduce (fn [[acc left] [i turn]]
+                                (let [at          (or (:opened-at turn) -1)
+                                      [mine rest] (split-with #(< (:at-i %) at) left)]
+                                  [(into acc (concat (map (comp #(assoc % :turn nil) :cell) mine)
+                                                     (turn-cells turn (or (< i last-i) complete?))))
+                                   (vec rest)]))
+                              [[] (vec (sort-by :at-i between))]
+                              (map-indexed vector turns))]
+    (->> (concat cells (map (comp #(assoc % :turn nil) :cell) loose))
          (map-indexed (fn [i cell] (assoc cell :index i)))
          vec)))
 (defn trajectory-init

@@ -38,7 +38,7 @@ import { useTranslation } from "react-i18next";
 
 import { formatMillis } from "@/lib/format";
 import { KIND_HUE, LANE_KIND, type Lane } from "@/components/trajectory-colors";
-import { type TrajectoryPayload, type TrajectoryTurn, sectionsOf } from "@/lib/trajectory";
+import { type TrajectoryPayload, type TrajectoryTurn, sectionsOf, turnsOf } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -331,10 +331,7 @@ export const TrajectoryTimeline: FC<{
   const { t: tFormat } = useTranslation("format");
   /// THE SAME CUT THE LIST MAKES (`sectionsOf`): the strip may not have its own idea of
   /// which cells are in a turn, or a mark would open a row that is not where it points.
-  const turns = useMemo(
-    () => sectionsOf(payload.cells).flatMap((section) => (section.kind === "turn" ? [section.turn] : [])),
-    [payload.cells],
-  );
+  const turns = useMemo(() => turnsOf(sectionsOf(payload.cells)), [payload.cells]);
   const span = useMemo(() => spanOf(turns, t), [turns, t]);
   /// The lane identities, in drawing order, each with the `data-lane` spelling it has
   /// always had (the tool lane's is `tools`, not `tool`). The words drawn beside them come

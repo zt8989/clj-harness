@@ -420,3 +420,39 @@ Skill tdd
   比这更弱的证据不足以让账本说「这轮完了」。视图因此得容得下「只有轮头」的一轮（`sectionsOf` 末尾收口）。
 - `.worktrees/trajectory-on-the-downlink` 那条线**没动**：它还没有代码（只有 spec 与票），
   合的时候照本票的 `:cells` 来。
+
+---
+
+## 九、code review 之后（2026-09-30）
+
+两轴各跑一次（Standards / Spec）。**改掉的**：
+
+1. **`cap.reminder/first-label` 按表序找，不按行序** —— 一张 skill 正文里只要有哪一行以
+   `Instructions from: ` 开头，`kind-of` 就会把它判成 `opening`、`skill-name` 返回 nil，
+   `loaded-names` 随即失明、同一份正文每轮重注（正是 spec 自己警告过的那条路）。改成
+   **逐行问表**：第一个命中表的行就是标签行。UI 那份同名表本来就是按行序的，两端因此说同一句话。
+2. **`cells-of` 里的 `atom`** —— 在惰性管道里 `split-with @pending` + `reset!` 是读-改-写，
+   与 `docs/rules/concurrency.md`（位置要有人认领、传值不传位置）相抵。改成
+   `reduce` 把「还没落位的轮间行」当 accumulator 带着走，纯函数。
+3. **`turnsOf` 一处** —— 视图与时间线各自 `sectionsOf(...).flatMap(...)` 是两份答案；
+   收进 `lib/trajectory.ts`，两处都调它。
+4. **轮分割线真的画粗** —— `TurnHead` / `BetweenHead` 从 `border-y` 改成 `border-y-2`：
+   spec 说的是「粗分割线」，原来与行内那条细线一样粗。
+5. **前端套件里那份手写账本的轮内顺序** —— 原来写成 `context → user`（老布局），
+   改成 `user → context`，与验收单「轮内 `user` 在 `context` 之前」和真记录一致。
+
+**没改、但记在这里的**（review 点到，判定为不必改）：
+
+- **轮中途变的 system 格带 `:turn`**：`one-run` 只在 system 是那一轮**第一条**时把它提到轮外；
+  一条**续跑**的轮里字节变了，它落在轮中间、带 `:turn n`。这是有意的取舍：另一种做法是让视图在
+  轮中间断开分组（一条轮画两个 `Turn N` 头），比这更坏。真记录里这几乎不发生（提示词一场会话一条），
+  但 §五 那句「`system` 格不在任何轮的折叠里」只对**最前那条**字面成立。
+- **`ui/lib/trajectory.ts` 从 `API_BASE` 常量改成 `apiBase()` 函数**：`API_BASE` 是导入期算的常量，
+  Node 里没有 document 可解析，前端套件那条真端点用例走不通。`apiBase()` 正是
+  `lib/threads.ts` 为「套件驱动真端点」准备的函数。
+- **空 reminder 帧 → `injectionView` 返回 null**：一个框里什么都没有的块，画一张卡就是在声称
+  一次没人能核对的注入。这条规矩随票 03 一起进来，此处记一笔。
+- **文档改动超出票 07 列的文件**（`architecture.md` / `kernel.md` / `system-prompt.md` /
+  `rules/testing.md`）：那几处写着旧标签、旧 payload 的句子不改就是假的。
+- **测试里的 `turns-of` 是从账本读回旧形的适配器**（`trajectory_test.clj`）：它明说不是第二套折法，
+  只为让三十条折法断言留在原来的措辞里；账本自己的形状由另外四条用例钉住。

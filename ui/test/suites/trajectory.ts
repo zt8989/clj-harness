@@ -31,13 +31,16 @@ import {
 const ledger: readonly TrajectoryCell[] = [
   { index: 0, kind: "system", turn: null, text: "You are a coding agent.", initial: true },
   { index: 1, kind: "turn-start", turn: 1, calls: [{ index: 0, model: "scripted" }] },
+  // THE QUESTION FIRST, THEN WHAT THE RUN WAS HANDED -- the record's order, and the one the
+  // acceptance list pins (`轮内 user 在 context 之前`): the question is written when the action
+  // arrives, and the injection is derived for the call that answers it.
+  { index: 2, kind: "user", turn: 1, text: "读一下 README", id: "u1", at: 10 },
   {
-    index: 2,
+    index: 3,
     kind: "context",
     turn: 1,
     text: "<system-reminder>\nInstructions from: /h/AGENTS.md\n\nrules\n</system-reminder>",
   },
-  { index: 3, kind: "user", turn: 1, text: "读一下 README", id: "u1", at: 10 },
   { index: 4, kind: "message", turn: 1, text: "", call: 0 },
   {
     index: 5,
@@ -73,7 +76,7 @@ const cases: readonly Case[] = [
       // TURN ONE HOLDS THE QUESTION, THE INJECTION AND THE ANSWER -- AND NOT THE PROMPT.
       const turn = first.kind === "turn" ? first.turn : null;
       expect(turn?.index).toBe(1);
-      expect(turn?.cells.map((cell) => cell.kind)).toEqual(["context", "user", "message", "tool"]);
+      expect(turn?.cells.map((cell) => cell.kind)).toEqual(["user", "context", "message", "tool"]);
       expect(turn?.cells.some((cell) => cell.kind === "system")).toBe(false);
       expect(turn?.calls?.map((call) => call.model)).toEqual(["scripted"]);
 
@@ -107,7 +110,7 @@ const cases: readonly Case[] = [
       const all = rowsOf(sections);
       // EVERY ROW: the prompt, turn 1's four, the compaction, turn 2's two.
       expect(all).toHaveLength(8);
-      expect(all.some((row) => row.item === ledger[2])).toBe(true);
+      expect(all.some((row) => row.item === ledger[3])).toBe(true);
 
       const folded = rowsOf(sections, new Set([1]));
       // NOTHING OF TURN ONE IS LEFT -- the injected context included, which is the
