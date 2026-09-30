@@ -97,15 +97,17 @@
       (testing "one job, one notice: two facts, the command, and the line that reads it"
         (is (= 1 (count notices)))
         (is (= "user" (:role (first notices))) "a message like any other, like a skill body")
-        (is (= (str "<job-ended id=\"" id "\">[exit 3]</job-ended>\n"
-                    "<command>echo said-this; exit 3</command>\n"
-                    "Read what it said with job_output {\"job\": \"" id "\"}.")
+        (is (= (str "<system-reminder>\n"
+                    "Background job " id " ended: [exit 3]\n"
+                    "Command: echo said-this; exit 3\n"
+                    "Read what it said with job_output {\"job\": \"" id "\"}.\n"
+                    "</system-reminder>")
                (:content (first notices)))
             "which job, what it ran, how it went -- no tail, no record path, and where to read")
         (is (not (str/includes? (:content (first notices)) path))
             "the path is in no answer at all: `job_output` is the reader, and it asks by id")
-        (is (= 3 (count (str/split-lines (:content (first notices)))))
-            "three lines and no tail: the tag, the command, the read sentence"))
+        (is (= 5 (count (str/split-lines (:content (first notices)))))
+            "five lines and no tail: the frame, the label, the command, the read sentence, the close"))
       (testing "and it is not said twice"
         (is (= [] (jobs/take-notices! t)))))))
 
@@ -177,13 +179,15 @@
     (let [notices (jobs/take-notices! t)
           content (:content (first notices))]
       (testing "and the model is told, exactly once, in a block that says WHO"
-        ;; 逐字：同一个标签（`edge/http.clj` 的注入分类按 `<job-ended ` 认它，界面那张卡也
-        ;; 按同一个标签画），一个属性说明是人，命令照旧在自己的元素里。
-        (is (= 1 (count notices)))
-        (is (= (str "<job-ended id=\"" id "\" by=\"user\">[stopped]</job-ended>\n"
-                    "<command>sleep 30</command>\n"
+        ;; 逐字：同一副 `<system-reminder>` 框，首行是标签行（`edge/http.clj` 的注入分类按它
+        ;; 认，界面那张卡也按它画），`by: user` 一行说明是人停的，命令照旧独占一行。
+        (is (= (str "<system-reminder>\n"
+                    "Background job " id " ended: [stopped]\n"
+                    "by: user\n"
+                    "Command: sleep 30\n"
                     "A person stopped it from the pane; read what it said with"
-                    " job_output {\"job\": \"" id "\"}.")
+                    " job_output {\"job\": \"" id "\"}.\n"
+                    "</system-reminder>")
                content))
         (is (str/includes? content "A person stopped it from the pane")
             "the last line says a person did it, and not only the attribute"))
@@ -197,7 +201,7 @@
         (let [next-history (jobs/before-llm history t2)]
           (is (= 2 (count next-history)))
           (is (= history (subvec next-history 0 1)) "the history it was handed, untouched")
-          (is (str/includes? (:content (peek next-history)) "by=\"user\"")))))))
+          (is (str/includes? (:content (peek next-history)) "by: user")))))))
 
 (deftest a-persons-stop-on-a-job-that-already-ended-changes-nothing
   ;; 人按 ■ 而作业已经结束：那不是人停的，所以什么也不改 -- 记录仍是它自己的末行，条目的
@@ -213,11 +217,13 @@
         (let [notices (jobs/take-notices! t)
               content (:content (first notices))]
           (is (= 1 (count notices)))
-          (is (= (str "<job-ended id=\"" id "\">[exit 3]</job-ended>\n"
-                      "<command>echo ended-on-its-own; exit 3</command>\n"
-                      "Read what it said with job_output {\"job\": \"" id "\"}.")
+          (is (= (str "<system-reminder>\n"
+                      "Background job " id " ended: [exit 3]\n"
+                      "Command: echo ended-on-its-own; exit 3\n"
+                      "Read what it said with job_output {\"job\": \"" id "\"}.\n"
+                      "</system-reminder>")
                  content))
-          (is (not (str/includes? content "by=\"user\""))))))))
+          (is (not (str/includes? content "by: user"))))))))
 
 (deftest a-persons-stop-of-an-unknown-id-is-the-same-refusal
   ;; 人这条路由点名一个本会话没有的 id 时，出处只能是既有的那一句：别处再写一句就是同一件事
@@ -372,7 +378,7 @@
     (let [[row] (jobs/listing t)]
       (is (= command (:command row)) "the registry row is the caller's own bytes"))
     (let [[notice] (jobs/take-notices! t)]
-      (is (str/includes? (:content notice) (str "<command>" command "</command>"))
+      (is (str/includes? (:content notice) (str "Command: " command))
           "and so is the command the notice names the job by"))))
 
 (deftest the-process-going-away-takes-its-jobs-and-not-its-records
@@ -478,7 +484,7 @@
         (let [{:keys [content]} (first (jobs/take-notices! "jt-away"))]
           (is (string? content) "an ending nobody has been handed is handed over")
           (is (str/includes? (str content) "[stopped]"))
-          (is (not (str/includes? (str content) "by=\"user\""))
+          (is (not (str/includes? (str content) "by: user"))
               (str "a put-away is nobody's press: a `by=user` block would tell the model that a"
                    " person stopped a command nobody stopped by hand"))))
       (testing "the entry stays, so a reader is still answered and the id is not re-handed"

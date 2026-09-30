@@ -942,6 +942,20 @@
           (update :entries #(vec (concat (subvec % 0 at) [entry] (subvec % at))))
           (update :messages #(vec (concat (subvec % 0 at) [(:message entry)] (subvec % at))))))))
 
+(defn- numbered-group?
+  "Did the run's ONE counter buy this entry's id? -- ASK THE COUNTER'S OWNER (`ag/wire-numbered?`),
+  which is the single place that knows which spellings came off it: text, reasoning, a tool result and
+  the kernel's mid-run splice did; the edge's pre-injection cards (`-pre<i>`), a compaction's card
+  (its uuid) and a rebuilt cut-off answer (`-cut-<i>`) did not -- and every one of them folds into an
+  ordinary-looking entry, so the id is the only thing that can tell them apart.
+
+  THE ROLE IS ASKED TOO, and not as a second opinion about the counters: a REASONING entry is in
+  `:entries` by the time this runs and is counted by its own cursor (`:reasoned-n`), so counting it
+  here as well would spend its number twice."
+  [e]
+  (and (contains? #{"assistant" "tool"} (:role (:message e)))
+       (ag/wire-numbered? (:message e))))
+
 (defn- frame-groups-before
   "How many GROUPS this run's frames had built when they built the message with ID -- the assistant
   messages, the tool results AND the injected cards, counted from where the run began (`:run-from`).
@@ -951,18 +965,28 @@
   alike), so a run that had a card spliced in before its first call spells its ids `ctx1, r1, m2,
   t3, r4` -- the thought of the SECOND call of two is `r4`, not `r1`. THE CALL INDEX ALONE WOULD NOT
   DO: a round with two tool calls spends two more numbers than a round with none.
-  THE CARD IS COUNTED even though it is not a message the model returned -- the `string?` filter
+  A CARD IS COUNTED even though it is not a message the model returned -- the `string?` filter
   `flush-group` uses for `:model-ids` is about which ROWS pair with which messages, not about which
   groups spent a number. Measured on a real log (`.scratch/reasoning-out-of-the-record/evidence/`):
   with cards left out, 164 rebuilt thoughts wore an id one off the wire's, in the runs that had
   cards -- and the fixtures, which had none, all passed. The frames this run DID record are the
   evidence, and reading the number off them is what keeps a rebuilt conversation's id equal to the one
   the client was handed: an id is what a client keys a message by.
+  THE CARDS IT COUNTS ARE THE ONES THE COUNTER BOUGHT (`ag/wire-numbered?`): the KERNEL's mid-run
+  splice (`-ctx<n>`) yes; a card minted OUTSIDE `:n` -- the edge's pre-injection (`-pre<i>`), a
+  compaction's card (a uuid, `compacted-frame`), a rebuilt cut-off answer (`-cut-<i>`) -- no.
+  MISSING THAT HALF WAS NOT SMALL:
+  on the real thread `62f30024-…` every thought of one long run came out one too high (`r1, r5, r9 …`
+  where the wire said `r0, r4, r8 …`, then `r875` where the wire said `r874`) -- 359 of that
+  conversation's 1 988 entries -- so `harness.edge.sessions/number-entries!`, which matches a run's
+  entries to these ids BY NAME, named none of them and the whole run fell back to one line (`land!`).
+  A conversation whose entries do not carry the line they arrived in cannot be compacted, and THAT is
+  what made one session compact four times in two and a half minutes (`.scratch/entry-numbering`).
 
   THE REASONING GROUPS ARE THE ONE KIND NOT IN `:entries` for a NEW record -- the frames are not on
   it -- so those are added by the caller from the rows it has already given back (`:reasoned-n`)."
   [acc id]
-  (count (filter (fn [e] (contains? #{"assistant" "tool"} (:role (:message e))))
+  (count (filter numbered-group?
                  (take-while #(not= id (:id (:message %)))
                              (subvec (:entries acc) (long (or (:run-from acc) 0)))))))
 (defn- attach-reasoning

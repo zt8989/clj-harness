@@ -1,9 +1,10 @@
 {
   "kind": {
     "system": "系统",
+    "compacted": "压缩",
     "context": "上下文",
     "user": "用户",
-    "assistant": "助手",
+    "message": "助手",
     "tool": "工具"
   },
   "row": {
@@ -17,6 +18,16 @@
     "count_other": "{{count}} 轮",
     "items": "{{n}} 个条目",
     "calls": "{{n}} 次模型调用"
+  },
+  "between": {
+    "label": "轮与轮之间"
+  },
+  "summary": {
+    "turn": "{{items}} 个条目 · {{calls}} 次模型调用"
+  },
+  "toolbar": {
+    "collapseTurns": "折起全部轮",
+    "expandTurns": "展开全部轮"
   },
   "call": {
     "label": "第 {{n}} 次模型调用",
@@ -33,6 +44,8 @@
     "injected": "注入",
     "by": "来自",
     "arrived": "到达",
+    "written": "写入",
+    "messages": "折叠条数",
     "id": "id",
     "model": "模型",
     "took": "耗时",

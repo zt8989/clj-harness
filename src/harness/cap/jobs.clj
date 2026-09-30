@@ -70,7 +70,8 @@
             [clojure.string :as str]
             [harness.infra.home :as home]
             [harness.infra.log :as log]
-            [harness.infra.shell :as shell])
+            [harness.infra.shell :as shell]
+            [harness.cap.reminder :as reminder])
   (:import [java.io Writer]
            [java.nio.charset StandardCharsets]
            [java.util.concurrent TimeUnit]
@@ -1383,18 +1384,20 @@
   `job_kill` hand the reader over instead, and `job_output` is where a path comes from), so
   the line below names the reader instead.
 
-  THE TAG IS THE FRAME the model reads and the anchor a reader can grep for, exactly as
-  `<skill name=…>` and `<instructions path=…>` are for their own blocks. What rides on
-  it is the id and the line the record ended on -- two facts, nothing about where
+  THE FIRST LINE IS BOTH FRAME AND ANCHOR: `Background job <id> ended: <status>`. It is
+  the plain-text label line inside the `<system-reminder>` (`harness.cap.reminder`), and
+  it is what `edge/http.clj` classifies the injected block by and what the pane's card
+  reads its title from -- so the id and the ending are on it, and nothing about where
   anything is.
 
   THE COMMAND IS THE ONLY THING THAT SAYS WHICH JOB THIS IS, and that is why it is here
   although it is also in the history above: a notice can arrive many turns after the
   call, past whatever the model still holds, and `j1` on its own identifies nothing --
   the model would have to ask `job_output` (or guess) before it could even tell whether
-  this is the build or the test suite. It rides inside its own element rather than as an
-  attribute, because a command is arbitrary text with quotes in it and escaping is the
-  one thing a tag attribute would force on us. It is NOT clipped: a command the model
+  this is the build or the test suite. A command is arbitrary text with quotes in it,
+  which is exactly why it is a LINE OF ITS OWN (`Command: <command>`) rather than an
+  attribute that would have to be escaped. It is NOT clipped: a command the model
+  cannot recognise is a reminder that failed, and these are the model's own bytes.
   cannot recognise is a reminder that failed, and these are the model's own bytes.
 
   THE SENTENCE IS NO LONGER AN EXCEPTION to 'answers carry facts, descriptions carry
@@ -1404,15 +1407,11 @@
   the reminder owes it is where to look. It names the
   id a second time so the line is usable as written, and it is one line.
 
-  WHO STOPPED IT, WHEN IT WAS A PERSON. The same block carries a `by` attribute
-  whose value is `user` when the ending came from a person pressing stop in the pane --
-  the entry's `:stopped-by`, which only a person's stop ever writes (`stop!`) -- and
-  its sentence says so. THE TAG DOES NOT CHANGE: `job-ended` is the prefix
-  `edge/http.clj` classifies an injected
-  block by and what the pane's card reads its title from, so a second tag would be two
-  places to teach about one fact. The WHO is an ATTRIBUTE, and that is the same
-  judgement the command follows one line below: a tag is a fixed shape, and a command
-  -- or a name -- is arbitrary text that would then need escaping."
+  WHO STOPPED IT, WHEN IT WAS A PERSON. A `by: user` line rides the block when the
+  ending came from a person pressing stop in the pane -- the entry's `:stopped-by`,
+  which only a person's stop ever writes (`stop!`) -- and its sentence says so. The
+  label line does not change: the id and the ending are already on it, and the WHO is
+  one more fact, not a second kind of block."
   [job]
   (let [ending  (or (ending-of (:path job)) "[exit ?]")
         ;; ONE SPELLING reaches the wire: the entry's mark is `:user`, and the
@@ -1420,13 +1419,14 @@
         ;; step with the entry.
         person? (= :user (:stopped-by job))]
     {:role "user"
-     :content (str "<job-ended id=\"" (:id job) "\"" (when person? " by=\"user\"")
-                   ">" ending "</job-ended>\n"
-                   "<command>" (:command job) "</command>\n"
-                   (if person?
-                     (str "A person stopped it from the pane; read what it said with"
-                          " job_output {\"job\": \"" (:id job) "\"}.")
-                     (str "Read what it said with job_output {\"job\": \"" (:id job) "\"}.")))}))
+     :content (reminder/wrap
+               (concat [(str "Background job " (:id job) " ended: " ending)]
+                       (when person? ["by: user"])
+                       [(str "Command: " (:command job))
+                        (if person?
+                          (str "A person stopped it from the pane; read what it said with"
+                               " job_output {\"job\": \"" (:id job) "\"}.")
+                          (str "Read what it said with job_output {\"job\": \"" (:id job) "\"}."))]))}))
 
 (defn take-notices!
   "The messages that tell THREAD-ID's model about jobs that have finished and whose
@@ -1437,7 +1437,7 @@
   first is the one that counts; a model that asked is not told again.
 
   THE MARK IS THE ONLY MEMORY THIS CAN HAVE. A skill body can be recognised in the
-  history -- `<skill name=…>` is part of the conversation, because `sessions/model-view`
+  history -- its `Skill <name>` label line is part of the conversation, because `sessions/model-view`
   hands its bytes back on every later run -- so that derivation is idempotent for free. A notice has no such anchor:
   the client never holds one (it is computed per call and sent to nobody), so 'has this
   been said' lives here, in the registry: process-local, per session, the same lifetime

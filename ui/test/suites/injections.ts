@@ -30,7 +30,8 @@ import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { type Case, type Suite } from "../e2e";
-import { isCardOnly, keepCardParts } from "../../src/lib/card-parts";
+import { isCardOnly, isKeptCardPart, keepCardParts } from "../../src/lib/card-parts";
+import { COMPACTION_PART } from "../../src/lib/compactions";
 import {
   INJECTION_PART,
   injectionView,
@@ -101,6 +102,65 @@ const cases: readonly Case[] = [
         "project",
       );
       expect(injectionView({ role: "user", text: "plain words" })?.title).toBe("plain words");
+
+      // AND THE SHAPE EVERY INJECTION WEARS NOW (`harness.cap.reminder`): one
+      // `<system-reminder>` frame holding plain text, whose FIRST LINE says what the block
+      // is. The title is that line and not the frame -- otherwise every card in the pane
+      // would read `system-reminder`.
+      const instructions = injectionView({
+        role: "user",
+        text:
+          "<system-reminder>\n" +
+          "Instructions from: /h/AGENTS.md\n\n" +
+          "# 全局 AGENTS.md\n" +
+          "</system-reminder>",
+      });
+      expect(instructions?.title).toBe("Instructions from: /h/AGENTS.md");
+      expect(instructions?.preview).toBe("Instructions from: /h/AGENTS.md");
+
+      expect(
+        injectionView({
+          role: "user",
+          text: "<system-reminder>\nSkill tdd\n\nred green refactor\n</system-reminder>",
+        })?.title,
+      ).toBe("Skill tdd");
+      expect(
+        injectionView({
+          role: "user",
+          text:
+            "<system-reminder>\nBackground job j1 ended: [exit 0]\nCommand: make\n" +
+            'Read what it said with job_output {"job": "j1"}.\n</system-reminder>',
+        })?.title,
+      ).toBe("Background job j1 ended: [exit 0]");
+
+      // A frame with nothing but the frame says nothing, and draws nothing.
+      expect(injectionView({ role: "user", text: "<system-reminder>\n</system-reminder>" })).toBeNull();
+    },
+  },
+  {
+    name: "a-merged-instruction-block-is-titled-by-its-first-file",
+    run: async () => {
+      // THE ONE BLOCK SEVERAL FILES BECOME (`.scratch/system-reminder` 决定 4): it opens with
+      // dsh's intro SENTENCE, and the title is the first `Instructions from:` line rather than
+      // that paragraph. Reading 'the first line inside the frame' would title the card with a
+      // paragraph -- which is what the label table is for.
+      const merged = [
+        "<system-reminder>",
+        "The following workspace instructions may be relevant to your work. Use them as guidance when applicable.",
+        "",
+        "Instructions from: /Users/me/AGENTS.md",
+        "",
+        "# 全局 AGENTS.md",
+        "",
+        "Instructions from: /p/AGENTS.md",
+        "",
+        "# AGENTS.md",
+        "</system-reminder>",
+      ].join("\n");
+      const view = injectionView({ role: "user", text: merged });
+      expect(view?.title).toBe("Instructions from: /Users/me/AGENTS.md");
+      expect(view?.preview).toBe("Instructions from: /Users/me/AGENTS.md");
+      expect(view?.bytes).toBe(new TextEncoder().encode(merged).length);
     },
   },
   {
@@ -352,6 +412,27 @@ const cases: readonly Case[] = [
       // would be swallowed by a test that only asked "is this a data part".
       expect(isCardOnly([{ type: "file", name: INJECTION_PART }])).toBe(false);
       expect(isCardOnly([{ type: "image", name: INJECTION_PART }])).toBe(false);
+    },
+  },
+  {
+    name: "only-a-compaction-card-survives-its-turn-s-fold",
+    run: async () => {
+      const injection = { type: "data", name: INJECTION_PART, data: {} };
+      const compaction = { type: "data", name: COMPACTION_PART, data: {} };
+
+      // A FOLDED TURN PUTS ITS MATERIAL AWAY: an injected context is something the turn was
+      // handed, so it goes with the steps (`turn-steps.tsx` says what that means).
+      expect(isKeptCardPart(injection)).toBe(false);
+
+      // THE COMPACTION CARD IS THE BOUNDARY where history stopped being messages, so it
+      // belongs on screen however the turn around it is folded (`.scratch/compaction-frames`).
+      expect(isKeptCardPart(compaction)).toBe(true);
+
+      // AND A KEYS-OFF TEST IS STILL AGAINST THE SAME NAMES: this narrows `isCardPart`
+      // rather than opening a second question about data parts.
+      expect(isKeptCardPart({ type: "text", text: "x" })).toBe(false);
+      expect(isKeptCardPart(null)).toBe(false);
+      expect(isKeptCardPart("not a part")).toBe(false);
     },
   },
 ];

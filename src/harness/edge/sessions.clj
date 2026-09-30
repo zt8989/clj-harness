@@ -201,6 +201,27 @@
 (def watchers session/watchers)
 (def model-view replay/model-view)
 
+(defn model-nodes
+  "THREAD-ID's model-facing surface AS NODES `{:id :message}`, or nil when this process does not
+  hold the session.
+
+  THE LIVE READING OF `replay/model-nodes`, and it exists for ONE caller: a compaction's plan
+  (`harness.edge.compaction/plan`). The trigger measures the array the model is ACTUALLY handed
+  (`harness.edge.pressure/live-surface`), and the record's own fold is not that array -- it drops
+  every run's injections except the last one -- so a plan over the record fold can answer a head
+  that is only the previous summary and relieve nothing (`.scratch/compaction-shape` ticket 05).
+  Handing the plan THIS array makes the two halves of a compaction measure one thing.
+
+  IT IS THE SAME FOLD THE SESSION ITSELF HANDS A RUN: `(replay/model-nodes (display ..) the
+  session's own compactions and prunes)` -- which is exactly what `messages` is, plus the ids
+  `:shadowed` is made of. The IDs are the record line numbers the entries arrived in, so a head
+  planned over this array names nodes the RECORD's fold also has."
+  [thread-id]
+  (when-some [e (session/live-entry thread-id)]
+    (replay/model-nodes (session/display thread-id)
+                        (:compactions e)
+                        (:prunes e))))
+
 (def touch! session/touch!)
 (def live-entry session/live-entry)
 (def fold-value session/fold-value)

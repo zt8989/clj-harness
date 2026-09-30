@@ -98,11 +98,12 @@
 
 (defn- trajectory-of
   "The trajectory route as the CLIENT reads it: NDJSON (ticket 06 of
-  `.scratch/events-mux-and-host`) -- the first line is the header, every line after it is one
-  turn. READS TURN-COUNT TURNS AND CLOSES THE STREAM: this process HOLDS the subagent's
-  session, and the route keeps the connection open for pushes then (ticket 13), so a reader
-  that waited for the body to end would wait forever."
-  [path turn-count]
+  `.scratch/events-mux-and-host`) -- the first line is the header, and every line after it is ONE
+  BATCH of cells, `{:from :cells}`, spliced at its `:from` (the client half of the rule
+  `harness.edge.trajectory/drift` states). READS UNTIL TURNS TURNS HAVE CLOSED AND CLOSES THE
+  STREAM: this process HOLDS the subagent's session, and the route keeps the connection open for
+  pushes then (ticket 13), so a reader that waited for the body to end would wait forever."
+  [path turns]
   (let [req  (-> (HttpRequest/newBuilder (URI/create (str "http://127.0.0.1:" *port* path)))
                  (.GET)
                  (.build))
@@ -113,13 +114,16 @@
     (try
       (let [line*  (fn [] (some-> (.readLine rd) str/trim not-empty))
             header (json/read-str (or (line*) "{}") :key-fn keyword)
-            turns  (loop [acc [] left turn-count]
-                     (if (zero? left)
+            closed (fn [acc] (count (filter #(= "turn-end" (:kind %)) acc)))
+            cells  (loop [acc [] left 200]
+                     (if (or (zero? left) (>= (closed acc) turns))
                        acc
                        (if-some [line (line*)]
-                         (recur (conj acc (json/read-str line :key-fn keyword)) (dec left))
+                         (let [batch (json/read-str line :key-fn keyword)
+                               from  (min (:from batch) (count acc))]
+                           (recur (into (subvec acc 0 from) (:cells batch)) (dec left)))
                          acc)))]
-        (assoc header :turns (vec turns)))
+        (assoc header :cells (vec cells)))
       (finally (.close in)))))
 
 (defn- frames
@@ -551,7 +555,7 @@
                  stem  (read-json (api-call :post (str "/api/threads/" thread "/rebuild") "{}"))]
              (testing "the trajectory is its own"
                (is (= child (:threadId mine)))
-               (is (seq (:turns mine))))
+               (is (seq (:cells mine))))
              (testing "and the rebuild hands back ITS conversation, not its parent's"
                ;; BOTH READERS UNCHANGED: rebuild folds the seed and the frames, and a
                ;; subagent's run records both -- see harness.edge.http/run-subagent!,

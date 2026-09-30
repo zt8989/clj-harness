@@ -465,7 +465,10 @@
       ;; (`context-entry`), which the edge puts in the conversation ONCE -- so the
       ;; converter here is being handed a conversation that already begins with it.
       (is (= ["system" "user" "user"] (mapv :role sent)))
-      (is (= {:role "user" :content "- repo: clj-harness"} (last sent)))
+      (is (= {:role "user"
+              :content (str "<system-reminder>\nSession context\n- repo: clj-harness\n"
+                              "</system-reminder>")}
+             (last sent)))
       (is (nil? (:id (last sent)))
           "and the id it enters the conversation under is the conversation's business:
            a message's AG-UI id never reaches a vendor"))

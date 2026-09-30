@@ -22,7 +22,7 @@ export type Lane = "input" | "model" | "tool";
 /// cannot end up speaking a different colour language than the list beneath it.
 export const LANE_KIND: Record<Lane, TrajectoryItem["kind"]> = {
   input: "user",
-  model: "assistant",
+  model: "message",
   tool: "tool",
 };
 
@@ -35,9 +35,10 @@ export const KIND_HUE: Record<TrajectoryItem["kind"], { chip: string; bar: strin
     bar: "bg-emerald-500/70",
   },
   user: { chip: "bg-sky-500/10 text-sky-600 dark:text-sky-400", bar: "bg-sky-500/70" },
-  assistant: {
+  message: {
     chip: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
     bar: "bg-violet-500/70",
   },
   tool: { chip: "bg-amber-500/10 text-amber-600 dark:text-amber-400", bar: "bg-amber-500/70" },
+  compacted: { chip: "bg-slate-500/10 text-slate-600 dark:text-slate-400", bar: "bg-slate-500/70" },
 };

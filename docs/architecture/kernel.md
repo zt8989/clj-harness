@@ -99,11 +99,12 @@ drive! :
   [skills-and-instructions](skills-and-instructions.md#技能正文的派生注入只剩人的那一半)）；
   模型那条路不在这里——`skill` 的结果就是正文，它是一次普通的工具结果。所以每轮施加不需要任何簿记。
 - **后台作业的结束**（`harness.cap.jobs/before-llm`）：一条没人等的命令结束了，它的结局就作为一条
-  `<job-ended id="…">[exit N]</job-ended>` + `<command>…</command>` + 一行「用 `job_output` 读它」
-  的尾随 user 消息摆在下一次调用面前——**两样事实（哪条作业、怎么结束的）与它跑的那条命令，
+  尾随 user 消息摆在下一次调用面前，**框在同一副 `<system-reminder>` 里**（内层是纯文本：首行
+  `Background job <id> ended: [exit N]`，人从任务视图停的那条多一行 `by: user`，然后 `Command: …`，
+  再一行「用 `job_output` 读它」）——**两样事实（哪条作业、怎么结束的）与它跑的那条命令，
   与记录多大无关**；命令在那儿是因为**光有 `j1` 认不出是哪个作业**；**这不是推送**（不唤醒、不新起 run），
   而且**只说一次**。它与人的 `/name` 要的正文的唯一不同是幂等的来源：那一份靠**它自己写进会话的那条
-  `<skill name="…">` user 消息**（服务端一直持有它，派生扫的就是它），通知**没有那个锚**——它就是
+  `Skill <名字>` reminder**（服务端一直持有它，派生扫的就是它），通知**没有那个锚**——它就是
   那条每轮现算的派生消息，而模型看到的历史里没有它（卡片只给屏幕看，见
   [skills-and-instructions](skills-and-instructions.md#看得见但仍然不是会话的一部分)），所以「说过了」记在
   **作业注册表**里（进程内、按会话、与作业同寿命）。模型自己 `job_output` / `job_kill` 拿到过结局的

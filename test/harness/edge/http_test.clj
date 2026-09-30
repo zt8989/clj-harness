@@ -621,7 +621,7 @@
                                           (filter #(and (= "message" (replay/kind %))
                                                         (= "user" (get-in (replay/payload %) [:role]))
                                                         (str/includes? (str (get-in (replay/payload %) [:content]))
-                                                                       "<job-ended"))
+                                                                       "Background job "))
                                                   lines))]
                        (testing "the model is sent the ending, without anybody asking"
                          (let [sent (notices first-lines)]
@@ -630,7 +630,7 @@
                                               "[exit 0]")
                                "how it went -- and nothing of what it said")
                            (is (str/includes? (str (get-in (replay/payload (first sent)) [:content]))
-                                              (str "id=\"" id "\"")))))
+                                              (str "Background job " id " ended")))))
                        (testing "and the client is never told"
                          ;; The same judgement the system message gets: it is the server's
                          ;; injection, so it is in the record and in no frame.
@@ -2277,7 +2277,8 @@
          (is (= ["u1" "session-context"]
                 (mapv :id (take 2 messages)))
              "the context rides in the conversation, behind the client's own message")
-         (is (= "- repo: x" (:content (second messages))))
+         (is (= (str "<system-reminder>\nSession context\n- repo: x\n</system-reminder>")
+                (:content (second messages))))
          (is (= 1 (count (filter #(= "session-context" (:id %)) messages))))))
      (testing "and no later action adds a second one, however loudly it asks"
        (post-run "born-with-context" {:append  [{:id "u2" :role "user" :content "two"}]
@@ -3436,7 +3437,7 @@
            (let [notices (jobs/take-notices! t)
                  content (:content (first notices))]
              (is (= 1 (count notices)))
-             (is (str/includes? content "by=\"user\""))
+             (is (str/includes? content "by: user"))
              (is (str/includes? content "A person stopped it from the pane"))
              (is (str/includes? content "[stopped]"))
              (is (= [] (jobs/take-notices! t)) "once")))
@@ -3455,7 +3456,7 @@
              (testing "and the notice it is owed is the ordinary one, saying nothing about a person"
                (let [content (:content (first (jobs/take-notices! t)))]
                  (is (str/includes? content "[exit 4]"))
-                 (is (not (str/includes? content "by=\"user\"")))))))
+                 (is (not (str/includes? content "by: user")))))))
          (testing "a body that is not JSON, or names no job, is a 400 -- not a refusal about a job"
            (let [bad (api-call :post (jobs-url t) "not json")
                  none (api-call :post (jobs-url t) "{}")]
@@ -4445,10 +4446,11 @@
                     "the person's own words open the conversation")
                 (is (str/includes? (second user-texts) "STANDING RULE")
                     "then the OS home's rules")
-                (is (str/includes? (nth user-texts 2) "PROJECT RULE")
+                (is (str/includes? (second user-texts) "PROJECT RULE")
                     "then the project's -- the more specific statement is the nearer one")
-                (is (str/starts-with? (nth user-texts 3) "<skills>"))
-                (is (str/includes? (nth user-texts 3) "- alpha: alpha does a thing")
+                (is (str/starts-with? (nth user-texts 2) "<system-reminder>"))
+                (is (str/includes? (nth user-texts 2) "Available skills"))
+                (is (str/includes? (nth user-texts 2) "- alpha: alpha does a thing")
                     "and the catalog is the last thing the opening says")))
 
            (testing "loading it mid-run puts the BODY into the conversation -- as the tool result"
@@ -4460,7 +4462,7 @@
                                          lines))]
                (is (some #(str/includes? % "ALPHA BODY") results))
                (is (some #(str/includes? % "is the skill's directory") results))
-               (is (not-any? #(str/starts-with? % "<skill name=") texts)
+               (is (not-any? #(str/starts-with? % "<system-reminder>\nSkill ") texts)
                    "and no message was spliced beside it")))
 
            (testing "the opening is on the wire TOO, as the CONVERSATION this run wrote"
@@ -4489,16 +4491,17 @@
                (is (empty? cards)
                    "no CUSTOM card at all: the body rode the tool result, so this run derived nothing to draw")
                (is (some? snapshot) "and the birth's opening rides as a snapshot")
-               (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
+               (is (= ["session-opening-0" "session-opening-1"]
                       (mapv :id opening))
                    "one message per entry, under the entry's OWN id, in the order the model read them")
                (is (some #(= "看看这个项目" (:content %))
                          (filter #(= "user" (:role %)) messages))
                    "and the person's own message is in it, in front of the opening")
                (is (str/includes? (text-of (first opening)) "STANDING RULE"))
-               (is (str/includes? (text-of (nth opening 1)) "PROJECT RULE"))
-               (is (str/starts-with? (text-of (nth opening 2)) "<skills>"))
-               (is (str/includes? (text-of (nth opening 2)) "- alpha: alpha does a thing")
+               (is (str/includes? (text-of (first opening)) "PROJECT RULE"))
+               (is (str/starts-with? (text-of (nth opening 1)) "<system-reminder>"))
+               (is (str/includes? (text-of (nth opening 1)) "Available skills"))
+               (is (str/includes? (text-of (nth opening 1)) "- alpha: alpha does a thing")
                    "the text is the same bytes the model read -- the other reading of one entry")))
 
             (testing "while the opening is the SESSION's own -- one entry per block, card and all"
@@ -4509,9 +4512,9 @@
               (let [messages (:messages (read-json
                                          (api-call :get "/api/threads/it-skills/sofar" nil)))
                     opening  (filterv ag/opening-entry? messages)]
-                (is (= 3 (count opening))
-                    "the two instruction files and the catalog are the session's opening")
-                (is (= ["session-opening-0" "session-opening-1" "session-opening-2"]
+                (is (= 2 (count opening))
+                    "the merged instruction block and the catalog are the session's opening")
+                (is (= ["session-opening-0" "session-opening-1"]
                        (mapv :id opening)))
                 (is (every? #(= "injected-context" (get-in % [:content 0 :name])) opening))
                 (is (str/includes? (str (get-in (first opening) [:content 0 :data :text]))
@@ -4684,7 +4687,7 @@
 
            (testing "the body is a USER message in the run's record, right after the ask"
              (is (some #(and (str/includes? % "ALPHA BODY")
-                             (str/starts-with? % "<skill name=\"alpha\">"))
+                             (str/starts-with? % "<system-reminder>\nSkill alpha\n"))
                        texts)))
 
             (testing "and it is a CARD -- one CUSTOM frame, carrying exactly those bytes"
@@ -4709,7 +4712,7 @@
                     opening  (filterv #(str/starts-with? (str (:id %)) "session-opening-")
                                       (:messages snapshot))
                     texts    (mapv #(str (get-in % [:value :text])) derived)
-                    body     (first (filter #(str/starts-with? % "<skill name=\"alpha\">")
+                    body     (first (filter #(str/starts-with? % "<system-reminder>\nSkill alpha\n")
                                             texts))]
                 (is (= 1 (count derived))
                     "the body the person asked for -- and nothing else this run derived")
@@ -4720,7 +4723,7 @@
                 (is (str/starts-with? (if (sequential? (:content (first opening)))
                                         (str/join "\n" (keep :text (:content (first opening))))
                                         (str (:content (first opening))))
-                                      "<skills>"))))
+                                      "<system-reminder>"))))
 
             (testing "and no OTHER frame carries it -- the card is the only way out"
               (let [others  (remove #(and (= "CUSTOM" (:type %))
@@ -4728,7 +4731,7 @@
                                     frames)
                     as-text (json/write-str others)]
                 (is (not (str/includes? as-text "ALPHA BODY")))
-                (is (not (str/includes? as-text "<skill name=")))))
+                (is (not (str/includes? as-text "<system-reminder>\nSkill ")))))
 
            (testing "no skill tool call happened -- nothing asked the model for anything"
              (is (not-any? #(= "skill" (:toolCallName %))
@@ -4789,7 +4792,7 @@
                text-of (fn [r] (str (get-in (replay/payload r) [:content])))
                body?   (fn [r] (and (= "message" (replay/kind r))
                                     (= "user" (get-in (replay/payload r) [:role]))
-                                    (str/starts-with? (text-of r) "<skill name=\"alpha\">")))
+                                    (str/starts-with? (text-of r) "<system-reminder>\nSkill alpha\n")))
                input?  (fn [r] (and (= "message" (replay/kind r)) (= "client" (:source r))))
                event?  (fn [r] (= "event" (replay/kind r)))
                i1      (first (keep-indexed (fn [i r] (when (input? r) i)) records))
@@ -4825,19 +4828,25 @@
              ;; the session's opening -- here the catalog -- and the body the ask pulled
              ;; in, both of them as context. And the SECOND turn carries no context: the
              ;; body is history by then, injected once rather than re-shown.
-             (let [turns (:turns (trajectory/records->trajectory (vec records)))
-                   ctx   (fn [turn] (filter #(= "context" (:kind %)) (:items turn)))]
-               (is (= 2 (count turns)))
-               (is (= ["system" "user" "context" "context" "assistant"]
-                      (mapv :kind (:items (first turns))))
-                   "the ask, then the two blocks the model read behind it")
-               (is (some #(str/includes? (str (:text %)) "<skills>") (ctx (first turns)))
+             (let [cells (:cells (trajectory/records->trajectory (vec records)))
+                   of    (fn [turn] (filter #(= turn (:turn %)) cells))
+                   ctx   (fn [turn] (filter #(= "context" (:kind %)) (of turn)))
+                   ;; the two boundary cells are the cut rather than content, so they are
+                   ;; not part of what a turn CARRIES
+                   kinds (fn [turn] (mapv :kind (remove #(contains? #{"turn-start" "turn-end"} (:kind %))
+                                                        (of turn))))]
+               (is (= 2 (count (filter #(= "turn-start" (:kind %)) cells))))
+               (is (= ["system" "turn-start" "user" "context" "context" "message" "turn-end"]
+                      (mapv :kind (take 7 cells)))
+                   "the prompt stands OUTSIDE the turn it was handed to, then the ask and the two
+                    blocks the model read behind it")
+               (is (some #(str/includes? (str (:text %)) "Available skills") (ctx 1))
                    "the catalog")
-               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx (first turns)))
+               (is (some #(str/includes? (str (:text %)) "ALPHA BODY") (ctx 1))
                    "the body the ask pulled in, both of them as the bytes they are")
-               (is (every? #(nil? (:source %)) (mapcat ctx turns))
+               (is (every? #(nil? (:source %)) (mapcat ctx [1 2]))
                    "and neither of them claims to have come from a place")
-               (is (= ["user" "assistant"] (mapv :kind (:items (second turns))))
+               (is (= ["user" "message"] (kinds 2))
                    "no context this run did not carry -- and the client's own message is not
                     drawn as one instead"))))))
       (finally

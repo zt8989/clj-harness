@@ -151,39 +151,40 @@
     (spit! (str f) content)
     (str f)))
 
-(deftest each-file-becomes-one-user-message-tagged-with-its-path
+(deftest every-instruction-file-lands-in-one-reminder
   (let [proj  (tmp-project! "gather")
         _     (project/bind! "pr-5" proj)
         u     (user-agents)
         p     (project-agents proj "project rules\n")
-        msgs  (preamble/messages (preamble/gather {:files [u p]}))]
-    (testing "one message per file, both user-side"
-      (is (= 2 (count msgs)))
-      (is (every? #(= "user" (:role %)) msgs)))
+        msgs  (preamble/messages (preamble/gather {:files [u p]}))
+        body  (:content (first msgs))]
+    (testing "ONE message for every file -- that is what merging them means"
+      (is (= 1 (count msgs)))
+      (is (= "user" (:role (first msgs)))))
 
-    (testing "the tag carries the ABSOLUTE path, so the model can see who said what"
-      (is (= (str "<instructions path=\"" u "\">\nuser rules\n</instructions>")
-             (:content (first msgs))))
-      (is (str/includes? (:content (second msgs)) (str "path=\"" p "\""))))
+    (testing "it is a <system-reminder>, and nothing inside it is an XML element"
+      (is (str/starts-with? body "<system-reminder>\n"))
+      (is (str/ends-with? body "\n</system-reminder>"))
+      (is (not (str/includes? body "<instructions"))))
+
+    (testing "each file is its own section, headed by the ABSOLUTE path on a plain line"
+      (is (str/includes? body (str "Instructions from: " u)))
+      (is (str/includes? body (str "Instructions from: " p))))
 
     (testing "and the order is the order given -- global first, project second"
-      (is (str/includes? (:content (first msgs)) "user rules"))
-      (is (str/includes? (:content (second msgs)) "project rules")))
+      (is (< (.indexOf body "user rules") (.indexOf body "project rules"))))
 
-    (testing "a quote in the path cannot break out of the attribute"
-      ;; ASKED OF THE RENDERER, NOT OF THE FILESYSTEM. The rule belongs to the tag a
-      ;; path is interpolated into, and Windows cannot spell a filename holding a `"`
-      ;; at all -- a case that had to create one would test the escaping only where
-      ;; the platform allows such a name, and would fail on Windows with a
-      ;; FileNotFoundException that says nothing about escaping. `messages` is a pure
-      ;; function of the gathered map, so it is handed the path directly.
-      (let [weird   (str proj "/we\"ird.md")
-            content (:content (first (preamble/messages {:instructions [{:path weird
-                                                                         :content "x"}]})))]
-        (is (str/includes? content "path=\"") "the tag still carries an attribute")
-        (is (str/includes? content "&quot;") "and the path's own quote was escaped")
-        (is (= 2 (count (filter #{\"} content)))
-            "so exactly the attribute's two quotes are raw, and none leaked in")))))
+    (testing "a quote in a path is carried verbatim -- there is no attribute to escape out of"
+      ;; ASKED OF THE RENDERER, NOT OF THE FILESYSTEM: the old `<instructions path=…>` tag
+      ;; forced an attribute and therefore escaping, and the rule being pinned is that the
+      ;; label LINE has neither. `messages` is a pure function of the gathered map, so it
+      ;; is handed the path directly -- Windows cannot spell a filename holding a `"` at
+      ;; all, and creating one would test escaping only where the platform allows it.
+      (let [weird (str proj "/we\"ird.md")
+            text  (:content (first (preamble/messages {:instructions [{:path weird
+                                                                     :content "x"}]})))]
+        (is (str/includes? text (str "Instructions from: " weird)))
+        (is (not (str/includes? text "&quot;")))))))
 
 (deftest missing-and-empty-files-are-skipped-with-a-reason
   (let [proj    (tmp-project! "skip")
@@ -232,11 +233,13 @@
 (deftest the-report-sizes-what-was-actually-injected
   (let [proj (tmp-project! "report")
         f    (spit! (str proj "/AGENTS.md") "  trimmed  \n")]
-    (let [g (preamble/gather {:files [f]})]
-      (testing "the count is the injected text, not the file's byte size"
-        (is (= [f] (mapv :path (:instructions (preamble/report g)))))
-        (is (= [(count "trimmed")] (mapv :chars (:instructions (preamble/report g)))))
-        (is (= (count "trimmed") (count (:content (first (:instructions g))))))))))
+    (let [g       (preamble/gather {:files [f]})
+          message (:content (first (preamble/messages g)))
+          report  (preamble/report g)]
+      (testing "the file is named, and the count is the one block that was injected"
+        (is (= [f] (get-in report [:instructions :paths])))
+        (is (= (count message) (get-in report [:instructions :chars])))
+        (is (str/includes? message "trimmed"))))))
 
 (deftest the-catalog-goes-last-of-the-opening-blocks
   (let [proj  (tmp-project! "order")
@@ -250,19 +253,20 @@
                 r)]
     (try
       (let [msgs (preamble/messages (preamble/gather {:files [u p] :roots [root]}))]
-        (testing "rules first, then the menu of what else is available"
-          (is (= 3 (count msgs)))
+        (testing "the merged instruction block first, then the menu of what else is available"
+          (is (= 2 (count msgs)))
           (is (str/includes? (:content (first msgs)) "user rules"))
-          (is (str/includes? (:content (second msgs)) "project rules"))
-          (is (str/starts-with? (:content (nth msgs 2)) "<skills>")))
+          (is (str/includes? (:content (first msgs)) "project rules"))
+          (is (str/starts-with? (:content (second msgs)) "<system-reminder>"))
+          (is (str/includes? (:content (second msgs)) "Available skills")))
 
         (testing "and the catalog body never leaks the skill's text"
-          (is (str/includes? (:content (nth msgs 2)) "- alpha: alpha does a thing"))
-          (is (not (str/includes? (:content (nth msgs 2)) "BODY")))))
+          (is (str/includes? (:content (second msgs)) "- alpha: alpha does a thing"))
+          (is (not (str/includes? (:content (second msgs)) "BODY")))))
 
-      (testing "no usable skills: no third block at all"
+      (testing "no usable skills: the instruction block alone"
         (let [msgs (preamble/messages (preamble/gather {:files [u p] :roots []}))]
-          (is (= 2 (count msgs)))))
+          (is (= 1 (count msgs)))))
 
       (testing "the report counts the catalog too, so its weight is visible"
         (let [g (preamble/gather {:files [u p] :roots [root]})]

@@ -331,7 +331,8 @@ not invent anything. Be concise.")
         (last (filter #(<= % from) users)))))
 
 (defn plan
-  "RECORDS + WINDOW + RETAIN-RATIO -> the HEAD to compact, or nil when there is none.
+  "RECORDS + WINDOW + RETAIN-RATIO (+ the SURFACE to plan over) -> the HEAD to compact, or nil
+  when there is none.
 
     {:shadowed [ids] :messages [msgs] :head-tokens n}
 
@@ -341,12 +342,41 @@ not invent anything. Be concise.")
   nothing is written.
 
   THE NODES ARE THE MODEL-FACING SURFACE (`harness.edge.replay/model-nodes`): earlier
-  compactions' summaries included, and carrying the ids `:shadowed` is made of."
-  [records window retain-ratio]
+  compactions' summaries included, and carrying the ids `:shadowed` is made of.
+
+  SURFACE IS THAT SURFACE WHEN THE CALLER HAS IT, and it is a parameter for the reason the
+  whole ticket (`05` of `.scratch/compaction-shape`) exists: THE TRIGGER MEASURES THE ARRAY THE
+  MODEL IS ACTUALLY HANDED (`sessions/messages` + the system message + this run's injections),
+  and the record's own fold is NOT that array -- it drops every run's injections except the
+  last one (`harness.edge.pressure/injected-rows`). A plan over the record fold while the
+  trigger measured the live array can answer a head that is only the previous SUMMARY: the fold
+  replaces it with something the same size, the surface does not move, and the trigger -- still
+  over its threshold -- fires again before the next model call. Measured on thread `62f30024-…`
+  (2026-09-30): four compactions in 2 min 22 s, every one of them folding one summary node
+  (`:shadowed [12587]`, `head-tokens 4594`) and re-writing a 19 880-character summary.
+  NIL SURFACE KEEPS THE OLD READING -- the record's fold -- which is what a process that does
+  not hold the session, a fork and a test have, and is the honest answer then.
+
+  MIN-HEAD-TOKENS IS THE RELIEF THE CALLER NEEDS (`{:min-head-tokens n}`), and a head under it
+  is NO head: folding less than the trigger says must come off cannot bring anything back under
+  a threshold, so the honest answer is nil -- no rows, no summary call, no card. It is the
+  caller's number because only the caller has the trigger's reading (the pressure and its
+  threshold); a person's manual compaction and the recovery after a vendor's refusal pass none.
+  With the surface handed in, this guard is arithmetic that cannot bite (the head of a surface
+  the trigger measured is `surface - retain-budget`, and the retain budget is well under the
+  threshold) -- it bites exactly when the two arrays disagree again."
+  ([records window retain-ratio] (plan records window retain-ratio nil nil))
+  ([records window retain-ratio surface] (plan records window retain-ratio surface nil))
+  ([records window retain-ratio surface {:keys [min-head-tokens]}]
   (let [records    (vec records)
-        nodes      (replay/model-nodes (replay/entries records)
-                                     (replay/compaction-facts records)
-                                     (replay/prune-facts records))
+        facts      (vec (replay/compaction-facts records))
+        ;; AN EMPTY SURFACE IS NO SURFACE (`(vec nil)` is `[]`, which is truthy): a caller that has
+        ;; nothing live to plan over gets the record's fold, which is the reading it can have.
+        nodes      (if (seq surface)
+                     (vec surface)
+                     (replay/model-nodes (replay/entries records)
+                                         facts
+                                         (replay/prune-facts records)))
         budget     (long (Math/floor (* (double window) (double retain-ratio))))
         size       (fn [j] (pressure/estimate-message (:message (nth nodes j))))
         k          (protected-boundary nodes)]
@@ -357,13 +387,24 @@ not invent anything. Be concise.")
           (let [t (tail-anchor nodes records (inc j))
                 j (if (some? t) (dec t) j)]
             (when (>= j k)
-              (let [head (subvec nodes k (inc j))]
-                {:shadowed    (mapv :id head)
-                 :messages    (mapv :message head)
-                 :head-tokens (reduce + 0 (map size (range k (inc j))))}))))
+              (let [head (subvec nodes k (inc j))
+                    tokens (reduce + 0 (map size (range k (inc j))))]
+                ;; TWO THINGS MAKE A HEAD NOT WORTH WRITING, and either answer is nil -- no
+                ;; `compaction/start`, no summary call, no card:
+                ;;   * it is under the relief the caller asked for (see the docstring);
+                ;;   * a node in it has NO ID. `:shadowed` addresses entries by the record line
+                ;;     they arrived in, so a head that cannot be named cannot be folded. It is the
+                ;;     newest, unlanded part of a LIVE surface that has this shape, and the head is
+                ;;     the OLDEST part -- so this refuses a surface that is entirely unlanded rather
+                ;;     than a normal one.
+                (when (and (or (nil? min-head-tokens) (>= tokens (long min-head-tokens)))
+                           (every? :id head))
+                  {:shadowed    (mapv :id head)
+                   :messages    (mapv :message head)
+                   :head-tokens tokens})))))
 
         (neg? j) nil
-        :else    (recur (dec j) (+ acc (size j)))))))
+        :else    (recur (dec j) (+ acc (size j))))))))
 
 (defn- unit-start
   "NODES -> the index of the first node of the NEWEST INDIVISIBLE UNIT.
@@ -392,11 +433,16 @@ not invent anything. Be concise.")
   smallest thing worth keeping (`unit-start`), and everything between the opening and it is
   summarized.
 
-  WINDOW and RETAIN-RATIO are accepted and IGNORED so this has the same arity as `plan` and
-  the writer can be handed either: the recovery exists precisely because no capacity was
-  known, so it must not require one."
-  ([records] (overflow-plan records nil nil))
-  ([records _window _retain-ratio]
+  WINDOW, RETAIN-RATIO AND SURFACE are accepted and IGNORED so this has the same arity as
+  `plan` and the writer can be handed either: the recovery exists precisely because no capacity was
+  known, so it must not require one. THE SURFACE IS IGNORED ON PURPOSE TOO -- this plan folds
+  everything before the newest indivisible unit whatever array it reads, and the RECORD's fold is
+  the one whose `step/*` rows the cut is anchored to; the live array can hold an injected `user`
+  card after the question, which `unit-start` would take for the newest request."
+  ([records] (overflow-plan records nil nil nil nil))
+  ([records _window _retain-ratio] (overflow-plan records _window _retain-ratio nil nil))
+  ([records _window _retain-ratio _surface] (overflow-plan records _window _retain-ratio _surface nil))
+  ([records _window _retain-ratio _surface _opts]
    (let [records (vec records)
          nodes   (replay/model-nodes (replay/entries records)
                                      (replay/compaction-facts records)
@@ -436,10 +482,16 @@ not invent anything. Be concise.")
   `compaction/end` closes. Nothing is written twice, so a reader reconstructs the request
   from the prompt on the first row plus the records the shadowed seqs name.
 
-  rule -- is the same, so the two paths cannot drift."
-  [records {:keys [window retain-ratio append summarize plan-fn environment blocks]}]
+  rule -- is the same, so the two paths cannot drift.
+
+  SURFACE AND MIN-HEAD-TOKENS RIDE STRAIGHT TO THE PLAN (`plan`'s docstring has both): the array
+  the model is actually handed, and the relief the caller's trigger asked for. A plan that answers
+  nil for either reason writes NOTHING -- no `compaction/start` row, no summary call, no card."
+  [records {:keys [window retain-ratio append summarize plan-fn environment blocks surface
+             min-head-tokens]}]
   (when-not (lock-active? records)
-    (when-let [head ((or plan-fn plan) records window retain-ratio)]
+    (when-let [head ((or plan-fn plan) records window retain-ratio surface
+                     {:min-head-tokens min-head-tokens})]
       (let [id          (str (java.util.UUID/randomUUID))
             ;; THE PROMPT IS BUILT HERE, AND IT IS THE ONE THE SUMMARIZER GETS: the string
             ;; on `compaction/start` and the string in the request are the same value, so a

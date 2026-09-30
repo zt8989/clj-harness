@@ -4,11 +4,17 @@
 // --------------------------------------------------- what it draws, and what it does not
 //
 // IT DRAWS NOTHING IT WAS NOT GIVEN. Every mark comes from a timestamp the record
-// carries, straight out of the fold: a user message's `at` (its own `message` row's `:ts`),
+// carries, straight out of the fold: a user cell's `at` (its own `message` row's `:ts`),
 // a call's `startedAt`/`endedAt` (the `model/*` pair), a tool call's
-// `queuedAt`/`startedAt`/`endedAt` (the `tools/*` trio). A record that predates the
+// `arrivedAt`/`executedAt` (the `tools/*` trio). A record that predates the
 // model lines has an EMPTY model lane, and it says so in words rather than drawing a
 // flat line at zero -- "this record cannot tell" is not "this call took no time".
+//
+// THE LEDGER IS FLAT AND THIS IS WHERE THAT SHOWS: a mark knows its turn (`:turn`) and its
+// CELL (`:index`), and the two are different facts -- the boundary cells bracket a turn
+// without being in it, and a cell between turns belongs to no turn at all, so it draws no
+// mark. The lane walks the turns the view cut (`sectionsOf`), one cut for the list and the
+// strip both.
 //
 // THE TWO MODES ARE TWO WAYS OF LAYING THE SAME MARKS OUT, not two datasets:
 //
@@ -32,7 +38,7 @@ import { useTranslation } from "react-i18next";
 
 import { formatMillis } from "@/lib/format";
 import { KIND_HUE, LANE_KIND, type Lane } from "@/components/trajectory-colors";
-import type { TrajectoryPayload, TrajectoryTurn } from "@/lib/trajectory";
+import { type TrajectoryPayload, type TrajectoryTurn, sectionsOf, turnsOf } from "@/lib/trajectory";
 import { cn } from "@/lib/utils";
 
 /// The translator this face's words go through. PINNED TO THE NAMESPACE, like
@@ -51,15 +57,14 @@ const LANE_LABEL: Record<Lane, (t: Translate) => string> = {
   tool: (t) => t("lane.tools"),
 };
 
-/// One mark on a lane: where it starts and ends, what to say about it, and WHICH ITEM it
+/// One mark on a lane: where it starts and ends, what to say about it, and WHICH CELL it
 /// stands for.
 ///
-/// `index` IS THE ITEM'S POSITION IN ITS TURN, which is what makes a mark clickable: a
-/// mark on a lane and a row in the list are two drawings of ONE thing, so clicking either
-/// opens the same detail. It is `null` when there is no row to open -- a model call the
-/// record never paired with an answer (a session read while its first call is still
-/// streaming) is a real mark with no item behind it, and pretending otherwise would open
-/// an empty pane.
+/// `index` IS THE CELL'S OWN LEDGER INDEX, which is what makes a mark clickable: a mark on
+/// a lane and a row in the list are two drawings of ONE thing, so clicking either opens the
+/// same detail. It is `null` when there is no row to open -- a model call the record never
+/// paired with an answer (a session read while its first call is still streaming) is a real
+/// mark with no row behind it, and pretending otherwise would open an empty pane.
 type Mark = {
   turn: number;
   index: number | null;
@@ -77,23 +82,23 @@ type Mark = {
 
 const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool", t: Translate): Mark[] => {
   if (lane === "input") {
-    return turn.items.flatMap((item, index) =>
-      item.kind === "user" && item.at !== undefined
-        ? [{ turn: turn.index, index, label: t("turn.label", { n: turn.index }), start: item.at, end: item.at }]
+    return turn.cells.flatMap((cell) =>
+      cell.kind === "user" && cell.at !== undefined
+        ? [{ turn: turn.index, index: cell.index, label: t("turn.label", { n: turn.index }), start: cell.at, end: cell.at }]
         : [],
     );
   }
   if (lane === "model") {
-    /// A CALL'S ROW IS ITS ANSWER: the assistant item whose `:call` points at it. A call
-    /// with no such item -- still streaming, or a record that predates the model lines --
+    /// A CALL'S ROW IS ITS ANSWER: the `message` cell whose `call` points at it. A call
+    /// with no such cell -- still streaming, or a record that predates the model lines --
     /// is drawn without a target rather than wired to the wrong row.
     return (turn.calls ?? []).flatMap((call) => {
       if (call.startedAt === undefined) return [];
-      const row = turn.items.findIndex((item) => item.kind === "assistant" && item.call === call.index);
+      const row = turn.cells.find((cell) => cell.kind === "message" && cell.call === call.index);
       return [
         {
           turn: turn.index,
-          index: row === -1 ? null : row,
+          index: row?.index ?? null,
           label: call.model ?? t("call.label", { n: call.index }),
           start: call.startedAt,
           end: call.endedAt ?? call.startedAt,
@@ -101,28 +106,28 @@ const marksOf = (turn: TrajectoryTurn, lane: "input" | "model" | "tool", t: Tran
       ];
     });
   }
-  return turn.items.flatMap((item, index) => {
-      if (item.kind !== "tool" || item.arrivedAt === undefined) return [];
-      /// THE BAR IS THE TOOL'S LIFE IN THE SEAM: it arrived, and -- unless nobody has
-      /// answered yet -- it finished executing. `executedAt` is the moment it LEFT
-      /// execution, so using it as the bar's END is what makes the bar as long as the
-      /// tool really took; using it as the start would draw every tool as instantaneous.
-      const resumed = item.resumedAt ?? item.arrivedAt;
-      const end = item.executedAt ?? item.closedAt ?? resumed;
-      return [
-        {
-          turn: turn.index,
-          index,
-          label: item.name ?? item.toolCallId,
-          start: resumed,
-          end,
-          /// The park, when there was one, is the lead-in: time a PERSON spent, which is
-          /// real but is not the tool working.
-          wait: item.resumedAt === undefined ? undefined : item.resumedAt - item.arrivedAt,
-          never: !item.executed,
-        },
-      ];
-    });
+  return turn.cells.flatMap((cell) => {
+    if (cell.kind !== "tool" || cell.arrivedAt === undefined) return [];
+    /// THE BAR IS THE TOOL'S LIFE IN THE SEAM: it arrived, and -- unless nobody has
+    /// answered yet -- it finished executing. `executedAt` is the moment it LEFT
+    /// execution, so using it as the bar's END is what makes the bar as long as the
+    /// tool really took; using it as the start would draw every tool as instantaneous.
+    const resumed = cell.resumedAt ?? cell.arrivedAt;
+    const end = cell.executedAt ?? cell.closedAt ?? resumed;
+    return [
+      {
+        turn: turn.index,
+        index: cell.index,
+        label: cell.name ?? cell.toolCallId,
+        start: resumed,
+        end,
+        /// The park, when there was one, is the lead-in: time a PERSON spent, which is
+        /// real but is not the tool working.
+        wait: cell.resumedAt === undefined ? undefined : cell.resumedAt - cell.arrivedAt,
+        never: !cell.executed,
+      },
+    ];
+  });
 };
 
 /// A lane as a row of positioned marks. Positions are fractions of the axis, so the
@@ -138,8 +143,8 @@ const Lane: FC<{
   marks: readonly Mark[];
   span: Span;
   mode: Mode;
-  open: { turn: number; index: number } | null;
-  onOpen: (target: { turn: number; index: number }) => void;
+  open: number | null;
+  onOpen: (index: number) => void;
 }> = ({ name, lane, marks, span, mode, open, onOpen }) => {
   const { t } = useTranslation("trajectory");
   const { t: tFormat } = useTranslation("format");
@@ -179,7 +184,7 @@ const Lane: FC<{
             mark.wait === undefined || mark.start === 0
               ? 0
               : (mark.wait / Math.max(1, mark.end - mark.start + mark.wait)) * 100;
-          const isOpen = mark.index !== null && open?.turn === mark.turn && open.index === mark.index;
+          const isOpen = mark.index !== null && open === mark.index;
           const duration = formatMillis(Math.max(0, mark.end - mark.start), tFormat);
           const geometry = {
             left: `${from * 100}%`,
@@ -217,7 +222,7 @@ const Lane: FC<{
             <button
               key={`${mark.label}-${i}`}
               type="button"
-              onClick={() => onOpen({ turn: mark.turn, index: mark.index as number })}
+              onClick={() => onOpen(mark.index as number)}
               title={t("timeline.openTitle", { label: mark.label, duration })}
               aria-label={t("timeline.openAria", { label: mark.label, turn: mark.turn })}
               aria-pressed={isOpen}
@@ -319,12 +324,15 @@ export const TrajectoryTimeline: FC<{
   payload: TrajectoryPayload;
   mode: Mode;
   onMode: (mode: Mode) => void;
-  open: { turn: number; index: number } | null;
-  onOpen: (target: { turn: number; index: number }) => void;
+  open: number | null;
+  onOpen: (index: number) => void;
 }> = ({ payload, mode, onMode, open, onOpen }) => {
   const { t } = useTranslation("trajectory");
   const { t: tFormat } = useTranslation("format");
-  const span = useMemo(() => spanOf(payload.turns, t), [payload.turns, t]);
+  /// THE SAME CUT THE LIST MAKES (`sectionsOf`): the strip may not have its own idea of
+  /// which cells are in a turn, or a mark would open a row that is not where it points.
+  const turns = useMemo(() => turnsOf(sectionsOf(payload.cells)), [payload.cells]);
+  const span = useMemo(() => spanOf(turns, t), [turns, t]);
   /// The lane identities, in drawing order, each with the `data-lane` spelling it has
   /// always had (the tool lane's is `tools`, not `tool`). The words drawn beside them come
   /// from `LANE_LABEL` inside `Lane`.
@@ -372,7 +380,7 @@ export const TrajectoryTimeline: FC<{
             key={lane}
             name={name}
             lane={lane}
-            marks={payload.turns.flatMap((turn) => marksOf(turn, lane, t))}
+            marks={turns.flatMap((turn) => marksOf(turn, lane, t))}
             span={span}
             mode={mode}
             open={open}

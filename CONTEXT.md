@@ -262,8 +262,8 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 **「停」有两个发起人，认领的规矩分家。** 模型的 `job_kill`（默认 `:by :model`）认领**告知**——它的答案
 就是那次告知；人从任务视图按的那颗 ■（`POST /api/threads/<stem>/jobs`，`:by :user`）**不认领**，只记下是
 人停的，于是 `take-notices!` 那条既有机制在**下一通调用**前把
-`<job-ended id="…" by="user">[stopped]</job-ended>` + `<command>…</command>` + 一句「人停的，用
-`job_output` 读它」注入历史（标签仍是 `job-ended`）。人按一条**已经结束**的作业什么都不改——那不是人停的。
+一条 `<system-reminder>`（首行 `Background job <id> ended: [stopped]`，然后 `by: user`、`Command: …`、
+一句「人停的，用 `job_output` 读它」）注入历史。人按一条**已经结束**的作业什么都不改——那不是人停的。
 **两种听众，两种范围**：人这一栏只列**作业**（注册表里活着的那几条），而**模型**那一侧的 `job_list` 列的是
 **记录**——前台溢出那几份 `c*` 与前面几次运行留下的都在里面（那条记录不是作业：没有进程可停、没有 id
 有人去寻址，`spill!` 的原话就是「一个前台记录不是作业」）。下半段在界面上叫**后台任务**/`Background jobs`；
@@ -278,11 +278,15 @@ endpoint 与模态的事实都是目录**回答**的（写进某一档就是指�
 
 **注入（injection）** —— 「每次模型调用前，把会话该有的东西摆到历史里」这件事，以及被摆进去的那些块：
 **开场块**（指令文件、技能清单）、**技能正文**（只有人的 `/name` 触发 —— 模型调 `skill` 拿到的那份是**工具结果**，不在这条路上）、**作业结束的通知**
-（`<job-ended id="…">[exit N]</job-ended>` + `<command>…</command>` + 一行「用 `job_output` 读它」——人从任务视图停的那一条多一个 `by="user"` 属性、末句改说「这是人停的」
-——**两样事实加一句读法，与记录多大无关**）三种用户。它们都是**服务端现算**的：客户端从不持有，只有这一轮发给
-模型的那一份（所以也照旧写进 jsonl 的 `message` 行）。位置是**提问之后**（system → 提问 → 出生那条 context → 开场块：指令文件 →
-技能清单 → 技能正文）：材料排在**它要回答的那句话后面**，`.scratch/context-frames` 决定 7 起就是这么读的。开场与其余两样的区别
-不在位置而在**次数**——开场在会话出生时写进对话**一次**，此后每轮它只是历史（`.scratch/session-opening`）。
+（`<system-reminder>` 里首行 `Background job <id> ended: <status>`，然后 `by: user`（人停的才有）、`Command: …`、一行「用 `job_output` 读它」
+——**两样事实加一句读法，与记录多大无关**；内层只有**纯文本**）三种用户。**所有注入穿同一副 `<system-reminder>` 框**：
+写手是 `harness.cap.reminder`，机器可读的那半从标签挪到**首行标签行**（`Instructions from: <路径>` / `Available skills` /
+`Session context` / `Skill <name>` / `Background job <id> ended: …`），`edge/http.clj` 的 `:source` 分类与 `cap.skills` 的幂等都读它；
+**多份 AGENTS.md 合成一条**（同一个 reminder 里每文件一段，先全局后项目，照 dsh 的 `Instructions from: <路径>` 分段）。它们都是**服务端现算**的：客户端从不持有，只有这一轮发给
+模型的那一份（所以也照旧写进 jsonl 的 `message` 行）。位置是**提问之后**（system → 提问 → 出生那条 context → 开场块：一条指令 reminder → 一条技能清单 reminder）：材料排在**它要回答的那句话后面**，`.scratch/context-frames` 决定 7 起就是这么读的。开场与其余两样的区别
+不在位置而在**次数**——开场在会话出生时写进对话**一次**（**一条指令 reminder + 一条目录 reminder**），此后每轮它只是历史（`.scratch/session-opening`）。
+**会话栏按轮折叠时，那一轮的注入卡跟着一起收**（`card-parts/isKeptCardPart`）：注入是这一轮被递到的材料，折轮就把材料也收起来；
+**压缩卡不在此列**——它是「历史在这里被折过一次」的边界（`.scratch/compaction-frames`），折了也画。
 **每一份注入在屏幕上都有一张卡**（`CUSTOM` 帧 → `data` part → 会话栏里可折叠的一行），
 **而卡就是这条注入留在对话里的样子**：`data` part 给屏幕，`sessions/model-view` 把卡里的字节还原成模型读过的那条 user 消息——
 所以注入只进一次，下一轮 `cap.project/before-llm` 发现正文已在，既不重算也不再画一张卡。
@@ -436,17 +440,33 @@ token，只有一个 4 字符 ≈ 1 token 的估算器，而且只作用在**增
 jobs 树里），是同一个动词的**另一种** spill；两者目录、id、答案形状都不同，别混。
 **三档分工**：spill 管**单条刚产生的**工具结果；剪枝管**已有的大**工具结果；摘要管**一整段**历史；
 **信封**（system prompt + 工具 schema）三者都不管。
-**轨迹** —— 一条会话的**记录**按**轮**读回来的东西：那一轮模型手里到底有什么（system 消息的字节、
-拼在它旁边的上下文、每条用户消息、每次工具调用的参数与结果），以及每次调用发出那张工具表的**签名**
+**轨迹** —— 一条会话的**记录**读成一条**平铺的账本**（`{:threadId :incomplete :cells}`，照 dsh 的
+`TrajectoryCellKind`）：一格一件东西，按记录的顺序排，**格自己说它在第几轮**（`:turn`，`nil` 就是
+**轮与轮之间**）。它答的是那一轮模型手里到底有什么（system 消息的字节、拼在它旁边的上下文、每条用户消息、
+每次工具调用的参数与结果），以及每次调用发出那张工具表的**签名**
 （`:toolsNamesHash` + `:toolsCount`——**整张表本身在 system 那条 `message` 行的信封上**（`:tools`，名字 +
-描述 + parameters，不进正文），每次调用只留名字集合的签名，见 [edge](docs/architecture/edge.md)）。轨迹里的
-**system 条目自带那张表**（自包含：点开就有，不必再去拉第二处）。
+描述 + parameters，不进正文），每次调用只留名字集合的签名，见 [edge](docs/architecture/edge.md)）。
+**system 格自带那张表**（自包含：点开就有，不必再去拉第二处），**并且站在轮外**：它不是哪一轮说的话，
+是那一轮被**交到手里的东西**，所以 `:turn` 为 `nil`、位置就在**它所属那条 `turn-start` 之前**（字节变了
+再出一条，`initial` 只给第一条）。**一轮由 `turn-start` / `turn-end` 两条边界格夹出来**（记录里没有这两行，
+它们只上会话那条下行，所以是**折出来的**），模型自己的话按 dsh 叫 `message`，一轮的模型调用骑在它的
+`turn-start` 上（条目的 `:call` 指向那里）。**没有结束的轮没有 `turn-end`**：一条轮结束的凭据只有
+「后一轮开了」或「记录最后一帧是终态」，比这更弱的证据不足以让账本说一句「这轮完了」。**压缩是一条
+`compacted` 格**——它不是模型看到的东西，是**关于记录本身**的事实——`turn` 也是 `nil`，位置按它自己那
+一行的行号落在轮与轮之间。
 **它如实还原记录里的 `message` 行，不隐瞒也不转换**：某个 run 写了行就画，同一段注入再次出现就再画
-一次；每一格的**样式**（`system` / `context` / `user` …）是读法，**内容**永远是那些字节。
+一次；每一格的**样式**（`system` / `context` / `user` / `message` / `tool` / `compacted`）是读法，
+**内容**永远是那些字节。
 **一轮还在跑的时候，已经到达、还没被回答的工具调用也在其中**：返回侧的 `message` 行是 `:run/done` 之后才写的，
-所以它另外读 `tools/pre-execute` 那几行，把这样的调用画成一条**还没有结果**的 `tool` 条目——名字取审计行自己的
+所以它另外读 `tools/pre-execute` 那几行，把这样的调用画成一条**还没有结果**的 `tool` 格——名字取审计行自己的
 `:toolName`，参数与结果**缺席就是缺席**（不是空串），返回侧落盘后换成 `message` 行折出来的那条，一次调用只有一行。
-读法住在 `harness.edge.trajectory`，从管理边由 `GET /api/threads/<stem>/trajectory` 吐出去。
+读法住在 `harness.edge.trajectory`，从管理边由 `GET /api/threads/<stem>/trajectory` 吐出去，
+**一行 NDJSON**：首行是头（`:threadId` / `:incomplete`），其后每一行是一**批**格——`{:from :cells}`，
+先是不再会变的那些（开放轮之前的），然后是**整条开放尾部再来一遍**。客户端**按 `:from` 剪接**，
+同一段尾部收到两次也只留下一份；「谁还要什么」由 `trajectory/drift` 一处说了算。
+**视图**（`ui/src/components/trajectory-view.tsx`）就按这份账本画：`Turn N` / `Between turns` 是粗分割线，
+工具栏的 `Collapse turns` / `Expand turns` 折的是整轮——**连轮里的 `context` 格一起收**，
+而 system 格不在任何轮里，折不到它。
 它读的是**记录**不是状态，所以**不进库**；它与**会话统计**是两个读者、读同一份文件的两半
 （统计数数，轨迹看内容），也与客户端手里那段窗口不是一回事——system 消息与注入的上下文
 客户端从来没有过。

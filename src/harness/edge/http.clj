@@ -94,6 +94,7 @@
             [harness.kernel.loop :as loop]
             [harness.cap.claims :as claims]
             [harness.cap.preamble :as preamble]
+            [harness.cap.reminder :as reminder]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
             [harness.infra.stream :as stream]
@@ -865,27 +866,23 @@
   "WHO PUT THIS MESSAGE INTO THE ARRAY, for a message a RUN added: what the model returned,
   what a tool answered, and what the pre-LLM step derived along the way.
 
-  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the tag answers the rest: a skill
-  body and a job's ending are wrapped by the code that writes them (`harness.cap.skills`
-  writes `<skill name=..>`, `harness.cap.jobs` writes `<job-ended ..>`), and the skills
-  namespace reads the first of those tags back out of the conversation
-  (`loaded-skill-names`), so this is the same reading rather than a new convention. Anything
-  else a run injected is an `injection` and says so."
+  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the block's LABEL LINE answers the
+  rest. Every injection now wears the same `<system-reminder>` frame, so the frame itself
+  cannot tell them apart; the first line inside it can, and `harness.cap.reminder/kind-of`
+  is that reading, kept beside the writer that puts the label there. Anything it calls an
+  `injection` is one."
   [message]
   (let [content (str (:content message))]
     (case (:role message)
       "assistant" "model"
       "tool"      "tool"
-      (cond
-        (str/starts-with? content "<skill name=")   "skill"
-        (str/starts-with? content "<job-ended ")    "job"
-        ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
-        ;; the instruction files and the skills catalog were folded in at the birth, so a
-        ;; later run's copy is the same kind of fact -- an `opening` -- and the tags are the
-        ;; ones `harness.edge.ag-ui/opening-entries` writes.
-        (str/starts-with? content "<instructions")  "opening"
-        (str/starts-with? content "<skills")        "opening"
-        :else                                       "injection"))))
+      ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
+      ;; the instruction files and the skills catalog were folded in at the birth, so a
+      ;; later run's copy is the same kind of fact -- an `opening` -- and `kind-of` reads
+      ;; the label lines `harness.cap.preamble` writes (`Instructions from`, `Available
+      ;; skills`). A skill body (`Skill <name>`) and a job's ending (`Background job <id>
+      ;; ended`) are per-run derivations, which is why they are their own sources.
+      (reminder/kind-of content))))
 
 (defn- log-message!
   "ONE \"message\" line, for one message a RUN put in the array -- the row's payload is the
@@ -2157,7 +2154,7 @@
                                                                 [])
                                                               (map-indexed
                                                                (fn [i message]
-                                                                 (ag/injected-frame (str run-id "-pre" i) message))
+                                                                 (ag/injected-frame (str run-id ag/pre-injection-suffix i) message))
                                                                injected))
                                                   ;; AND THE CONVERSATION THIS RUN WROTE
                                                   ;; PART OF rides with it, for the same
@@ -3904,7 +3901,7 @@
                                                (compaction/config stem))))))
 
 (defn- trajectory-get
-  "GET /api/threads/<stem>/trajectory -- one session's turns as the MODEL saw them,
+  "GET /api/threads/<stem>/trajectory -- one session's LEDGER as the MODEL saw it,
   folded from its RECORD (harness.edge.trajectory): the system message that was in
   force, the context spliced in beside it, every user message, and each tool call with
   its arguments and result.
@@ -3962,12 +3959,12 @@
                       ;; returned -- so a throw here is a silently dropped connection
                       ;; rather than a 500. The stream is netted and simply ends.
                       (try
-                        ;; THE HEADER FIRST: a reader knows what it is reading before turn one.
+                        ;; THE HEADER FIRST: a reader knows what it is reading before the first cell.
                         (hk/send! ch {:headers headers
                                       :body    (str (json/write-str header) "\n")}
                                   false)
-                        (let [sent  (atom 0)
-                              ;; THE TURNS THIS VIEW HAS NOW, then whatever finalizes later.
+                        (let [written (atom 0)
+                              ;; THE CELLS THIS VIEW HAS NOW, then whatever finalizes later.
                               ;; Reading the view costs no file: it is a value on the session.
                               push! (fn []
                                       (let [payload (if (some? held)
@@ -3975,18 +3972,15 @@
                                                               trajectory/trajectory-answer)
                                                       initial)]
                                         (when (some? payload)
-                                          (let [turns (:turns payload)
-                                                ;; THE NEW FINALIZED TURNS, then THE OPEN ONE
-                                                ;; again: a turn still growing is re-sent, and the
-                                                ;; client replaces it by `:index` -- the same
-                                                ;; in-place rule the window's frames use.
-                                                finalized (max 0 (dec (count turns)))
-                                                from      (min @sent finalized)]
-                                            (doseq [turn (subvec turns from finalized)]
-                                              (hk/send! ch (str (json/write-str turn) "\n") false))
-                                            (reset! sent finalized)
-                                            (when (pos? (count turns))
-                                              (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
+                                          ;; THE NEW FINAL CELLS, THEN THE OPEN TAIL AGAIN
+                                          ;; (`trajectory/drift`): the tail really does change under
+                                          ;; a reader -- a call is drawn without its result and
+                                          ;; answered later -- so it is re-sent and SPLICED AT ITS
+                                          ;; `:from` rather than appended.
+                                          (let [{:keys [sent batches]} (trajectory/drift payload @written)]
+                                            (reset! written sent)
+                                            (doseq [batch batches]
+                                              (hk/send! ch (str (json/write-str batch) "\n") false))))))]
                           (push!)
                           (if (and (some? held) (mux/watching? stem))
                             ;; THE SESSION IS HELD *AND* SOMEBODY IS SUBSCRIBED TO IT, so every
@@ -6274,6 +6268,20 @@
                                        :environment  (compaction/environment-block
                                                       (compaction/environment
                                                        (project/binding-for stem)))
+                                       ;; AND THE SURFACE THE PLAN PLANS OVER: the array the MODEL is
+                                       ;; handed, when this process holds the session -- which is the
+                                       ;; array the triggers MEASURE (`pressure/live-surface`). The
+                                       ;; record's own fold is a different (smaller) array, and planning
+                                       ;; over it while the trigger measured this one is what let a
+                                       ;; compaction fold one summary into another and leave the pressure
+                                       ;; exactly where it was (`.scratch/compaction-shape` ticket 05). NIL
+                                       ;; FOR A SESSION THIS PROCESS DOES NOT HOLD, and then the record's
+                                       ;; fold is the honest reading.
+                                       :surface      (sessions/model-nodes stem)
+                                       ;; AND THE RELIEF THE TRIGGER ASKED FOR, which rides the same
+                                       ;; way: a caller that named a number hands it to the plan, or
+                                       ;; the guard below is a comment (`plan`'s `:min-head-tokens`).
+                                       :min-head-tokens (:min-head-tokens opts)
                                        :blocks       (:blocks pre)})]
       (when (seq @written)
         (sessions/set-compactions!
@@ -6407,7 +6415,13 @@
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
                   before  (pressure/estimate-messages history)]
-              (when-some [compacted (run-compaction! stem provider records window ratios nil)]
+              (when-some [compacted (run-compaction! stem provider records window ratios
+                                                   ;; THE RELIEF THIS TRIGGER ASKS FOR, off the very
+                                                   ;; reading that fired it: what is over the threshold
+                                                   ;; is what has to come off (`plan`'s `:min-head-tokens`),
+                                                   ;; or the fold would buy nothing and burn a summary call.
+                                                   {:min-head-tokens (- (:pressureTokens answer)
+                                                                        (:thresholdTokens answer))})]
                 ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
                 ;; The rows are written and the session's own model view has already moved, so the
                 ;; conversation IS compacted; the comparison below only decides whether THIS call
@@ -6462,7 +6476,12 @@
                          (>= (:pressureTokens answer) (:thresholdTokens answer))
                          (not (compaction/lock-active? records)))
                 (when-some [provider (providers/current-provider stem)]
-                  (run-compaction! stem provider records (:windowTokens answer) ratios nil))))))))
+                  (run-compaction! stem provider records (:windowTokens answer) ratios
+                                   ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
+                                   ;; threshold must be what comes off, or the compaction is not
+                                   ;; worth a summary call (`plan`'s `:min-head-tokens`).
+                                   {:min-head-tokens (- (:pressureTokens answer)
+                                                        (:thresholdTokens answer))}))))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
       nil)))

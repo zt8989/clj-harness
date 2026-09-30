@@ -51,6 +51,17 @@ export function isCardPart(part: unknown): boolean {
   );
 }
 
+/// WHETHER A CARD SURVIVES ITS TURN'S FOLD. A COMPACTION DOES; an injected context does NOT.
+///
+/// THIS IS NOT `isCardPart`, and the difference is the whole point. The compaction card is the
+/// BOUNDARY where a range of history stopped being messages and became a summary, so it belongs
+/// on screen even when the turn around it is put away (`.scratch/compaction-frames`). An
+/// injected context is MATERIAL a turn was handed -- the instruction files, a skill body, a job's
+/// ending -- and a folded turn puts its material away with its steps.
+export function isKeptCardPart(part: unknown): boolean {
+  return isCardPart(part) && (part as DataPart).name === COMPACTION_PART;
+}
+
 /// Is this message the card and NOTHING ELSE?
 ///
 /// THE QUESTION ROLE CANNOT ANSWER. The opening's entries are `role: "user"` -- user messages to the
