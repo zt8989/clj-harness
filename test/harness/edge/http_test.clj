@@ -4970,18 +4970,36 @@
   "A real repository at DIR, so the route meets git rather than a story about git.
   Renamed rather than `init -b`: see harness.cap.git-test for why."
   [dir]
-  (let [run (fn [c] (shell/run {:command c :dir dir}))]
+  (let [steps ["git init -q"
+               "git config user.email test@example.invalid"
+               "git config user.name 'harness test'"
+               "git config commit.gpgsign false"
+               "git add README.md"
+               "git commit -q -m first"
+               ;; `-M`, not `-m`: on a machine whose git ALREADY defaults to `main`
+               ;; (`init.defaultBranch`), `-m main` exits non-zero -- and the check below
+               ;; would then redden a fixture that is perfectly fine.
+               "git branch -M main"
+               "git branch side"]]
     (.mkdirs (io/file dir))
-    (run "git init -q")
-    (run "git config user.email test@example.invalid")
-    (run "git config user.name 'harness test'")
-    (run "git config commit.gpgsign false")
     (spit (io/file dir "README.md") "hello\n" :encoding "UTF-8")
-    (run "git add README.md")
-    (run "git commit -q -m first")
-    (run "git branch -m main")
-    (run "git branch side")
-    dir))
+    ;; ONE spawn, not eight. Every `shell/run` is a `bash -lc`, and the login profile is
+    ;; most of a spawn (~0.7s on this machine, measured 2026-09-30 -- docs/rules/testing.md
+    ;; carries the number and the before/after). Eight of those around eight git commands
+    ;; is eight profiles paid for nothing these cases assert: what they are about is the
+    ;; repository that comes out, not how many shells it took to make. The steps are still
+    ;; eight git invocations; the profiles are what is saved.
+    ;;
+    ;; THE CHAIN IS POSIX SHELL SYNTAX, the same assumption this file already makes with
+    ;; its single-quoted `'harness test'`; `shell/run` resolves the shell, and on this
+    ;; machine that is Git Bash. THE EXIT IS CHECKED, because `&&` stops at the first
+    ;; failure and a half-built repository would fail the cases below for a reason that
+    ;; has nothing to do with them.
+    (let [{:keys [exit err]} (shell/run {:command (str/join " && " steps) :dir dir})]
+      (when-not (zero? (long (or exit 1)))
+        (throw (ex-info (str "init-repo! failed in " dir ": " err)
+                        {:dir dir :exit exit})))
+      dir)))
 
 (defn- make-git-repo []
   (init-repo! git-repo))
