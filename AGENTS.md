@@ -16,6 +16,22 @@ Five canonical roles, each label string equal to its name. See `docs/agents/tria
 
 Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain.md`.
 
+## feature / hotfix 都在 worktree 里开
+
+**主检出只留 `main`，不切分支**：feature 与 hotfix 一律先造一棵 worktree，在那里改、在那里测，
+合完删掉。工作树放 `.worktrees/<slug>`（已 gitignore），分支同名、从 `main` 切出：
+
+```bash
+git worktree add .worktrees/<slug> -b <slug> main   # 开工
+cd .worktrees/<slug>/ui && npm i --offline          # 新树没有 node_modules；只吃本机 npm 缓存
+```
+
+新树看不见主检出里**未提交**的改动（它从 `main` 切出）——主检出那份是权威，别两头改同一处。
+`npm i --offline` 不联网、也不碰主检出那份 `node_modules`：缓存缺哪个包就点名报错，不许改成联网装。
+装完照旧 `npm run build` / `npm run typecheck` / `npm test`。
+
+收尾：合并后 `git worktree remove .worktrees/<slug>`（里面还跑着东西就 `--force`），再 `git worktree prune` 清账。
+
 ## 测试
 
 **铁律：测试期间 `~/.clj-harness` 只读——一个字都不许写进去。** 两个进程抢同一个 `harness.db` 的那次，
