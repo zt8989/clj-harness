@@ -10,6 +10,7 @@
             [harness.cap.hashline.anchors :as anchors]
             [harness.cap.hashline.edit :as edit]
             [harness.cap.hashline.store :as store]
+            [harness.cap.hashline.files :as files]
             [harness.infra.home :as home]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
@@ -339,6 +340,22 @@
     (is (str/includes? out "write") "and names the tool that CAN clear a file")
     (is (= "one\ntwo\n" (slurp file :encoding "UTF-8")))))
 
+(deftest an-edit-that-would-grow-the-file-past-the-limit-is-refused
+  ;; Read and write share one size limit, so a result past it is refused BEFORE the
+  ;; file is touched -- the next read could not open what the edit would have left.
+  (use-mode!)
+  (write! "one\ntwo\n")
+  (let [[a _] (read!)]
+    (with-redefs [files/max-bytes 10]
+      (let [{:keys [content error]} (replace! {:remove_from a
+                                               :replacement_lines ["a-much-longer-line"]})]
+        (is (true? error) (pr-str content))
+        (is (str/includes? content "byte limit") (pr-str content))))
+    (is (= "one\ntwo\n" (slurp file :encoding "UTF-8")) "nothing was written")
+    (testing "and an edit that stays under the limit still goes through"
+      (with-redefs [files/max-bytes 1000]
+        (is (false? (:error (replace! {:remove_from a :replacement_lines ["ONE"]}))))))))
+
 (deftest a-line-number-where-an-anchor-belongs-gets-its-own-message
   (use-mode!)
   (write! "one\ntwo\n")
@@ -357,10 +374,35 @@
                   (is (str/includes? content fragment) (str args " -> " content))))]
     (check {:replacement_lines ["X"]} "remove_from")
     (check {:remove_from a} "replacement_lines")
-    (check {:remove_from a :replacement_lines "X"} "array of strings")
+    (check {:remove_from a :replacement_lines 42} "array of strings")
     (check {:remove_from a :replacement_lines [1 2]} "must be a string")
     (check {:remove_from "toolong" :replacement_lines []} "4-character anchor")
     (check {:remove_from a :replacement_lines [] :nonsense 1} "does not take")))
+
+(deftest a-whole-field-sent-as-one-string-is-read
+  ;; Models sometimes put the whole array in the FIELD rather than in one element.
+  ;; Both readings are unambiguous, so they are applied and reported -- and a bare
+  ;; one-line string is one line.
+  (use-mode!)
+  (write! "one\ntwo\n")
+  (let [[a b] (read!)]
+    (testing "a JSON array as the whole field"
+      (let [{:keys [content error]} (replace! {:remove_from a :remove_to b
+                                               :replacement_lines "[\"X\",\"Y\"]"})]
+        (is (not error) (pr-str content))
+        (is (str/includes? content "Unwrapped a JSON array") (pr-str content))))
+    (testing "content as the whole field, split on newlines"
+      (write! "one\ntwo\n")
+      (let [[a b] (read!)
+            {:keys [content error]} (replace! {:remove_from a :remove_to b
+                                               :replacement_lines "P\nQ"})]
+        (is (not error) (pr-str content))
+        (is (str/includes? content "Split the whole") (pr-str content))))
+    (testing "a bare one-line string is one line"
+      (write! "one\ntwo\n")
+      (let [[a _] (read!)
+            {:keys [error]} (replace! {:remove_from a :replacement_lines "X"})]
+        (is (not error) (pr-str error))))))
 
 (deftest an-anchor-from-another-file-is-refused
   (use-mode!)
@@ -382,6 +424,55 @@
                                                :replacement_lines ["X"]})]
         (is (not (str/includes? content "is not an anchor")) (pr-str r))
         (is (str/includes? content "Call read") (pr-str r))))))
+
+(deftest the-anchor-fields-have-compat-spellings
+  ;; `replace_from`/`replace_to` and `from`/`to` are accepted for models that spell
+  ;; the fields that way; the canonical name wins when more than one is present.
+  (use-mode!)
+  (write! "one\ntwo\n")
+  (let [[a b] (read!)]
+    (testing "replace_from/replace_to"
+      (let [{:keys [content error]} (replace! {:replace_from a :replace_to b
+                                               :replacement_lines ["X"]})]
+        (is (not error) (pr-str content))
+        (is (= "X\n" (slurp file :encoding "UTF-8")))))
+    (write! "one\ntwo\n")
+    (let [[a b] (read!)]
+      (testing "from/to"
+        (let [{:keys [content error]} (replace! {:from a :to b :replacement_lines ["Y"]})]
+          (is (not error) (pr-str content))
+          (is (= "Y\n" (slurp file :encoding "UTF-8"))))))
+    (write! "one\ntwo\n")
+    (let [[a b] (read!)]
+      (testing "the canonical name wins over an alias"
+        (let [out (replace! {:remove_from a :from b :replacement_lines ["Z"]})]
+          (is (not (:error out)) (pr-str (:content out)))
+          (is (= "Z\ntwo\n" (slurp file :encoding "UTF-8"))
+              "remove_from (line 1) won, not `from` (line 2)"))))
+    (testing "no anchor spelling at all is refused by name"
+      (let [{:keys [content error]} (replace! {:replacement_lines ["X"]})]
+        (is (true? error))
+        (is (str/includes? content "remove_from") (pr-str content))))))
+
+(deftest an-anchor-mistyped-in-case-names-the-one-that-is-held
+  ;; The anchor table carries both `A-Z` and `a-z`, so `Hasu` and `hasu` are two
+  ;; legal, different anchors. A model that miscases one it was handed is one
+  ;; sentence away from the fix, and 'call read' is not that sentence.
+  (use-mode!)
+  (write! "one\ntwo\n")
+  (let [[a _] (read!)
+        flipped (apply str (map (fn [c] (if (Character/isUpperCase ^char c)
+                                          (Character/toLowerCase ^char c)
+                                          (Character/toUpperCase ^char c)))
+                                a))
+        {:keys [content error]} (replace! {:remove_from flipped
+                                           :replacement_lines ["X"]})]
+    (is (true? error))
+    (is (str/includes? content "case-sensitive") (pr-str content))
+    (is (str/includes? content a) "the true spelling is named in the answer")
+    (testing "a name the session never had gets no such sentence"
+      (let [{:keys [content]} (replace! {:remove_from "Zzzz" :replacement_lines ["X"]})]
+        (is (not (str/includes? content "case-sensitive")) (pr-str content))))))
 
 (deftest editing-an-unread-file-says-to-read-it
   (use-mode!)

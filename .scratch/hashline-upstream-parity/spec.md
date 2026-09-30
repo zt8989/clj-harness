@@ -75,3 +75,43 @@
 
 **这台机器上的读法**：后端全量在并发下可能撞隔离守卫（`ISOLATION NOTE` 不算红）；
 报数只认 `Ran … 0 failures, 0 errors.` 那一行与退出码。细则见 `docs/rules/testing.md`。
+
+## 落地结果
+
+**票 01–05 落地**（2026-09-30，分支 `hashline-upstream-parity` 的 worktree）；票 06/07/08 仍
+`needs-triage`（未拍板、未动）；票 09 `wontfix` 不动。
+
+改动（按票）：
+
+- **01 大小护栏**：`files.clj` 新增公开 `max-bytes`（100 MiB）与 `check-size!`；`reading.clj` 改引用它
+  （read 的数字与话术逐字不变）；`write-file!` 与 `write/perform!` 落盘前各查一次——replace /
+  insert / undo 三条写路径都由 `write-file!` 收口。**行为变化**：结果超过 100 MiB 的编辑/写入现在
+  **指名拒绝**、一个字节都不写（以前会写下去，直到下一次 read 才报）。
+- **02 别名**：`edit/parse` 认 `remove_from`/`replace_from`/`from`（`_to` 同理）并按此优先级取值；
+  `tools.clj` 的 replace `:required` 由 `[:remove_from :replacement_lines]` 收成 `[:replacement_lines]`，
+  缺锚点时由 parse 给指名错误；`replace.clj` 的 target-path / plan 两处 `or` 补 `:from`。
+  **顺带修好一件从未接线的事**：`replace_from`/`replace_to` 此前只进了 `known` 白名单、值恒从
+  `(:remove_from args)` 取——只给别名会得到「got nil」的 `:bad-anchor`。**行为变化**：只给
+  `from`/`to`/`replace_*` 现在是一次正常编辑。
+- **03 字符串字段**：`replacement-arg`（`replace` 的 `replacement_lines` 与 `insert` 的 `lines` 共用）
+  接受「字段本身是字符串」：JSON 数组解回数组、其余按换行切行，带 warning；`:strict-input` 会拒绝它。
+  **行为变化**：`replacement_lines "X"` 以前是 `:not-an-array` 拒绝，现在是单行 `"X"`（`42` 等非字符串仍拒绝）。
+- **04 大小写提示**：`replace.clj` 的 `unresolvable!` 先查本会话是否持有只差大小写的锚点，命中就点名；
+  否则维持原来的 `:not-read` / `:not-an-anchor` 两句。**行为变化**：只改一句拒绝话术，不挡任何编辑。
+- **05 页脚起始行**：`reading.clj` 的 `footer` 收真实起始行。**行为变化**：`offset>1` 且被截断时页脚从
+  `lines 1-…` 变成 `lines <offset>-…`；`offset=1` 逐字不变；`offset=` 续读算术不变。
+
+**顺带的既有 bug 修复（不在任何票面里）**：`edit.clj` 里 `:require-path` 的拒绝话术还写着
+「the project's harness.edn」——config-merge 把 `:editing` 搬到 `config.edn` 的 `:session` 之后这句没跟，
+已改成 `config.edn's :session :editing`。
+
+**判据**：
+
+- 后端全量 `clojure -M:test -m harness.test-runner` → `Ran 1395 tests containing 14428 assertions.
+  12 failures, 1 errors.`
+- 这 13 条红**全部**落在四个已知红命名空间（`kernel.tools-test` 8、`cap.mcp-wired-test` 3、
+  `kernel.hooks-test` 1、`cap.claims-test` 1）；把它们单独在 `main` 上跑一遍，得到**同样的
+  12 失败 + 1 错误、同样的用例名**（`.scratch/config-merge/spec.md` 已记它们与本特征无关）。
+- 改动面命名空间（`hashline.*` 十个）定向跑全绿：`Ran 195 tests containing 7347 assertions.
+  0 failures, 0 errors.`
+- `ui/` 未改（票 01–05 都不碰前端）。

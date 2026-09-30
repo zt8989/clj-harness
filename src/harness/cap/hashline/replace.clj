@@ -53,6 +53,17 @@
   [config]
   (long (or (:diff-context-lines config) 1)))
 
+(defn- case-variants
+  "The anchors THREAD-ID holds that equal ANCHOR ignoring case -- what a model most
+  plausibly meant when it typed one of a different case. Empty when none does, which
+  is the ordinary case; a hit is a coincidence worth naming."
+  [thread-id anchor]
+  (into []
+        (comp (map key)
+              (filter (fn [a] (and (not= a anchor)
+                                   (.equalsIgnoreCase ^String a ^String anchor)))))
+        (store/ownership thread-id)))
+
 (defn- unresolvable!
   "The error for an anchor this session cannot turn into a file -- two shapes, and
   the difference decides what the model does next.
@@ -62,19 +73,36 @@
   'call read' would be an instruction to retry the same mistake. A real anchor this
   session does not hold, on the other hand, is exactly what a read fixes -- the
   window moved, the process restarted, or the model is addressing a file it has not
-  opened. Both are refused; only one is a retry."
-  [anchor]
-  (if (anchors/anchor? anchor)
-    (ex-info (str "no anchors here name a file in this session. Call read on the file"
-                  " you mean first -- editing is addressed by anchors, and read is"
-                  " where they come from.")
-             {:anchor anchor :reason :not-read})
-    (ex-info (str "`" anchor "` is not an anchor. The names this scheme hands out are"
-                  " four letters from a fixed table, and this one is not among them"
-                  " (the anchor table has no digits in it, and the letters have to be"
-                  " spelled exactly). Copy the anchor from the left of the read row"
-                  " you mean -- reading the file again is what produces the name.")
-             {:anchor anchor :reason :not-an-anchor})))
+  opened. Both are refused; only one is a retry.
+
+  A THIRD shape rides on the second: the anchor is a real one and only its CASE is
+  wrong (a model typing `hasu` for `Hasu`), and this session holds the true spelling.
+  That gets named, because 'call read' would not fix it -- the model already has the
+  answer and mistyped it."
+  [thread-id anchor]
+  (let [similar (case-variants thread-id anchor)]
+    (cond
+      (seq similar)
+      (ex-info (str "no anchors here name a file in this session -- and this looks like a"
+                    " quoting slip: anchors are case-sensitive, so `" anchor "` is not"
+                    " the name this session holds. It holds "
+                    (str/join ", " (map #(str "`" % "`") similar))
+                    ". Use that anchor, or call read on the file you mean.")
+               {:anchor anchor :reason :not-read :similar similar})
+
+      (anchors/anchor? anchor)
+      (ex-info (str "no anchors here name a file in this session. Call read on the file"
+                    " you mean first -- editing is addressed by anchors, and read is"
+                    " where they come from.")
+               {:anchor anchor :reason :not-read})
+
+      :else
+      (ex-info (str "`" anchor "` is not an anchor. The names this scheme hands out are"
+                    " four letters from a fixed table, and this one is not among them"
+                    " (the anchor table has no digits in it, and the letters have to be"
+                    " spelled exactly). Copy the anchor from the left of the read row"
+                    " you mean -- reading the file again is what produces the name.")
+               {:anchor anchor :reason :not-an-anchor}))))
 
 (defn target-path
   "The file an edit addresses, from the anchors rather than from an argument.
@@ -97,7 +125,7 @@
         ;; refusal it deserves comes a moment later from `plan-edit`.
         anchor (or (try (:from (edit/parse args {:strict? false :require-path? false}))
                        (catch Throwable _ nil))
-                   (edit/bare-anchor (or (:remove_from args) (:replace_from args)
+                   (edit/bare-anchor (or (:remove_from args) (:replace_from args) (:from args)
                                          (:anchor args))))
         given  (let [p (:path args)] (when (and (string? p) (not (str/blank? p))) p))]
     (or (when (string? anchor) (store/owner-of thread-id anchor))
@@ -136,7 +164,7 @@
       :else
       (if-let [r (edit/range-from-view st from to)]
         [r true]
-        (throw (unresolvable! from))))))
+        (throw (unresolvable! thread-id from))))))
 
 ;; ------------------------------------------------------- the healing refusals
 
@@ -304,7 +332,7 @@
 
                 owner owner
                 given given
-                :else (throw (unresolvable! anchor)))]
+                :else (throw (unresolvable! thread-id anchor)))]
     (store/canonical (resolve-path path))))
 
 (defn- guard!
@@ -680,7 +708,7 @@
   [thread-id parsed]
   (try
     (let [anchor (edit/bare-anchor (or (:remove_from parsed) (:replace_from parsed)
-                                       (:anchor parsed)))
+                                       (:from parsed) (:anchor parsed)))
           owner  (when anchor (store/owner-of thread-id anchor))
           p      (or owner (:path parsed))]
       (when (and (string? p) (not (str/blank? p)))

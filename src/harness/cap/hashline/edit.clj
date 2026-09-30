@@ -146,6 +146,27 @@
                     " new line, or [] to delete the range."
                     {:argument :replacement_lines :reason :missing}))
 
+    ;; The WHOLE FIELD arrived as one string: a JSON array of strings, or content to
+    ;; split on newlines. Each has exactly one reading, so it is fixed and said.
+    (string? v)
+    (let [t (str/trim v)]
+      (if (and (str/starts-with? t "[") (str/ends-with? t "]"))
+        (let [parsed (try (json/read-str t) (catch Exception _ nil))]
+          (if (and (sequential? parsed) (every? string? parsed))
+            (do (swap! warnings conj
+                       (str "Unwrapped a JSON array passed as the whole `replacement_lines`"
+                            " field."))
+                (vec parsed))
+            (throw (ex-info (str "`replacement_lines` must be an array of strings, one per line"
+                                 " ([] deletes the range); got " (pr-str v) ".")
+                            {:argument :replacement_lines :value v :reason :not-an-array}))))
+        (let [lines (vec (str/split (str/replace v "\r\n" "\n") #"\n" -1))]
+          (when (> (count lines) 1)
+            (swap! warnings conj
+                   (str "Split the whole `replacement_lines` field into " (count lines)
+                        " lines on newlines.")))
+          lines)))
+
     (not (sequential? v))
     (throw (ex-info (str "`replacement_lines` must be an array of strings, one per line"
                          " ([] deletes the range); got " (pr-str v) ".")
@@ -234,34 +255,42 @@
   [args {:keys [strict? require-path? warnings]}]
   (let [warnings (or warnings (atom []))
         known    #{"remove_from" "remove_to" "replacement_lines" "path"
-                   "replace_from" "replace_to" "file_path"}
+                   "replace_from" "replace_to" "from" "to" "file_path"}
         ;; `known` holds STRINGS, so the names are computed before the removal --
         ;; asking a set of strings about keywords matches nothing and reports every
         ;; argument as unknown. (That is exactly how this read the first time.)
         extras   (sort (remove known (map name (keys args))))
-        from-key (if (contains? args :replace_from) :replace_from :remove_from)
-        to-key   (if (contains? args :replace_to) :replace_to :remove_to)]
+        ;; The anchor fields have compat spellings (upstream 4.3.4) and the canonical
+        ;; name wins when more than one is present. A missing `remove_from` is refused
+        ;; in the body below, naming every spelling it accepts.
+        from-key (some #(when (contains? args %) %) [:remove_from :replace_from :from])
+        to-key   (some #(when (contains? args %) %) [:remove_to :replace_to :to])]
     (when (seq extras)
       (throw (ex-info (str "replace does not take " (pr-str (vec extras)) "; it takes"
                            " remove_from, remove_to and replacement_lines"
                            (when require-path? ", plus path")
                            ".")
                       {:unknown (vec extras) :reason :unknown-argument})))
+    (when-not from-key
+      (throw (ex-info (str "`remove_from` is required: the 4-character anchor of the first"
+                           " line to replace, from a read row (the text before the `│`)."
+                           " `replace_from` and `from` are accepted spellings.")
+                      {:argument :remove_from :reason :missing})))
     ;; With :require-path the caller must NAME the file, and the engine then checks
     ;; that the name agrees with the anchor's owner. Without it the path is not
     ;; refused for being present -- the model may well pass the path it just read --
     ;; it is simply not required, and is checked the same way when it is given.
     (when (and require-path? (str/blank? (str (:path args))))
-      (throw (ex-info (str "`path` is required in this session (the project's harness.edn"
-                           " sets :editing {:require-path true}), and must name the file"
+      (throw (ex-info (str "`path` is required in this session (config.edn's"
+                           " :session :editing sets :require-path true), and must name the file"
                            " the anchors were served for.")
                       {:argument :path :reason :missing})))
-    (let [from  (anchor-arg from-key (:remove_from args) warnings)
+    (let [from  (anchor-arg from-key (get args from-key) warnings)
           ;; `remove_to` omitted means a single line -- the commonest edit there is,
           ;; and making the model repeat the anchor for it would be asking it to
           ;; spell the same thing twice.
-          to    (if (contains? args to-key)
-                  (anchor-arg to-key (:remove_to args) warnings)
+          to    (if to-key
+                  (anchor-arg to-key (get args to-key) warnings)
                   from)
           lines (replacement-arg (:replacement_lines args) warnings)]
       (check-nul! lines)

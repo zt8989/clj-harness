@@ -687,7 +687,7 @@
 (register! "replace"
   (assoc (tool replace-description
                (get replace-params :properties)
-               [:remove_from :replacement_lines] anchor-replace)
+               [:replacement_lines] anchor-replace)
          ;; The fence has no `path` argument to look at when the model omits it, so
          ;; the target is derived here -- the same derivation the body uses, so the
          ;; call that parks and the call that runs are about the same file.

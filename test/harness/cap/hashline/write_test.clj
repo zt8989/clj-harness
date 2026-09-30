@@ -9,6 +9,7 @@
             [harness.infra.db :as db]
             [harness.cap.hashline.anchors :as anchors]
             [harness.cap.hashline.store :as store]
+            [harness.cap.hashline.files :as files]
             [harness.cap.hashline.write :as hashline-write]
             [harness.cap.hashline.undo :as hashline-undo]
             [harness.infra.home :as home]
@@ -176,6 +177,22 @@
       (is (= before-content (slurp file :encoding "UTF-8")) "the file is untouched")
       (is (= before-owners (store/ownership tid)) "the anchors are still this session's")
       (is (= before-undo (store/undo-for (path))) "and the undo record survives"))))
+
+(deftest a-write-past-the-size-limit-is-refused-and-creates-nothing
+  ;; One number bounds reading and writing: a file past it could not be read back,
+  ;; so the write is refused BEFORE anything is created or touched.
+  (use-mode!)
+  (let [newfile (io/file root "too-big.txt")]
+    (with-redefs [files/max-bytes 20]
+      (let [{:keys [content error]} (call "write" {:path "too-big.txt"
+                                                   :content "far more than twenty bytes of text"})]
+        (is (true? error) (pr-str content))
+        (is (str/includes? content "byte limit") (pr-str content))))
+    (is (not (.exists newfile)) "the file was not created")
+    (testing "and a write within the limit still lands"
+      (with-redefs [files/max-bytes 1000]
+        (is (false? (:error (call "write" {:path "too-big.txt" :content "small\n"}))))
+        (is (= "small\n" (slurp newfile :encoding "UTF-8")))))))
 
 ;; ----------------------------------------------------- the answer is a receipt
 

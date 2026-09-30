@@ -21,16 +21,11 @@
   outcome: no error, wrong content, and anchors minted against it. So both are
   refusals. A UTF-8 BOM is NOT a refusal: the file still decodes correctly, and
   the BOM is line 1's first character like any other."
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            [harness.cap.hashline.files :as files])
   (:import [java.io File RandomAccessFile]))
 
 ;; ------------------------------------------------------------- the limits
-
-(def max-file-bytes
-  "A file bigger than this is refused rather than read. 100 MiB, upstream's
-  number: past it the whole-file read this design rests on stops being something
-  a session can do, and `write` is the honest answer."
-  (* 100 1024 1024))
 
 (def line-budget
   "How many rows one call may return. 2000, matching the host read upstream
@@ -132,9 +127,9 @@
                            " `bash` (ls), then read the file you want.")
                       {:path abs :reason :directory}))
 
-      (> (.length f) max-file-bytes)
+      (> (.length f) files/max-bytes)
       (throw (ex-info (str abs " is " (.length f) " bytes, over the "
-                           max-file-bytes "-byte limit for an anchored read."
+                           files/max-bytes "-byte limit for an anchored read."
                            " Use `write` to replace it wholesale, or `bash`"
                            " (head/tail/grep) to work with part of it.")
                       {:path abs :reason :too-large :bytes (.length f)}))
@@ -221,9 +216,13 @@
 (defn- footer
   "The trailing line when a read stopped short: what was shown, and the offset
   that continues. The offset is the point -- a model that has to derive it from a
-  line count will get it wrong, and the right value is known right here."
-  [^long shown-to ^long total ^String why]
-  (str "[Showing lines 1-" shown-to " of " total " — " why
+  line count will get it wrong, and the right value is known right here.
+
+  FROM is the 1-based line this page STARTS at. A page read with OFFSET must say so
+  here, or a model looking at `lines 1-...` would take a page that begins at 50 for
+  the top of the file."
+  [^long from ^long shown-to ^long total ^String why]
+  (str "[Showing lines " from "-" shown-to " of " total " — " why
        ". Use offset=" (inc shown-to) " to continue.]"))
 
 (defn preview
@@ -296,7 +295,7 @@
              :shown #{a}
              :shown-to (inc start)
              :next-offset nil})
-          {:text  (if why (str body "\n" (footer shown-to total why)) body)
+          {:text  (if why (str body "\n" (footer (inc start) shown-to total why)) body)
            :shown (:shown page)
            :shown-to shown-to
            :next-offset (when why (inc shown-to))})))))

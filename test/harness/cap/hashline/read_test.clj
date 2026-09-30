@@ -201,6 +201,19 @@
           page-2 (read-raw "r1" {:path "ten.txt" :limit 4 :offset 5})]
       (is (= "line5" (second (first (rows page-2))))))))
 
+(deftest the-footer-names-where-this-page-began
+  ;; A page that begins at line 5 must not be labelled `lines 1-...`: the model reads
+  ;; that label to know where it is, and `1-` would place it at the top of the file.
+  (use-mode! "r1" ":hashline")
+  (put! "ten.txt" (str/join "\n" (map #(str "line" %) (range 1 11))))
+  (testing "a page read with offset starts there, not at 1"
+    (let [out (read-raw "r1" {:path "ten.txt" :offset 5 :limit 3})]
+      (is (str/includes? out "Showing lines 5-7 of 10"))
+      (is (str/includes? out "offset=8"))))
+  (testing "and the default page still says 1-"
+    (let [out (read-raw "r1" {:path "ten.txt" :limit 3})]
+      (is (str/includes? out "Showing lines 1-3 of 10")))))
+
 (deftest a-bad-offset-or-limit-is-named-not-swallowed
   (use-mode! "r1" ":hashline")
   (put! "three.txt" "a\nb\nc\n")
