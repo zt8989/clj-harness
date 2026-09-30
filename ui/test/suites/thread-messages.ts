@@ -94,6 +94,69 @@ const cases: Case[] = [
       }
     },
   },
+  {
+    name: "a-park-stays-the-last-assistant-message-when-the-thinking-arrived-after-it",
+    run: async () => {
+      // THE SHAPE A PAGE FOLLOWING A RUN IS LEFT HOLDING (owner's report, 2026-09-30, sessions
+      // `b92dfd61` / `62f30024`). The server's fold has the pair the other way round
+      // (`[... reasoning(r59), assistant(m60, interrupts)]`) and a reload imports exactly that.
+      // But `lib/window.ts`'s `merged` updates an entry it knows IN PLACE and APPENDS every entry
+      // that is new to it, so a page that already held the question -- from the run's own frames,
+      // which never carried the reasoning -- gets the thinking added AFTER it. Upstream finds a
+      // park with `findLast(m => m.role === "assistant")`, so this order is a card that draws
+      // nowhere (and `submitInterruptResponses` throws "no pending interrupts on this thread").
+      const held = [
+        { id: "u1", role: "user", content: "参考 dsh 的 goal 功能帮我实现一套" },
+        {
+          id: "m60",
+          role: "assistant",
+          content: "动手前有四件事只有你能定，一次问完：",
+          toolCalls: [
+            { id: "c1", type: "function", function: { name: "ask", arguments: '{"questions":[]}' } },
+          ],
+          metadata: {
+            custom: {
+              agui: {
+                interrupts: [
+                  { id: "i1", reason: "elicitation", message: "四件事", toolCallId: "c1" },
+                ],
+              },
+            },
+          },
+        },
+        { id: "r59", role: "reasoning", content: "I have a good picture now." },
+      ];
+
+      const interruptsOf = (message: unknown) =>
+        (message as { metadata?: { custom?: Record<string, { interrupts?: readonly unknown[] }> } })
+          .metadata?.custom?.agui?.interrupts;
+
+      const messages = toThreadMessages(held, null);
+      const last = messages[messages.length - 1];
+
+      // THE PARK IS LAST, WEARING THE READING THE CARD IS DRAWN FROM.
+      expect(last?.role).toBe("assistant");
+      expect(interruptsOf(last)).toHaveLength(1);
+      expect(last?.status?.type).toBe("requires-action");
+      expect((last?.status as { reason?: string } | undefined)?.reason).toBe("interrupt");
+      // ...and it is the LAST ASSISTANT, which is the question upstream actually asks.
+      expect([...messages].reverse().find((m) => m.role === "assistant")).toBe(last);
+
+      // THE THINKING IS STILL THERE, moved in front of the question the way the server folds it:
+      // nothing is dropped to make room for the card.
+      expect(messages).toHaveLength(held.length);
+      expect(messages[held.length - 2]?.id).toBe("r59");
+      expect(
+        (messages[held.length - 2]?.content as unknown as { type?: string }[])[0]?.type,
+      ).toBe("reasoning");
+
+      // A CONVERSATION WITH NO PARK COMES BACK UNTOUCHED (the common shape costs nothing)...
+      expect(toThreadMessages(entries, null).map((m) => m.id)).toEqual(["u1", "m1"]);
+      // ...and so does one whose park is already last, which is every reload.
+      const alreadyLast = [held[0], held[2], held[1]];
+      expect(toThreadMessages(alreadyLast, null).map((m) => m.id)).toEqual(["u1", "r59", "m60"]);
+    },
+  },
 ];
 
 export const threadMessagesSuite: Suite = { name: "thread-messages", cases };

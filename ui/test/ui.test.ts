@@ -525,7 +525,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
 /// removes was measured in a real browser.
 ///
-/// 188 -> 192: the settings panel's SESSION PAGE -- `.scratch/session-lifecycle` ticket 02, the
+/// ...188 -> 189: the `thread-messages` suite's case for the park that LOST ITS PLACE (owner's
+/// report, 2026-09-30, sessions `b92dfd61` / `62f30024`). A page following a run merges pages
+/// into a window it holds, and `lib/window.ts`'s `merged` updates what it knows in place while
+/// APPENDING what is new -- so thinking that only the folded record carries arrived AFTER the
+/// question it belongs to, and upstream's `findLast(m => m.role === "assistant")` then found no
+/// park at all: the card drew nowhere and `submitInterruptResponses` refused by name. The case
+/// pins the order `lib/thread-messages.ts` now guarantees, and that a conversation with no park
+/// (or one already in that order) is passed through untouched.
+///
+/// ...189 -> 193: the settings panel's SESSION PAGE -- `.scratch/session-lifecycle` ticket 02, the
 /// UI half of the backend ticket beside it. The `settings-sessions` suite's four cases, and they
 /// are all SENTENCES, which is why they are renders rather than source reads: what a row is called
 /// and the two states (`已归档` / `运行中`) that decide what a verb does; the three verbs' words
@@ -544,7 +553,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// is empty until a browser mounts one: an open dialog renders as nothing in this run. What no
 /// render can see -- that a press really sends the batch, that the listing is read AGAIN
 /// afterwards, and that a deleted row leaves it -- is the browser walkthrough's half.
-const EXPECTED_CASES = 192;
+const EXPECTED_CASES = 193;
 
 let total = 0;
 for (const suite of SUITES) {

@@ -609,7 +609,7 @@ reasoning 消息（后端不再在答案的第一个 token 上关闭它，见 [e
   （`GET /api/language`），再用一条零 import 的纯函数（`src/lib/language.ts` 的 `asLanguage`）把它
   收进两种语言之一——**基础子标签**决定，所以 `zh` / `zh-CN` / `zh-TW` / 旧的 `zh_CN` /
   `zh-Hans-CN` 都是中文，`fr` 这类落到英文。这样**界面与 `<env>` 说的是同一个值**：人在说中文时，
-  模型不会用英文回答（`.scratch/agent-language`）。
+  模型不会用英文回答。
 - **开关在设置面板的 General 页，写 `config.edn`**（`POST /api/language`，与别的写配置一样：先校验整份
   配置、再原子写、留一份 `.bak`）；写完界面立刻切过去，**写失败就把服务端那句话显示在开关下面，且不
   切换**。它**不再是那个面板里唯一不写文件的一项**——语言是这个家的配置，和 provider / model 一样。

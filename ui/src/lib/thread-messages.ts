@@ -51,6 +51,78 @@ export function readsOf(state: string | null | undefined): Reads {
     : null;
 }
 
+/// ------------------------------------------------------------ and the park has to end up LAST
+///
+/// A PARKED RUN IS FOUND BY THE LAST ASSISTANT MESSAGE AND BY NOTHING ELSE. Upstream reads the
+/// interrupts it draws a card from like this (`AgUiThreadRuntimeCore.getPendingInterrupts`):
+///
+///   const assistant = this.getMessages().findLast((m) => m.role === "assistant");
+///   ... assistant.metadata.custom.agui.interrupts
+///
+/// so a conversation whose FINAL assistant message is not the one the park rides on has no card at
+/// all -- and `submitInterruptResponses` refuses in the same breath ("no pending interrupts on
+/// this thread"), so a card drawn some other way could not be answered either. The order is not
+/// decoration; it is the whole of what makes the question reachable.
+///
+/// THE SERVER ALWAYS PUTS IT LAST, AND THE PAGE CAN STILL PUT SOMETHING AFTER IT. The fold hands a
+/// parked run back as `[... reasoning(r59), assistant(m60, interrupts)]` -- the thinking belongs to
+/// the message that follows it -- and a reload imports exactly that. But a page WATCHING the run
+/// merges pages into a window it already holds (`lib/window.ts`'s `merged`), and that merge updates
+/// an entry it already knows IN PLACE while APPENDING every entry that is new to it. A provider
+/// whose reasoning never came down the frame stream -- only the `kernel-message` row carries it --
+/// leaves the page holding `m60` with no `r59`, so the next page ADDS `r59` after it and the park
+/// is no longer last. The card vanishes the moment the run parks and comes back on a reload, which
+/// is the whole of the owner's report (2026-09-30, sessions `b92dfd61` / `62f30024`) and its two
+/// predecessors.
+///
+/// SO THE ORDER IS FIXED HERE, at the one door every one of those paths goes through, rather than
+/// in the merge: `merged` is arithmetic about windows, and this is a rule about parks. What it
+/// moves is only what it must -- a parked message with NOTHING BUT THINKING after it -- and
+/// anything else is passed through untouched, because a rule that reorders more than it
+/// understands is a rule that breaks a conversation to fix a card.
+
+/// The metadata namespace a parked run's interrupts ride on: `harness.kernel.frames/
+/// park-namespace` spelled on this side, and it has to be the same word on both or this rule
+/// finds nothing at all.
+const PARK_NAMESPACE = "agui";
+
+/// Is THIS message the one a parked run stopped on? The list's own presence is the test: the
+/// server folds `RUN_FINISHED.outcome.interrupts` onto the message its `toolCallId` belongs to
+/// (`harness.edge.replay/park-on-call`), so no message carries one by accident.
+const carriesAPark = (message: unknown): boolean => {
+  const interrupts = (
+    message as { metadata?: { custom?: Record<string, { interrupts?: unknown }> } } | null
+  )?.metadata?.custom?.[PARK_NAMESPACE]?.interrupts;
+  return Array.isArray(interrupts) && interrupts.length > 0;
+};
+
+/// Does this message hold NOTHING BUT thinking? The shape that trails a park -- and the only one
+/// this rule is allowed to move.
+const isThinkingOnly = (message: unknown): boolean => {
+  const parts = (message as { content?: unknown } | null)?.content;
+  return (
+    (message as { role?: unknown } | null)?.role === "assistant" &&
+    Array.isArray(parts) &&
+    parts.length > 0 &&
+    parts.every((part) => (part as { type?: unknown } | null)?.type === "reasoning")
+  );
+};
+
+/// THE PARK LAST, or the conversation exactly as it arrived -- see above for why the shape is what
+/// a card needs. Generic rather than typed to `ThreadMessageLike` so the caller keeps its own type
+/// and this module stays free of `@assistant-ui/react` (the head's reason for being a leaf).
+export function parkStaysLast<T>(messages: readonly T[]): readonly T[] {
+  const parked = messages.findIndex(
+    (message) => (message as { role?: unknown } | null)?.role === "assistant" && carriesAPark(message),
+  );
+  if (parked < 0) return messages;
+  const trailing = messages.slice(parked + 1);
+  // NOTHING TO MOVE -- the common case by far, and the one that must cost nothing.
+  if (trailing.length === 0 || !trailing.every(isThinkingOnly)) return messages;
+  // THE THINKING GOES IN FRONT OF THE PARK, which is where the server's own fold has it: the
+  // reasoning that led to the question is read before the question.
+  return [...messages.slice(0, parked), ...trailing, messages[parked] as T];
+}
 /// The converted history a restore hands the runtime: `fromAgUiMessages` rebuilds text,
 /// reasoning and tool calls -- and reads back a parked run's `metadata.custom.agui.interrupts` --
 /// but its output is still the loose `ThreadMessageLike` shape; the repository wants the
@@ -65,7 +137,10 @@ export function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads)
   // after it, because upstream's converter has no case for a `data` part (see `lib/card-parts.ts`,
   // which owns the names and the rule for both cards). Everything else about a rebuilt message is
   // upstream's.
-  const converted = keepCardParts(agUiMessages, fromAgUiMessages(agUiMessages));
+  // THE CONVERSION'S OWN ORDER IS NOT ALWAYS THE SERVER'S, and the park is the one message that
+  // has to be last (`parkStaysLast`, above): a page following a run can be handed a conversation
+  // whose thinking arrived after the question. A no-op on every other shape.
+  const converted = parkStaysLast(keepCardParts(agUiMessages, fromAgUiMessages(agUiMessages)));
   const last = converted.length - 1;
   return converted.map((message, index) => {
     // THE STATUS A REBUILT MESSAGE ARRIVES WITH IS ITS OWN, and only the LAST one's is
