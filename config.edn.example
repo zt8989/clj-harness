@@ -73,12 +73,6 @@
    ;; the default -- fixes them and SAYS what it fixed.
    :strict-input false
 
-   ;; What to do when a replacement re-includes the line just outside its range:
-   ;;   :on      strip it and report it (default)
-   ;;   :strict  refuse the edit and say which lines to drop
-   ;;   :off     apply it literally
-   :boundary-dedup :on
-
    ;; How many untouched lines an edit's answer shows either side of the change
    ;; (0-10).
    :diff-context-lines 1}

@@ -57,7 +57,7 @@
     (project/bind! "ed-default" root)
     (write-session! "{:editing {:mode :str-replace}}")
     (is (= :str-replace (:mode (editing/editing-mode "ed-default"))))
-    (is (= :on (:boundary-dedup (editing/editing-mode "ed-default")))
+    (is (= 1 (:diff-context-lines (editing/editing-mode "ed-default")))
         "and the other keys keep their defaults -- the block composes by key")))
 
 (deftest a-session-with-nothing-written-is-just-as-empty
@@ -81,8 +81,8 @@
            (select-keys (editing/editing-mode "ed-overlay")
                         [:mode :diff-context-lines]))))
   (testing "and the keys nobody named are still the defaults"
-    (is (= :on (:boundary-dedup (editing/editing-mode "ed-overlay")))
-        "nobody named :boundary-dedup, so it is the default")
+    (is (false? (:require-path (editing/editing-mode "ed-overlay")))
+        "nobody named :require-path, so it is the default")
     (is (true? (:grep (editing/editing-mode "ed-overlay")))))
   (testing "writing the block again REPLACES it -- there is one level, not a merge of two"
     ;; THE THING THE PROJECT LEVEL USED TO BUY, said out loud as its absence: a second
@@ -196,6 +196,20 @@
     (is (str/includes? (msg-of #(editing/editing-mode "ed-auto-read")) ":grep")
         "while the keys that ARE legal are listed")))
 
+(deftest boundary-dedup-is-also-an-unknown-key
+  ;; `:boundary-dedup` was legal through the 4.2.11 port: it stripped, refused, or
+  ;; kept a replacement that re-included the line at its range's edge. Upstream removed
+  ;; it in 4.4.0 and this repo followed -- edits are applied literally -- so a config.edn
+  ;; that still names the key gets the same named failure a typo gets.
+  (project/bind! "ed-boundary" root)
+  (write-session! "{:editing {:boundary-dedup :off}}")
+  (let [e (ex-data-of #(editing/editing-mode "ed-boundary"))]
+    (is (= :unknown-editing-key (:reason e)))
+    (is (= :boundary-dedup (:key e)))
+    (is (= "config" (name (:level e)))))
+  (is (not (contains? editing/defaults :boundary-dedup))
+      "the key is not a default any more"))
+
 (deftest an-unknown-key-fails-even-beside-a-legal-one
   ;; A typo is not a value that loses a merge: it is a request nobody was ever going to
   ;; honour, so looking at what survived would hide it. (This used to be the case that
@@ -230,8 +244,6 @@
       (check "{:editing {:grep 1}}" :grep "true or false")
       (check "{:editing {:require-path nil}}" :require-path "true or false")
       (check "{:editing {:strict-input :on}}" :strict-input "true or false"))
-    (testing ":boundary-dedup has its own three values"
-      (check "{:editing {:boundary-dedup true}}" :boundary-dedup ":on, :strict or :off"))
     (testing ":diff-context-lines is a bounded integer, and the bound is named"
       (check "{:editing {:diff-context-lines \"2\"}}" :diff-context-lines "an integer 0-10")
       (check "{:editing {:diff-context-lines -1}}" :diff-context-lines "an integer 0-10")
@@ -244,14 +256,12 @@
   ;; would send the reader into a second failure.
   (project/bind! "ed-legal" root)
   (doseq [mode [:hashline :str-replace]
-          dedup [:on :strict :off]
           n [0 1 10]]
-    (write-session! (str "{:editing {:mode " mode " :boundary-dedup " dedup
+    (write-session! (str "{:editing {:mode " mode
                          " :diff-context-lines " n
                          " :grep false :require-path true :strict-input false}}"))
     (let [m (editing/editing-mode "ed-legal")]
       (is (= mode (:mode m)))
-      (is (= dedup (:boundary-dedup m)))
       (is (= n (:diff-context-lines m)))
       (is (false? (:grep m))))))
 
@@ -264,11 +274,7 @@
   (doseq [n [0 10]]
     (write-session! (str "{:editing {:diff-context-lines " n "}}"))
     (is (= n (:diff-context-lines (editing/editing-mode "ed-edges")))
-        (str "diff-context-lines " n)))
-  (doseq [d [:on :strict :off]]
-    (write-session! (str "{:editing {:boundary-dedup " d "}}"))
-    (is (= d (:boundary-dedup (editing/editing-mode "ed-edges")))
-        (str "boundary-dedup " d))))
+        (str "diff-context-lines " n))))
 
 (deftest a-broken-value-is-refused-even-though-the-defaults-would-cover-it
   ;; Values are judged as WRITTEN, not as they survive the fold over the defaults. A

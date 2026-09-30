@@ -27,9 +27,8 @@
 
   WHAT IT WILL NOT FIX. A NUL byte (a text file cannot hold one, and writing it
   would break every later read), emptying a non-empty file (that is `write`'s job,
-  not an edit's), and -- per `:boundary-dedup` -- a replacement that re-includes
-  the line at the edge of its own range, which is either stripped, refused, or
-  taken literally depending on how the session is configured."
+  not an edit's). A replacement that re-includes the line at the edge of its own
+  range is NOT special-cased -- it is applied literally, like any other line."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [harness.cap.hashline.anchors :as anchors]
@@ -448,57 +447,6 @@
                          " to clear a file, use `write` with empty content.")
                     {:reason :would-empty}))))
 
-;; ------------------------------------------------------------ the dedup
-
-(defn dedup-edges
-  "Boundary dedup: strip replacement lines that merely repeat the line adjacent to
-  the range.
-
-  WHY THIS EXISTS. The natural way to write 'change this line and add another
-  after it' is to replace the range and include the boundary line again in the
-  replacement. That is not wrong, it is just redundant -- and left in, the file
-  gains a duplicate line that then has to be edited back out.
-
-  Which lines count depends on where the range is: the line BEFORE it for a
-  replacement that starts by repeating it, the line AFTER for one that ends by
-  repeating it. The trailing case is only stripped when the block is unique in the
-  rest of the file, because a repeated line that also appears elsewhere is not
-  obviously a boundary artefact."
-  [lines {:keys [start end]} new-lines mode]
-  (if (= :off mode)
-    {:lines new-lines :stripped 0}
-    (let [before-line (when (pos? start) (nth lines (dec start)))
-          after-line  (when (< end (count lines)) (nth lines end))
-          n           (count new-lines)
-          lead        (when (and before-line (= before-line (first new-lines))) 1)
-          trail       (when (and after-line (> n (or lead 0))
-                                 (= after-line (last new-lines)))
-                        1)]
-      (cond
-        ;; :strict refuses instead of stripping, so the model learns the shape.
-        (and (= :strict mode) (or lead trail))
-        (throw (ex-info (str "the replacement re-includes a line at the edge of the"
-                             " range"
-                             (when lead (str " (line " start ", the line before it)"))
-                             (when trail (str " (line " (inc end) ", the line after it)"))
-                             ". Boundary dedup is set to :strict in this session, so it"
-                             " was refused rather than stripped -- resend without"
-                             (when lead " the first") (when trail " the last")
-                             " line.")
-                        {:reason :boundary-strict :lead lead :trail trail}))
-
-        :else
-        ;; `cond->` would thread the replacement into `subvec` as its COLLECTION
-        ;; (first argument), so the two cuts are written out: drop the head, then
-        ;; drop the tail of whatever is left.
-        (let [kept (cond-> (vec new-lines)
-                     lead  (as-> v (subvec v 1))
-                     trail (as-> v (subvec v 0 (dec (count v)))))]
-          {:lines    (vec kept)
-           :stripped (+ (if lead 1 0) (if trail 1 0))
-           :lead     (boolean lead)
-           :trail    (boolean trail)})))))
-
 ;; ------------------------------------------------------------- the answer
 
 (defn row-of
@@ -525,16 +473,14 @@
       context up to CONTEXT untouched lines between one change and the next
       trail   up to CONTEXT untouched lines after the last change
 
-  A `+   │... N line(s) before/after` row stands in for anything skipped, and a
-  `dedup│...` row -- the one row that is NOT an anchor, and says so by not looking
-  like one -- reports what boundary dedup removed.
+  A `+   │... N line(s) before/after` row stands in for anything skipped.
 
   Returns {:text ... :shown #{...}}, and SHOWN is the point of returning a map: the
   anchors that were printed are exactly the ones the model may now address, and the
   store has to be told about them or the very next edit would be refused as
   addressing a line nobody was shown. Computing that set anywhere else would be a
   second list of index ranges to keep in step with this one."
-  [{:keys [before after anchors spans context stripped]}]
+  [{:keys [before after anchors spans context]}]
   (let [after  (vec after)
         before (vec before)
         spans  (vec (sort-by :old-start spans))
@@ -570,12 +516,7 @@
                      (into rows (concat gap ctxt rm add))
                      (into shown (keep #(nth anchors % nil))
                            (concat (range from new-start) (range new-start new-end)))))))
-        text (str/join
-              "\n"
-              (concat rows
-                      (when (pos? stripped)
-                        [(str "dedup│" stripped
-                              " line(s) at the boundary were not added again")])))]
+        text (str/join "\n" rows)]
     {:text text :shown shown}))
 
 (defn ok-message

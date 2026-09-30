@@ -1,6 +1,6 @@
 (ns harness.cap.hashline.replace-test
   "The anchor-addressed edit: the payload grammar, the slips that are fixed rather
-  than refused, the boundary dedup, and the answer that hands the model its next
+  than refused, literal application, and the answer that hands the model its next
   edit without a read."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -229,49 +229,24 @@
                             " 1│"))
         "no context lines at 0")))
 
-;; ------------------------------------------------------------- the dedup
+;; -------------------------------------------------------- literal application
 
-(deftest a-replacement-that-repeats-the-next-line-is-deduplicated
-  ;; The slip this exists for: the range is two..three, and the replacement
-  ;; re-includes FOUR -- the line that comes after the range -- so applying it
-  ;; literally would leave the file with two of them.
+(deftest a-replacement-is-applied-literally-even-when-it-repeats-a-neighbour
+  ;; There is no boundary dedup: a replacement that re-includes the line just
+  ;; outside the range is applied exactly as written, so the repeat lands.
   (use-mode!)
-  (write! "one\ntwo\nthree\nfour\n")
-  (let [[_ b c _] (read!)
-        out (:content (replace! {:remove_from b :remove_to c
-                                 :replacement_lines ["X" "four"]}))]
-    (testing "the line was not added a second time"
-      (is (= "one\nX\nfour\n" (slurp file :encoding "UTF-8"))))
-    (testing "and the answer says the dedup happened"
-      (is (str/includes? out "dedup│")))))
-
-(deftest a-replacement-that-repeats-the-previous-line-is-deduplicated
-  (use-mode!)
-  (write! "one\ntwo\nthree\n")
-  (let [[_ b c] (read!)]
-    (replace! {:remove_from b :remove_to c :replacement_lines ["one" "X"]})
-    (is (= "one\nX\n" (slurp file :encoding "UTF-8")))))
-
-(deftest strict-dedup-refuses-instead-of-stripping
-  (use-mode! :hashline {:boundary-dedup :strict})
-  (write! "one\ntwo\nthree\nfour\n")
-  (let [[_ b c _] (read!)]
-    (let [out (:content (replace! {:remove_from b :remove_to c
-                                   :replacement_lines ["X" "four"]}))]
-      (is (str/includes? out "re-includes a line"))
-      (is (= "one\ntwo\nthree\nfour\n" (slurp file :encoding "UTF-8")))
-      (is (str/includes? (:content (call "replace" {:remove_from b
-                                                    :replacement_lines ["X"]}))
-                         "Edited")
-          "an edit with no boundary repeat is not refused"))))
-
-(deftest dedup-off-applies-literally
-  (use-mode! :hashline {:boundary-dedup :off})
-  (write! "one\ntwo\nthree\nfour\n")
-  (let [[_ b c _] (read!)]
-    (replace! {:remove_from b :remove_to c :replacement_lines ["X" "four"]})
-    (is (= "one\nX\nfour\nfour\n" (slurp file :encoding "UTF-8"))
-        "the repeat is kept -- the file has two 'four' lines now")))
+  (testing "the NEXT line repeated stays a repeat"
+    (write! "one\ntwo\nthree\nfour\n")
+    (let [[_ b c _] (read!)]
+      (replace! {:remove_from b :remove_to c :replacement_lines ["X" "four"]})
+      (is (= "one\nX\nfour\nfour\n" (slurp file :encoding "UTF-8"))
+          "the file has two 'four' lines now")))
+  (testing "and so does the PREVIOUS line repeated"
+    (write! "one\ntwo\nthree\n")
+    (let [[_ b c] (read!)]
+      (replace! {:remove_from b :remove_to c :replacement_lines ["one" "X"]})
+      (is (= "one\none\nX\n" (slurp file :encoding "UTF-8"))
+          "the leading 'one' is kept, not stripped"))))
 
 ;; ------------------------------------------------------- the auto-fixes
 

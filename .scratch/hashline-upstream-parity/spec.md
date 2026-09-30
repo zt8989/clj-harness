@@ -61,8 +61,8 @@
 | 03 | 字符串化的行字段归一 | ready-for-agent | 字段本身是 JSON 串（或 `["…"]`）时解回数组，带 `[W_` warning |
 | 04 | stale-anchor 大小写提示 | ready-for-agent | 拒绝话里点出只差大小写的锚点 |
 | 05 | read 页脚起始行 | ready-for-agent | 页脚印真实起始行号 |
-| 06 | boundary dedup | needs-triage | 跟上游「整体移除」，还是保留本仓默认 `:on` |
-| 07 | auto-read-all | needs-triage | 是否引入上游 4.3 的整仓注入 |
+| 06 | boundary dedup | 已落地（整体移除，2026-09-30） | 跟上游 4.4.0：`replace`/`insert` 一律按字面应用 |
+| 07 | auto-read-all | wontfix（2026-09-30 拍板） | 明确不做；将来要翻案另开 spec |
 | 08 | `patch`/`diffLineNumbers` | needs-triage | 响应是否补 unified patch 与行号数组 |
 | 09 | 刻意不跟的上游实现 | wontfix | 记录，不施工 |
 
@@ -78,8 +78,8 @@
 
 ## 落地结果
 
-**票 01–05 落地**（2026-09-30，分支 `hashline-upstream-parity` 的 worktree）；票 06/07/08 仍
-`needs-triage`（未拍板、未动）；票 09 `wontfix` 不动。
+**票 01–06 落地**（2026-09-30）；票 07 `wontfix`（明确不做，见票面拍板结果）；票 08 仍 `needs-triage`；
+票 09 `wontfix` 不动。票 06 单列在下面的「票 06 落地」。
 
 改动（按票）：
 
@@ -104,6 +104,27 @@
 **顺带的既有 bug 修复（不在任何票面里）**：`edit.clj` 里 `:require-path` 的拒绝话术还写着
 「the project's harness.edn」——config-merge 把 `:editing` 搬到 `config.edn` 的 `:session` 之后这句没跟，
 已改成 `config.edn's :session :editing`。
+
+### 票 06 落地（boundary dedup 整体移除，2026-09-30，分支 `hashline-boundary-dedup`）
+
+严格照上游 4.4.0（`561ff2b`）：**编辑一律按字面应用**。删掉了：
+
+- `edit.clj` 的 `dedup-edges`、`;; --- the dedup` 段、`:boundary-strict` 拒绝、`render-diff` 的 `stripped`
+  入参与 `dedup│` 行，以及 ns docstring 里那段；
+- `replace.clj` 的 `dedup-edges` 调用、plan 里的 `:stripped`、`ok-message` 的 `:stripped` 归并；
+- `editing.clj` 的 `:boundary-dedup` 默认值与 `vocab` 项；`config.edn.example` 的那段；
+- `tools.clj` 的 replace 描述里「会被 dedup」那句、insert 描述里「unlike replace … never deduplicates」；
+- `insert.clj` 里「NO BOUNDARY DEDUP」那段改为「重复的行照写」。
+
+**行为变化**：一个「把范围外的邻行再抄一遍」的 `replacement_lines` 不再被剥掉——那一行会真的多出来。
+旧 config.edn 里残留的 `:boundary-dedup` 现在得到「未知编辑键」的具名失败（新用例
+`boundary-dedup-is-also-an-unknown-key` 钉住）。
+
+**用例**：删掉 4 条 dedup 用例，换成 1 条「按字面应用」（前导/尾随各一）；`insert_test` 里那条
+对照用例改成「两个工具都不去重」；`editing_test` 里 `:boundary-dedup` 的默认/取值/取值域用例退役，补未知键用例。
+
+**判据**：`hashline.*` + `cap.editing-test` + `cap.editing-mode-tools-test` 定向跑
+`Ran 222 tests containing 7526 assertions. 0 failures, 0 errors.`；后端全量见下。
 
 **判据**：
 

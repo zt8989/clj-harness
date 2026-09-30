@@ -1,6 +1,6 @@
 (ns harness.cap.hashline.insert-test
   "`insert`: adding lines beside a line without disturbing it, and the things it
-  deliberately does differently from `replace` (no dedup; the anchored line keeps
+  deliberately does differently from `replace` (the anchored line keeps
   its name)."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
@@ -157,24 +157,20 @@
         (is (= "alpha\nbeta\nNEW-A\nNEW-B2\ngamma\n" (contents)))))))
 
 (deftest an-inserted-line-identical-to-its-neighbour-is-inserted
-  ;; NO BOUNDARY DEDUP HERE, and this is the contrast with `replace`: there, a
-  ;; replacement that re-includes the line at the edge of its range is a slip worth
-  ;; stripping (or refusing); here, asking for a line that reads like its neighbour
-  ;; is the request itself. The two cases sit side by side on purpose, on the same
-  ;; file and the same shape of request.
+  ;; A repeat of the neighbour is the request itself, so it is inserted, exactly as
+  ;; written. `replace` is literal too (there is no boundary dedup anywhere), so the
+  ;; two tools no longer differ on this shape.
   (use-mode!)
   (put! "one\ntwo\nthree\n")
   (testing "insert keeps the repeat, even of the line it is anchored to"
     (is (false? (:error (insert! (anchor-of "one") "after" ["one"]))))
     (is (= "one\none\ntwo\nthree\n" (contents))
         "the insert did exactly what it said"))
-  (testing "and replace, asked the same shape, strips it"
+  (testing "and replace, asked the same shape, keeps the repeat too"
     (put! "one\ntwo\nthree\n")
-    ;; The range is two..three and the replacement starts by writing back `one`,
-    ;; the line BEFORE the range -- the artefact `:boundary-dedup` exists for.
     (call "replace" {:remove_from (anchor-of "two") :remove_to (anchor-of "three")
                      :replacement_lines ["one" "NEW"]})
-    (is (= "one\nNEW\n" (contents)) "the leading `one` was stripped")))
+    (is (= "one\none\nNEW\n" (contents)) "the leading `one` is kept")))
 
 (deftest a-no-op-insert-writes-nothing-and-keeps-the-undo-history
   (use-mode!)
@@ -394,8 +390,8 @@
 
 (deftest the-description-says-what-it-will-not-do
   ;; Three sentences the model has to have before it reaches for this: which line is
-  ;; left alone, that the anchors stay valid, and that a repeat is not deduplicated
-  ;; (the opposite of what replace does with one).
+  ;; left alone, that the anchors stay valid, and that a repeat is inserted as
+  ;; written (edits are literal; nothing is deduplicated anywhere).
   (use-mode!)
   (let [spec (first (filter #(= "insert" (get-in % [:function :name]))
                             (tools/specs tid)))
@@ -404,7 +400,7 @@
     (is (some? spec) "insert is served in anchor mode")
     (is (= #{"anchor" "direction" "lines"} (set (keys props))))
     (is (str/includes? desc "KEEPS ITS ANCHOR"))
-    (is (str/includes? desc "never deduplicates"))
+    (is (str/includes? desc "exactly"))
     (is (str/includes? desc "no `│`"))
     (is (= ["before" "after"] (get-in props ["direction" :enum]))
         "the schema names the legal directions, not only the prose")))

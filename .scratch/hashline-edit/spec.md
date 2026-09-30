@@ -40,6 +40,11 @@
              :diff-context-lines 1}}
   ```
 
+> **2026-09-30 复议（`.scratch/hashline-upstream-parity` 票 06）：`:boundary-dedup` 已按上游 4.4.0 整体移除。**
+> 上面那行 `:boundary-dedup :on` 与下文所有「边界去重」的描述**不再是当前行为**：`replace` / `insert` 一律
+> **按字面应用**，`dedup-edges`、`dedup│` 行、`:boundary-dedup` 键与 `:strict` 模式都已删除；旧 config.edn 里
+> 残留的键会得到「未知键」的具名失败。理由与上游一致：悄悄改写模型写下的行，比让文件多出一行更坏。
+
   **不放 config.edn。** 那份文件的形状是「三个旋钮，且只有三个」，写第四个进去是点名失败而不是悄悄
   丢弃；编辑策略是策略，归 harness.edn。
 
@@ -593,6 +598,8 @@ diff 也会把没动过的那一行显示成删掉又加回。
 **插入永不去重**（`plan-edit` 里插入分支根本不调 `dedup-edges`），理由是边界去重是给「删了又写回来」
 这种手抖准备的，而「插一行和邻行一样的内容」本身就是请求。用例把两条并排放在同一个文件、同一种形状的
 请求上：`insert` 之后 `one\none\ntwo` 照留，`replace` 同样的写法会被剥掉。
+> **2026-09-30 复议（`.scratch/hashline-upstream-parity` 票 06）**：`dedup-edges` 已整体移除，所以上面
+> 「`replace` 同样的写法会被剥掉」**不再成立**——两个工具现在都不去重，`replace` 也照字面留（用例已改）。
 
 **参数解析复用 `edit` 的那套**：`anchor-field` / `replacement-field` / `check-nul!` 从 private 提为
 public，因为「锚点抄成了 `Hasu│...` 整行」和「整个 JSON 数组塞进一个元素」在 `insert` 里是**同样的手

@@ -1,11 +1,17 @@
-# 07 — auto-read-all：是否引入上游 4.3 的「开局整仓注入」（决策票）
+# 07 — auto-read-all：明确不做（`wontfix`）
 
 **What to build:** 一个决定。上游 4.3.0–4.3.3 加了一个默认关闭的 auto-read-all：会话开始时把仓库里的
 文件**连锚点一起注入**上下文，免去逐个 `read`；本仓完全没有。要不要引入？
 
 **Blocked by:** 人的决定（本票 `needs-triage`）
 
-**Status:** needs-triage
+**Status:** wontfix
+
+## 拍板结果（2026-09-30）
+
+**明确不做。** 上游 4.3 的 auto-read-all 不引入：本仓不走「开局把整仓灌进上下文」这条路，
+与已落地的 `receipts-not-echoes`（答案不随文件长大）同向。下面「现场」保留作为它的机制记录；
+将来若要翻案，另开一个 `.scratch/auto-read-all/` 的 spec，**不要从这张票直接开工**。
 
 ## 现场
 
