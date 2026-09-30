@@ -981,7 +981,12 @@
 
 (deftest this-home-can-write-its-own-sensitive-list
   (testing "a written list is what is in force, and it replaces the built-in one whole"
-    (with-config-edn (str "{:security {:sensitive-paths [\"" (tmp "credentials") "/\"]}}\n")
+    ;; `pr-str` FOR THE PATH, not bare interpolation: this is EDN, and a Windows path is
+    ;; backslashes -- pasted raw, the `\U` in `\Users` is an invalid escape, the file does not
+    ;; parse, and the case then fails about the FILE instead of about the list it wrote.
+    (with-config-edn (str "{:security {:sensitive-paths ["
+                          (pr-str (str (tmp "credentials") "/"))
+                          "]}}\n")
       (fn []
         (is (true? (project/sensitive-path? nil (str (tmp "credentials") "/key.pem"))))
         (is (true? (project/sensitive-path? nil (tmp "credentials"))))

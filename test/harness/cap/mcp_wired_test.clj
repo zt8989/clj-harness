@@ -196,6 +196,17 @@
 (defn- ran-server-tool? [ls]
   (some #(str/includes? % "echo: from the model") (tool-results ls)))
 
+(defn- ran-and-connected?
+  "Did this run both call the server's tool AND reach its END? THE CONNECTION LINE IS
+  DRAINED FROM THE MCP OUTBOX AT `run/done` -- `edge/http` says why: \"a server is
+  connected on the way to this run's first LLM call, so at the provider/changed drain
+  nothing has happened yet.\" So a case that waits only for the tool result reads the
+  record BEFORE the line it is about exists, which is what made this one flaky rather
+  than wrong."
+  [ls]
+  (and (ran-server-tool? ls)
+       (seq (of-kind ls "mcp/server"))))
+
 ;; ------------------------------------------------------ a server's tool, a run
 
 (deftest a-run-sees-a-servers-tools-and-calls-one
@@ -213,7 +224,7 @@
                    ;; this case is about.
                    (mcp/shutdown!)
                    (post-run thread)
-                   (let [ls (wait-for (log-file thread) ran-server-tool? 5000)]
+                   (let [ls (wait-for (log-file thread) ran-and-connected? 5000)]
                      (testing "the call ran and the server's text is the tool result"
                        (is (ran-server-tool? ls)))
                      (testing "and it went through the ONE execution seam, so all
