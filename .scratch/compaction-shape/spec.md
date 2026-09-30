@@ -120,10 +120,38 @@ expected one of `system`, `user`, `assistant`, `tool`, `latest_reminder`
   by tool messages responding to each 'tool_call_id'` —— 摘要请求把一次工具调用与它的答复切在两边。
   最后一次成功那条 `context/compacted` 记的区间是**反的**：`{:start 10113 :end 5156}`。范围规划
   （`harness.edge.compaction` 挑的那段）与它记的编号口径要单独查。
+- **2026-09-30 复查那两条**：现在有一支探针可以重放这类记录 —— `compaction/plan` 在**记录重折**
+  与**活会话**上各量一次（`sessions/model-nodes`），两个答案差多少就是「折了却没变」的那一刀。
+  `86c1c343-…` 那次的两个数字没有重放，上面两条**仍按未查记**。
 
-## 四张票
+## 票 05 已落地：触发与选范围量同一把尺子（2026-09-30，`e5b4f88` / merge `976b5b5`）
+
+**症状**（主人报「所有的 Context 开头的一直在压缩」）：会话 `62f30024-…` 在 2 分 22 秒里连压 4 次，
+每次只折掉上一张摘要（`:shadowed` 1 个、`head-tokens` ≈ 4.6k），换回一张差不多大的新摘要。
+
+**两层根因，两层都修了**：
+
+1. **活会话的号与记录重折不一致**（`compaction-numbering`，`2a14a68`）：一条长 run 的 359 个思考在
+   活会话里全摊到同一个号（那一轮终帧的行号），`settle!` 按名字对齐时一个都没命中；而压缩按记录
+   行号寻址 —— 同一批 facts 从记录侧删得掉 1249 条、从活会话只删得掉 1028 条。根因是 `replay`
+   重算 id 时把**不花号**的三种卡（`-pre<i>`、压缩卡、`-cut-<i>`）也数进了 run 的那一个计数器。
+2. **触发与选范围量的是两个表面**（票 05，本条）：触发量活会话（`pressure/live-surface`），`plan`
+   折记录重折（每一轮派生的注入只剩最后一轮）。修 #1 之后这种差**仍然能量得出**：真会话上，
+   记录重折 735 节点 → head **4,787** token（就是上一张摘要），活会话 956 节点 → head **88,898** token。
+
+**改法**：`harness.edge.sessions/model-nodes`（活会话的模型表面，id 就是条目到达的那一行；本进程
+不持有会话时答 nil）交给 `plan`；`plan` 另收 `{:min-head-tokens n}` —— 触发说必须减掉多少，减不到
+就**不折**（不写行、不调摘要、不发卡）；两个触发各自算自己的 relief，`run-compaction!` 把两样递下去。
+
+**测试**：`compaction-test` 三条（surface / 不能命名的 head / guard 下不写行也不调用摘要）、
+`relieve-pressure-test` 一条端到端（记录 16 万 token + 只有活会话才有的 55 万 token 注入：修前一次
+都压不动，修后一次压回阈值以下）。全量：1406 tests / 12 failures + 1 error —— 与干净 main 上同一批
+（`tools-test` 8、`mcp-wired-test` 3、`claims-test` 1、`hooks-test` 1），本票没添新红。
+
+## 五张票
 
 - `issues/01-summary-request-is-provider-shaped.md` —— 已落地（`77f65f1`）
 - `issues/02-estimator-prices-reasoning-content.md` —— 已落地（`77f65f1`）
 - `issues/03-real-log-slice-compaction-walkthrough.md` —— 已走查（证据在 `evidence/`）
 - `issues/04-measure-before-every-model-call.md` —— 已落地（`be3adc1`）
+- `issues/05-two-surfaces-one-threshold.md` —— 已落地（`e5b4f88`，记录见上）
