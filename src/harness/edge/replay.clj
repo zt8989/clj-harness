@@ -1002,6 +1002,25 @@
   file."
   [^java.io.File f]
   (entries-answer (fold-records f (entries-init) entries-step)))
+
+(defn entries-of-rows
+  "ROWS as `[line-index row]` pairs -> the entries THEY fold to, numbered by the line each one
+  arrived in -- the SAME fold `entries` runs, handed rows a writer already has in hand
+  (`.scratch/entry-numbering/` ticket 01: the live session's numbers must equal this fold's, entry
+  for entry, and the fold is the one place that rule lives).
+
+  WHY A WRITER NEEDS IT: an entry's `:seq` is decided by WHICH ROWS ARE PRESENT and where -- a
+  `message` row CLOSES the frame group before it (`entries-step`), so the frames of ONE run can be
+  numbered over several lines. A writer that recorded its own rows can therefore reproduce the
+  reader's numbers exactly, without reading anything back.
+
+  IT IS THE FOLD OF THOSE ROWS, NOT OF THE WHOLE FILE: what a caller must hand over is every row
+  IT WROTE, in the order it wrote them, with the line index each one got -- the numbers the fold
+  produces for a run's own entries do not depend on rows outside that run (measured on a real
+  record, 2026-09-30: identical, entry for entry). A partial list IS a different answer, so the
+  caller that has some of the rows must not ask."
+  [pairs]
+  (entries-answer (reduce entries-step (entries-init) pairs)))
 (defn entries
   "Parsed log records -> the conversation's entries IN ORDER, each numbered:
   [{:seq N :message M} ..].
@@ -1028,13 +1047,12 @@
       numbers its entries by the LAST line of the run, which is where the record
       stops -- a partial answer is allowed to move once the run ends.
 
-  WHERE THE TWO SIDES STILL DISAGREE, and it is a measured fact rather than an argument: an entry
-  a `message` ROW carried is numbered by its OWN line here, while the live table gives a whole run
-  ONE number -- its terminal line (`harness.kernel.session/settle!` takes that offset as its fourth
-  argument). So such an entry can be a few lines out between the two readings. Both are real offsets
-  in the same record and a reader dedupes by id, which is why nothing a client draws changes today;
-  `.scratch/entry-numbering/issues/01-entries-numbered-by-their-own-row.md` is the ticket that
-  closes it (a pending-landing table, so BOTH sides can number every entry by the line it arrived in).
+  AND THE WRITER OF A RUN ASKS THIS SAME FOLD FOR ITS NUMBERS (`entries-of-rows` below): the rows it
+  just wrote are the ones that decide them -- a `message` row CUTS the frame group before it -- so
+  the live table and this reading give the SAME number to the SAME entry, which is what a page cut
+  and a delta cursor rest on. (`settle!`'s fourth argument is what is left when a caller has no such
+  map: one number for the whole run, its terminal line -- a coarser, never-wrong reading of the same
+  record, and the one a delegation that died has to fall back on.)
   ENTRIES NUMBERED ALIKE ARRIVED TOGETHER: one run's frames. That is what makes a page cut
   at a group boundary unambiguously right, and it is why the window carries numbers rather
   than a slice of the message list (ticket 05's `tail` / `since` / `before`, and ticket 06's

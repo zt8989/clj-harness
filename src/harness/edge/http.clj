@@ -553,6 +553,26 @@
   worked out from the KIND when nobody said (`producer-of`)."
   nil)
 
+(def ^:dynamic *written-rows*
+  "THE ROWS ONE RUN HAS WRITTEN, as `[line row]` pairs, while a caller that wants them binds this
+  to an atom -- the agent route and a delegation each bind one for their own run, and `log!` fills
+  it. NIL IS 'NOBODY IS COLLECTING', which is the ordinary state of a process that only writes.
+
+  WHAT READS IT IS `harness.edge.replay/entries-of-rows` AT THE END OF THE RUN: an entry's number
+  is decided by the rows (`message` rows close the frame group before them), so the writer that has
+  its own rows can reproduce the READER's numbers exactly instead of handing the whole run one
+  number (`.scratch/entry-numbering/` ticket 01). It holds the payloads of ONE run and dies with
+  the run's own state -- the same lifetime `:frames` already has."
+  nil)
+
+(defn- entry-lines
+  "THE ROWS A RUN WROTE -> `{entry-id line}`, folded by the READER's own fold (`replay/entries-of-rows`).
+  The ids are the frames' (`<run-id>-mN`), which is what the session's entries carry; a row the fold
+  answers without one is skipped, because this map is keyed by name and nothing else."
+  [rows]
+  (into {} (keep (fn [e] (when-some [id (get-in e [:message :id])] [id (:seq e)])))
+        (replay/entries-of-rows rows)))
+
 (defn- producer-of
   "The default producer of a row of KIND carrying PAYLOAD: an audit row derived from a kernel
   event, a CUSTOM frame (a fact the harness stated on its own), or a plain wire frame. A `message`
@@ -635,6 +655,10 @@
      ;; listener `harness.kernel.session` installs at load, and a window's mark rides the same one
      ;; -- so the one write path WRITES and knows nobody. Adding a consumer is attaching a reader
      ;; (`harness.infra.stream/listen!` / `listen-every!`), never editing this function.
+     ;; AND A RUN THAT IS COLLECTING ITS OWN ROWS GETS THIS ONE (`*written-rows*`): the ROW, not the
+     ;; bytes, and the line it landed on -- the two things `harness.edge.replay/entries-of-rows`
+     ;; folds to answer the same numbers a window gives (`.scratch/entry-numbering/` ticket 01).
+     (when (some? *written-rows*) (swap! *written-rows* conj [offset row]))
      offset)))
 
 (defn- move-log!
@@ -1165,7 +1189,8 @@
       ;; saying the thread is running (harness.edge.sessions/running? -- the fact the sidebar row
       ;; reads), and where the conversation becomes what it says.
       (unregister-run! thread-id run-id)
-      (sessions/settle! thread-id run-id (:frames @state) (:terminal-line @state))
+      (sessions/settle! thread-id run-id (:frames @state) (:terminal-line @state)
+                        (some-> *written-rows* deref entry-lines))
       (swap! state assoc :terminal (:type frame)))
     ;; THE FRAME ITSELF, NOT A DECORATED COPY: this map is what the socket carries, and for every
     ;; family but the reasoning one (ADR 0009) it is also the map the record logs -- `:threadId`, the
@@ -1417,7 +1442,11 @@
       ;; with nothing anywhere saying why. That is the one failure in this file
       ;; that cannot be allowed to be quiet, so the whole run body is wrapped.
       (try
-        (binding [hook/*sink* (sink-for thread-id run-id)]
+        (binding [hook/*sink* (sink-for thread-id run-id)
+                  ;; THIS RUN'S OWN ROWS, collected for the one moment they become the numbers of the
+                  ;; conversation (`entry-lines` below, at `settle!`): the record is what decides them
+                  ;; and this is the writer that has it in hand.
+                  *written-rows* (atom [])]
           ;; ------------------------------------------------------------------ the birth
           ;; WHAT THIS RUN CONTINUES FROM, read once, before anything starts. The session
           ;; holds the conversation (harness.edge.sessions); the client no longer sends
@@ -2191,7 +2220,8 @@
         ;; conversation that never had the half-answer the client is looking at. The
         ;; fold is the emitter's own (`sessions/settle!`), so the session gets exactly
         ;; the messages its frames describe, and nothing is invented for the ending.
-        (sessions/settle! thread-id run-id (:frames @state) (or (:terminal-line @state) (:last-line @state)))
+        (sessions/settle! thread-id run-id (:frames @state) (or (:terminal-line @state) (:last-line @state))
+                          (some-> *written-rows* deref entry-lines))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
         ;; AND THE READER IS TOLD: a crashed run emits no terminal, and a reader on the downlink
@@ -2556,7 +2586,10 @@
         ;; AND THE ONE PLACE THE AGENT ROUTE ALSO USES for its text (`text-lines`): the messages
         ;; still open live here, and what reaches the record is the snapshot, not the token.
         text     (atom {})]
-    (binding [hook/*sink* (sink-for thread-id run-id)]
+    (binding [hook/*sink* (sink-for thread-id run-id)
+              ;; THE DELEGATION'S OWN ROWS, for the same reason and the same reader as the agent
+              ;; route's (`entry-lines`).
+              *written-rows* (atom [])]
         ;; THE PARENT LEARNS THE CHILD'S NAME FIRST, before the child writes a row of
         ;; its own: a card in the PARENT's conversation can then be clicked while the
         ;; subagent is still working, which is the entire point of the timing.
@@ -2714,7 +2747,8 @@
           ;; answer is not a turn. `settle!` also carries the state the terminal frame
           ;; says (settled / unfinished), so the next reader of this session gets the
           ;; same answer the record would give.
-          (sessions/settle! thread-id run-id @frames (or @terminal-line @last-line)))))))
+          (sessions/settle! thread-id run-id @frames (or @terminal-line @last-line)
+                            (some-> *written-rows* deref entry-lines)))))))
 
 ;; The door repairs a run that never closed before it reads the record (see the 4b decision
 ;; below); the repair is defined with the read side further down, so it is named here.

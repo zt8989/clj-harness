@@ -6353,22 +6353,27 @@
                "no entry appears twice after the source changed")
            (is (= (:messages settled) (mapv :message (:entries body)))
                "and the window says what `sofar` says about the settled conversation")))
-       (testing "and every entry the window answers with carries the line it arrived in"
+       (testing "and every entry the window answers with wears the number the record's own fold gives it"
          ;; THE DELTA A READER ASKS FOR IS A SUBTRACTION ON THESE NUMBERS (`since`, ADR 0003
-         ;; decision 7). An entry with no number counts as AFTER ANYTHING, so a reader that
+         ;; decision 7): an entry with no number counts as AFTER ANYTHING, so a reader that
          ;; reconnected would be handed the whole conversation again and would merge it into the
          ;; window it already held -- the scrambled transcript of 2026-09-30, where the newest
-         ;; turn ended up in the middle and the bottom of the page was an old one. A run's own
-         ;; entries are numbered by the line its TERMINAL frame was written on, and that number
-         ;; has to be applied inside `settle!`: the rows are written a beat earlier, so landing
-         ;; it where the writer answers it numbers nothing at all.
-         (let [body   (read-json (api-call :get "/api/threads/sofar-a/page" nil))
-               seqs   (mapv :seq (:entries body))
-               lines  (count (str/split-lines (slurp (log-file-for "sofar-a") :encoding "UTF-8")))]
+         ;; turn ended up in the middle and the bottom of the page was an old one. `settle!`
+         ;; therefore takes its numbers from the READER's own fold of the rows this run wrote
+         ;; (`harness.edge.replay/entries-of-rows`), which is what makes the live table and the file
+         ;; answer the SAME number for the same entry -- and that is what this compares.
+         (let [body    (read-json (api-call :get "/api/threads/sofar-a/page" nil))
+               seqs    (mapv :seq (:entries body))
+               lines   (count (str/split-lines (slurp (log-file-for "sofar-a") :encoding "UTF-8")))
+               on-file (into {} (map (juxt (comp :id :message) :seq))
+                             (replay/entries (replay/read-records (log-file-for "sofar-a"))))]
            (is (every? some? seqs)
                (str "unnumbered entries: " (pr-str (remove some? seqs))))
            (is (every? #(<= (long %) (dec lines)) seqs)
-               "and every number is a real offset in this conversation's own record")))
+               "and every number is a real offset in this conversation's own record")
+           (is (every? (fn [entry] (= (get on-file (get-in entry [:message :id])) (:seq entry)))
+                       (:entries body))
+               "and each entry wears the number the record's own fold gives that same entry")))
        (testing "and the run kept exactly ONE terminal frame"
          (is (= 1 (count (terminals "sofar-a")))))))))
 (deftest a-run-that-is-being-written-tells-the-window-watcher-the-record-grew

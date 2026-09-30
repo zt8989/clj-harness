@@ -792,7 +792,7 @@
       (ring! id {:kind :entries}))
     (mapv :message (take-last n (get-in after [id :entries])))))
 
-(declare land!)
+(declare land! number-entries!)
 
 (defn settle!
   "Fold the frames a run emitted into THREAD-ID's conversation, so the next run of it
@@ -831,13 +831,22 @@
   file), and `since` -- whose rule is that an entry with no number counts as after anything --
   then answered the WHOLE conversation to a reader asking what it had missed, which is the
   scrambled window that reader drew. IT IS APPLIED BEFORE THE DOORBELL, deliberately: a reader
-  rung about a conversation whose newest entries still have no numbers is a reader misled."
+  rung about a conversation whose newest entries still have no numbers is a reader misled.
+
+  AND NUMBERS IS THAT SAME FACT PER ENTRY, when the caller folded this run's OWN rows
+  (`harness.edge.replay/entries-of-rows`): `{entry-id line}`. A `:seq` is 'the line the entry
+  arrived in', and WHERE the frame groups are cut is decided by the rows (`message` rows close the
+  group before them), so the writer asks the READER's fold for the numbers instead of letting this
+  table hand the run one. LANDED STAYS THE FALLBACK: whatever the map does not name keeps it, and a
+  caller with no map at all is the same call it always was."
   ([thread-id group frames]
    ;; NO TERMINAL LINE, AND THAT IS AN ORDINARY CALL: a run that produced no frames answers []
    ;; below, and the entries the ACTION brought with it are numbered by the writer's own door
    ;; (`land-at!`, by name) as their rows land.
-   (settle! thread-id group frames nil))
+   (settle! thread-id group frames nil nil))
   ([thread-id group frames landed]
+   (settle! thread-id group frames landed nil))
+  ([thread-id group frames landed numbers]
    (let [entered (if (seq frames)
                    (append! thread-id group (frames/apply-frames frames))
                    [])
@@ -856,9 +865,36 @@
               (fn [e] (-> e
                           (assoc :state st)
                           (assoc :interrupts (vec (get-in tf [:outcome :interrupts]))))))
+       ;; AND PER ENTRY FIRST, when the caller folded this run's own rows: what the map names wins,
+       ;; and whatever it does not name keeps the group's line below.
+       (when (seq numbers) (number-entries! thread-id group numbers))
        (when (some? landed) (land! thread-id group landed))
        (ring! (str thread-id) {:kind :entries}))
      entered)))
+
+(defn- number-entries!
+  "Fill in `{entry-id line}` for THREAD-ID's entries of GROUP that have no number yet -- the
+  numbers a caller got from folding this run's OWN rows (`harness.edge.replay/entries-of-rows`).
+
+  IT IS A DOOR BESIDE `land-at!` RATHER THAN ONE OF ITS MODES, because the two do not answer the
+  same question: `land-at!` is the WRITER saying 'the line that carried this entry is N', by the
+  entry's own name or by position; this one is the READER's fold handing over a whole run's
+  numbers at once -- the same rule, applied by the same code that gives a WINDOW its numbers.
+  An entry that already has one is left alone (idempotent like the two landings), and a name the
+  map does not have keeps its nil for `land!` to fill."
+  [thread-id group numbers]
+  (let [id (str thread-id)
+        g  (str group)]
+    (swap! registry update-in [id :entries]
+           (fn [es]
+             (mapv (fn [e]
+                     (if (and (= g (:group e))
+                              (nil? (:seq e))
+                              (contains? numbers (:id (:message e))))
+                       (assoc e :seq (long (get numbers (:id (:message e)))))
+                       e))
+                   (or es []))))
+    nil))
 
 (defn land-at!
   "The line that carried ONE of GROUP's entries is on disk, at OFFSET. AT is the entry's
