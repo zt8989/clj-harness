@@ -412,11 +412,15 @@
         :usage {:prompt_tokens 100 :completion_tokens 20 :total_tokens 120}}]
       (fn [port]
         (send-run! port thread-id)
-        ;; ...AND WHICH WRITE IT IS WAITING FOR IS THE `:run/done` ONE, not the `model/end`
-        ;; one: both carry the same `:steps`, so a wait on the count would pass on the
-        ;; MID-RUN snapshot -- the one taken before the returned tail landed, which by design
-        ;; has no `:parts` (the split needs the run's message side). The split is therefore
-        ;; the marker, and it is also the thing the old post-run `GET` existed to fix.
+        ;; THE WAIT IS FOR A WRITE, NOT FOR ONE PARTICULAR WRITE, and the marker it used to
+        ;; have is gone. `:parts` was ABSENT from the MID-RUN snapshot (the split needed the
+        ;; run's returned side, so it only appeared once the `:run/done` write had landed) and
+        ;; waiting on it was therefore waiting for that write -- a wait on `:steps` would have
+        ;; passed on the mid-run one, both carrying the same count. Since `.scratch/context-ring`
+        ;; the split is the array the CHOSEN CALL was handed, which does not move when the tail
+        ;; lands: the mid-run snapshot and the post-run one carry the same numbers, so either
+        ;; is the thing this case compares. WHAT IT PINS IS THE AGREEMENT, not the moment --
+        ;; the store, the live folds and the record's own fold must answer the same numbers.
         (let [deadline (+ (System/currentTimeMillis) 5000)]
           (while (and (< (System/currentTimeMillis) deadline)
                       (nil? (get-in (stored) [:context :parts])))
