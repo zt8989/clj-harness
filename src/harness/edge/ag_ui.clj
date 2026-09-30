@@ -205,6 +205,41 @@
   {:type "CUSTOM" :name injected-part-name :messageId message-id
    :value (injection-value message)})
 
+(def pre-injection-suffix
+  "The id fragment of the injections the EDGE derives for a run BEFORE its first call: the card's id is
+  `<run-id>-pre<i>`, out of a counter of ITS OWN -- `harness.edge.http`'s pre-LLM step mints them, and it
+  mints them with this string rather than a literal so the one place that spells the two kinds of
+  injection is here, beside `injected-frame`'s account of why they are two.",
+  "-pre")
+
+(def ^:private counter-spelling
+  "The id fragments a run's ONE counter (`outbound`'s `:n`) spells: TEXT, reasoning, a TOOL RESULT, and
+  the KERNEL's own mid-run splice (`:context/injected`).
+
+  ONE PLACE, BECAUSE A READER HAS TO AGREE WITH THE WRITER: the fold that rebuilds these ids from a
+  record counts the groups the counter was spent on, and a spelling it did not know about would
+  shift every later id of that run."
+  #".*-(?:m|r|t|ctx)\d+$")
+
+(defn wire-numbered?
+  "Did a run's ONE counter buy MESSAGE's id -- i.e. is it spelled `<run-id>-m|r|t|ctx<n>`?
+
+  A READER'S QUESTION, NOT A WRITER'S. THREE KINDS OF MESSAGE WEAR AN ID THE COUNTER NEVER SPENT,
+  and all three look like ordinary entries:
+
+    a pre-injection card   `<run-id>-pre<i>`, the edge's OWN counter (`pre-injection-suffix`);
+    a compaction's card    the compaction's uuid (`compacted-frame`) -- a fact about the record
+                           rather than a group the model produced;
+    a rebuilt cut-off answer `<run-id>-cut-<i>` (`harness.edge.replay`) -- minted for a record no
+                           run ever numbered.
+
+  Counting one of those is the bug `.scratch/entry-numbering` is about, measured on thread
+  `62f30024-…` (2026-09-30): a run's 359 thoughts came out `r0, r4, r8 …` on the wire and
+  `r1, r5, r9 …` from the fold -- and an id that disagrees with the wire is an entry the live
+  session cannot be matched to its line, which is what left a conversation uncompactable."
+  [message]
+  (boolean (re-matches counter-spelling (str (:id message)))))
+
 (defn compacted-frame
   "The CUSTOM frame for ONE compaction the harness ran on THIS run's conversation: the head of
   that conversation was folded into one summary, and it is the MODEL's view -- not the

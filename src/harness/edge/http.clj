@@ -2157,7 +2157,7 @@
                                                                 [])
                                                               (map-indexed
                                                                (fn [i message]
-                                                                 (ag/injected-frame (str run-id "-pre" i) message))
+                                                                 (ag/injected-frame (str run-id ag/pre-injection-suffix i) message))
                                                                injected))
                                                   ;; AND THE CONVERSATION THIS RUN WROTE
                                                   ;; PART OF rides with it, for the same

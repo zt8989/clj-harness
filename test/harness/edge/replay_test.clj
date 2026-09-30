@@ -1202,6 +1202,109 @@
     (testing "and so is what a provider is handed"
       (is (= (replay/records->messages old-way) (replay/records->messages new-way))))))
 
+(deftest a-run-that-started-with-a-pre-injection-keeps-the-wires-ids
+  ;; THE OTHER CARD, AND THE ONE THE FIXTURES MISSED (2026-09-30, thread `62f30024-…`: five compactions in
+  ;; one session, four of them back to back, and the live conversation's entry numbers were the reason --
+  ;; see `.scratch/entry-numbering`). TWO THINGS ARE CALLED 'A CONTEXT INJECTION' AND ONLY ONE OF THEM
+  ;; SPENDS THE RUN'S NUMBER:
+  ;;
+  ;;   `<run-id>-ctx<n>`  the kernel's mid-run splice (`:context/injected`) -- takes `:n`, the case above
+  ;;   `<run-id>-pre<i>`  the injections the EDGE derives BEFORE the first call -- its OWN counter
+  ;;                      (`harness.edge.http`'s pre-LLM step). The two spellings exist precisely so the two
+  ;;                      counters cannot collide.
+  ;;
+  ;; A `-pre<i>` CARD IS AN ASSISTANT-ROLE ENTRY LIKE THE OTHER ONE, so a fold that counts 'assistant-role
+  ;; entries' counts it -- and every thought of that run then wears an id one too high. MEASURED ON THE
+  ;; REAL THREAD: 359 of its 1 988 entries, every `-rN` of one long run, came out `r1, r5, r9 …` where the
+  ;; wire said `r0, r4, r8 …`. Those wrong numbers are not cosmetic: `harness.edge.sessions/number-entries!`
+  ;; matches a run's entries to the reader's numbers BY ID, so not one of them matched and the whole run
+  ;; fell back to the group's single line (`land!`) -- and a compaction, which addresses the conversation by
+  ;; the line an entry arrived in, then removed 221 fewer nodes than it had folded over.
+  (let [run-id "r-pre"
+        seed   {:id "u1" :role "user" :content "hi"}
+        events [(ev/run-start)
+                (ev/model-start {:model "m"} nil)
+                (ev/reasoning-delta "the only thought")
+                (ev/model-end nil)
+                (ev/text-delta "one")
+                (ev/run-end)]
+        ;; ONE `event-lines` CALL, so the run's counter is the one fold that minted these ids -- the
+        ;; ground truth below is the WIRE's own spelling and not a number this case typed.
+        wire   (event-lines run-id events)
+        ;; AND THE EDGE'S CARD GOES IN WHERE THE EDGE PUTS IT: between RUN_STARTED and the first call.
+        pre    (log-line {:ts 2 :runId run-id :kind "event"
+                          :payload (ag/injected-frame (str run-id "-pre0")
+                                                      {:role "user"
+                                                       :content "# AGENTS.md\nthe house rules"})})
+        frames (vec (concat [(first wire)] [pre] (rest wire)))
+        rows   [(log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "one"
+                                     :reasoning_content "the only thought"}})]
+        old-way (replay/lines->records (concat (action-lines run-id [seed]) frames rows))
+        new-way (replay/lines->records (concat (action-lines run-id [seed])
+                                               (remove reasoning-frame-line? frames)
+                                               rows))]
+    (testing "the frames of this very run name the thought r0 -- the pre-injection spent no number"
+      (is (= [(str run-id "-r0")] (reasoning-ids-of old-way))))
+    (testing "and a record without those frames rebuilds the same id"
+      (is (= [(str run-id "-r0")] (reasoning-ids-of new-way))))))
+
+(deftest a-compactions-card-does-not-shift-the-wire-ids-either
+  ;; THE THIRD KIND OF CARD, AND THE LAST ONE THAT DID (2026-09-30: with the pre-injection counted
+  ;; correctly, the real thread's ids agreed for 195 of a run's 359 thoughts and then drifted again --
+  ;; `r875` where the wire said `r874`. What sat between them was a COMPACTION's card.
+  ;;
+  ;; A COMPACTION'S CARD IS A FACT ABOUT THE RECORD, not a group the model produced: the run's ONE
+  ;; counter (`outbound`'s `:n`) never spent a number on it, and its id is the compaction's uuid
+  ;; rather than `<run-id>-<kind><n>` (`ag/compacted-frame`). The fold counted it anyway -- it folds
+  ;; into an ASSISTANT-role entry like any other card -- and every later id of that run moved by one.
+  (let [run-id "r-comp"
+        seed   {:id "u1" :role "user" :content "hi"}
+        events [(ev/run-start)
+                (ev/model-start {:model "m"} nil)
+                (ev/reasoning-delta "first thought")
+                (ev/model-end nil)
+                (ev/text-delta "one")
+                (ev/tool-call "c1" "read" "{}")
+                (ev/tool-result "c1" "ok" false)
+                ;; THE CARD THE EDGE EMITS WHEN A COMPACTION HAPPENS BETWEEN TWO CALLS.
+                (ev/model-start {:model "m"} nil)
+                (ev/reasoning-delta "second thought")
+                (ev/model-end nil)
+                (ev/text-delta "two")
+                (ev/run-end)]
+        wire   (event-lines run-id events)
+        card   (log-line {:ts 2 :runId run-id :kind "event"
+                          :payload (ag/compacted-frame {:compactionId "c0ffee"
+                                                        :summary "everything before"
+                                                        :tokens 1234
+                                                        :shadowed ["1" "2"]})})
+        ;; BEFORE THE SECOND CALL'S THINKING, which is where the real thread had it -- so the card sits
+        ;; in front of the id this case is about.
+        ;; THE INDEX IS READ OFF THE FRAMES, not typed: `event-lines` writes ONE LINE PER FRAME in the
+        ;; order the fold emitted them, so a second fold of the same events gives the same frames and
+        ;; the index of the second call's thinking.
+        at     (second (keep-indexed (fn [i f] (when (= "REASONING_MESSAGE_START" (:type f)) i))
+                                     (vec (mapcat (ag/outbound "t1" run-id) events))))
+        frames (vec (concat (subvec wire 0 at) [card] (subvec wire at)))
+        rows   [(log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "one"
+                                     :reasoning_content "first thought"
+                                     :tool_calls [{:id "c1" :type "function"
+                                                   :function {:name "read" :arguments "{}"}}]}})
+                (log-line {:ts 3 :runId run-id :kind "message" :source "model"
+                           :payload {:role "assistant" :content "two"
+                                     :reasoning_content "second thought"}})]
+        old-way (replay/lines->records (concat (action-lines run-id [seed]) frames rows))
+        new-way (replay/lines->records (concat (action-lines run-id [seed])
+                                               (remove reasoning-frame-line? frames)
+                                               rows))
+        wire-ids (reasoning-ids-of old-way)]
+    (testing "the frames name the two thoughts r0 and r3 -- the card spent no number"
+      (is (= [(str run-id "-r0") (str run-id "-r3")] wire-ids)))
+    (testing "and the rebuilt conversation wears the same two ids"
+      (is (= wire-ids (reasoning-ids-of new-way))))))
+
 (deftest a-run-whose-rows-outrun-its-messages-is-not-paired-and-not-silent
   ;; TICKET 02'S OTHER HALF: WHEN THE TWO LISTS DISAGREE, THE READER MUST NOT GUESS -- AND MUST NOT
   ;; PASS OVER IT IN SILENCE. A call that returned nothing builds no message of its own, so a run's own
