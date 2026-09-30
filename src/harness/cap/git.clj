@@ -187,10 +187,10 @@
   A detached head adds nothing to that listing; `local-branches` is where the line
   between a branch and a sentence about the current head is drawn. A nil DIR, one that does not exist, or one that is a file
   answers {:repo? false} WITHOUT SPAWNING ANYTHING -- a session rebound away from
-  a directory that has since been deleted is a real state, and `harness.infra.shell/run`
-  throws rather than reporting failure when its working directory is not there, so
-  the existence check is what keeps a deleted directory an answer instead of a
-  500."
+  a directory that has since been deleted is a real state: `harness.infra.shell/run-program`
+  folds a program it cannot start -- a working directory that is not there among the
+  reasons -- into {:exit 127}, so the existence check is what keeps a deleted directory an
+  answer WITHOUT paying a spawn for it, instead of a 500."
   [dir]
   (if (or (str/blank? (str dir)) (not (.isDirectory (io/file (str dir)))))
     {:repo? false}
@@ -218,8 +218,8 @@
   "Move DIR's working tree onto BRANCH, and answer `state` afterwards.
 
   REFUSES A BRANCH THE WORKTREE DOES NOT HAVE, BY NAME, before spawning anything:
-  the listing `state` already read is the allow-list, and it is also what makes
-  the value safe to interpolate. A name that is there and still fails is git's own
+  the listing `state` already read is the allow-list, and it is what makes the refusal
+  happen BEFORE anything runs. A name that is there and still fails is git's own
   refusal (a dirty tree, a branch held by another worktree) and travels back in
   git's words, because those sentences are better than any paraphrase of them --
   they name the file or the worktree that is in the way.

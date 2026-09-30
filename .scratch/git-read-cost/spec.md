@@ -47,8 +47,9 @@ logout 文件用的），程序起不来时答 `{:exit 127 ...}` 而不是抛—
 也让「没装 git」继续是一个普通的非零答案，而不是 500。
 
 **`harness.cap.git` 改用它**：`git` 助手从「拼一条单引号命令行交给 `bash -lc`」变成把参数当 argv 交给
-程序。`quoted` 与 `require-posix!` 随之消失——没有命令行可插值，也就不需要 POSIX shell（因此装机没有
-Git Bash 的机器现在也能读分支，而不是按名字拒绝）。
+程序。这个命名空间里的 `quoted` 随之消失，`require-posix!` 那一问也撤了——没有命令行可插值，也就不需要
+POSIX shell（因此装机没有 Git Bash 的机器现在也能读分支，而不是按名字拒绝；`require-posix!` 本身留
+着，`infra.rg` 还在用它拼命令行）。
 
 **实测（同一个刚建好的小仓库，各六次）**：
 
@@ -66,4 +67,5 @@ coreutils）会重新解析那一行，空格会拆、`'` 会吃。git 是前一
 
 **用例**：`shell_test` 四条（argv 不被 shell 解读、`:dir`、缺程序 127、超时照杀）；`git_test` 一条
 （带 `'` 的分支名——这正是 `quoted` 当年存在的原因——能被列出并切过去）。`harness.infra.shell-test`
-33.3s / `harness.cap.git-test` 18.5s，全绿。
+33.3s / `harness.cap.git-test` 18.5s，全绿。**全量**：**11 fail + 4 err，与基线逐条相同**（无 git / shell /
+http 的新红）；`edge.http-test` 114.0s，含那两条走 `/api/git` 的用例。

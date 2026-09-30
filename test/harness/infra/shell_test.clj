@@ -196,12 +196,25 @@
   (let [{:keys [exit]} (shell/run-program {:argv ["no-such-program-harness-suite"]})]
     (is (= 127 exit))))
 
-(deftest a-program-that-does-not-finish-is-stopped-too
+(deftest a-program-that-does-not-finish-is-stopped-with-what-it-started
+  ;; The same claim the shell shape is held to (`a-command-that-does-not-finish-...`):
+  ;; killing what we hold is not killing what it started. `await-program!` is shared, but a
+  ;; shared helper is not an assertion -- and this is the shape `cap.git` now uses.
   (when-let [sh (shell/resolution)]
-    (let [{:keys [exit timeout]} (shell/run-program {:argv [(:command sh) "-c" "sleep 30"]
-                                                     :timeout-ms 3000})]
-      (is (true? timeout))
-      (is (nil? exit)))))
+    (let [dir      (support/temp-dir "program-tree")
+          pid-file (io/file dir "child.pid")
+          started  (System/currentTimeMillis)
+          res      (shell/run-program {:argv [(:command sh) "-c" (support/child-command pid-file)]
+                                       :timeout-ms 8000})
+          elapsed  (- (System/currentTimeMillis) started)
+          pid      (support/child-pid pid-file 5000)]
+      (is (true? (:timeout res)))
+      (is (nil? (:exit res)) "a process that never finished has no exit code")
+      (is (< elapsed 20000) (str "it came back at the limit, not when the command did ("
+                                 elapsed "ms)"))
+      (is (some? pid) "the program really did start a child")
+      (is (support/gone-within? pid 5000)
+          (str "pid " pid " outlived the call that started it")))))
 (deftest a-login-shells-logout-does-not-clear-the-pipe
   ;; Git for Windows ships /etc/bash.bash_logout, and a `bash -lc` whose OWN `exit`
   ;; ends it -- every COMPOUND command, since the last `exit` makes bash itself the

@@ -470,8 +470,8 @@
   "The resolution, or a refusal BY NAME when the shell this process spawns is not
   POSIX. CALLER names what cannot run, so the sentence can say so.
 
-  A CALLER THAT BUILDS A COMMAND LINE is the one that has to ask. rg and git
-  splice values into a line with POSIX single quotes (see `quote-arg`), which mean
+  A CALLER THAT BUILDS A COMMAND LINE is the one that has to ask. rg splices
+  values into a line with POSIX single quotes (see `quote-arg`), which mean
   nothing to PowerShell and less to cmd -- a path with a space in it would arrive
   as two arguments and the caller would never know. Running anyway, under a second
   quoting convention nobody wrote, is the failure this exists to prevent."
@@ -715,6 +715,16 @@
         {:exit (.exitValue p) :out out :err err}
         {:exit nil :out out :err err :timeout true}))))
 
+(defn- program-builder
+  "ARGV as a ProcessBuilder the one-shot protocol can start: stderr merged into stdout,
+  which is what every caller here reads. THE TWO ONE-SHOT SHAPES DIFFER ONLY IN HOW THE
+  ARGV IS BUILT -- a shell and its command word, or the caller's own words -- so the
+  ProcessBuilder itself is made in one place. The SHLVL pin stays wrapped around the SHELL
+  one, because its child IS a login shell and a directly spawned program has none to pin
+  for."
+  [argv]
+  (doto (ProcessBuilder. (mapv str argv))
+    (.redirectErrorStream false)))
 (defn run
   "Run COMMAND the way A: once, with STDIN written to it and then CLOSED, and no
   more than TIMEOUT-MS of waiting. Returns
@@ -753,10 +763,8 @@
         ;; wait nor the drains has a use for it.
         pb (with-shlvl!
              #(child-env
-               (doto (ProcessBuilder.
-                      (vec (concat [(:command r)] (:argv-prefix r)
-                                   [(command-word (:kind r) command (windows?))])))
-                 (.redirectErrorStream false))))]
+               (program-builder (concat [(:command r)] (:argv-prefix r)
+                                         [(command-word (:kind r) command (windows?))]))))]
     (when dir (.directory pb (io/file dir)))
     (await-program! pb {:stdin stdin :timeout-ms timeout-ms :on-spawn on-spawn})))
 
@@ -795,14 +803,13 @@
   ask' and throws, while a program that is simply not installed is a fact a caller asked
   about -- 127 is what every shell answers for a command that is not there, and it keeps
   'git is not installed' an ordinary non-zero answer rather than a 500."
-  [{:keys [argv stdin dir timeout-ms on-spawn]}]
+  [{:keys [argv dir timeout-ms]}]
   (when (empty? argv)
     (throw (ex-info "run-program needs a program to run" {:argv argv})))
-  (let [pb (doto (ProcessBuilder. (mapv str argv))
-             (.redirectErrorStream false))]
+  (let [pb (program-builder argv)]
     (when dir (.directory pb (io/file dir)))
     (try
-      (await-program! pb {:stdin stdin :timeout-ms timeout-ms :on-spawn on-spawn})
+      (await-program! pb {:timeout-ms timeout-ms})
       (catch java.io.IOException e
         {:exit 127 :out "" :err (str (ex-message e))}))))
 
