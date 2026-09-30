@@ -139,8 +139,10 @@ lib/
   feed.ts           一页一页的读：`pageThread`（尾页，或读者手上最老那条之前的一页）与帧的形状
                     （`WindowFrame`）——它和 `mux.ts` 说的是同一种帧；**流的那半已不在**（见下）
   mux.ts             那条下行 WebSocket（`events.mux`，ADR 0004）：一页一条，按 `threadId`
-                     分发**三族**：窗口帧、run 的 AG-UI 帧，以及**关于会话的事实**（`turn/*` /
-                     `model/*` / `step/*`，ADR 0006 + 0011）。**分派是显式的**（`familyOf(type)` → `window | fact | run`，
+                     分发**五族**：窗口帧、run 的 AG-UI 帧、**关于会话的事实**（`turn/*` / `model/*` /
+                     `step/*`，ADR 0006 + 0011）、右栏那份 `task` 载荷，以及**轨迹那一族**（`trajectory`，
+                     `.scratch/trajectory-on-the-downlink/`）。**分派是显式的**（`familyOf(type)` →
+                     `window | fact | task | trajectory | run`，
                      票 04）：事实若落进 `else` 就会被交给 `@ag-ui/client`，那份 schema 校验会当场把这一轮
                      打死。事实有自己的订阅面（`subscribeFacts`——它属于**会话**而不是某一次 run，所以
                      只看着的人也想要它）；订阅是 HTTP 事实（握手 URL + `POST /api/events.mux/subscribe`），
@@ -836,15 +838,16 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
   客户端从来没有过，AG-UI 帧里也没有（两张卡是这里的例外：注入物与一次压缩都**会**以 `CUSTOM` 帧出来、画成上面那两张卡——
   但卡只是**一段字节**，`items` 的来源与分轮、这次调用带了几张表，都只有记录才有）。所以这一半由服务端从
   jsonl 折出来（`harness.edge.trajectory`，
-  见 [edge](edge.md)），从 `GET /api/threads/<stem>/trajectory` 吐出去，
+  见 [edge](edge.md)），随下行的 `trajectory` 帧（`{:type "trajectory"}`）吐出去，
   客户端只画折好的东西（`src/lib/trajectory.ts`、`src/components/trajectory-view.tsx`、
   `trajectory-timeline.tsx`）。**它不数、不算、不重排**：记录里没有的格子它说没有，
   绝不拿「这个会话今天有什么」去填。
-- **它是流式的，而且只有被问到才取。** 路由答的是 **NDJSON**（首行是头、其后一轮一行，
-  `harness.edge.trajectory/fold-trajectory` 折完一轮就吐一轮），`lib/trajectory.ts` 边收边画，
-  `trajectory-view.tsx` 每落一个 turn 就 `setPayload` 一次——长记录不再等整份折完才画第一轮。
-  组件**只在 `Trajectory` 这一栏被打开时挂载**（`app.tsx` 的视图切换），所以 `对话` 一栏不发这个
-  请求：下行只承载对话本身，轨迹是按需取的那一半。
+- **它是流式的，而且只有被问到才取。** 帧是**增量**的：开场一帧带 `:snapshot` 与整份折，其后每帧只带
+  「自上次以来最终化的轮 + 当前那一轮」（`harness.edge.trajectory/trajectory-answer` 的那一份），
+  `lib/trajectory.ts` 按 `:index` 就地替换，`trajectory-view.tsx` 每来一帧 `setPayload` 一次——
+  长记录不再等整份折完才画第一轮。组件**只在 `Trajectory` 这一栏被打开时挂载**（`app.tsx` 的视图切换），
+  而订阅随它走：**这一栏关掉、这场会话还开着窗口时，客户端重新声明这一条（`trajectory: false`）**，
+  服务端因此不再为它折、也不再推。
 - **注入物整场只画一次。** 服务端没有会话，所以每个 run 都会把开场块重新拼一遍、把历史里还留着的
   `/<名字>` 重新派生一遍——照搬「这个 run 扛了什么」，同一段字节就会画在每个 turn 底下，5 轮的会话看起来像
   开场发生了 5 次，**那是自造**。所以判据是**整段文本的字节**：没变就不再画（开场块只在第一轮），变了的那一轮再画一次
@@ -858,10 +861,10 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
 - **切换住在 `app.tsx`，整列换掉，输入框也一起没有**——轨迹是读一份已发生的东西，不是一个能打字的地方。
   它**不写任何存储**：这是看会话的一种方式，不是关于会话的偏好。轨迹那半边只画**当前显示的那一场**
   （每份 host 只在 visible 时渲染整列），所以不显示的会话只挂着 runtime，不渲染消息。
-- **取数时机与 composer 下面那条状态条同一个**（`composer-numbers.tsx` 里那一处）：挂载时、会话变化时、
-  以及一次模型调用结束时（本侧一轮 ReAct 就是一条 assistant 消息，所以那个计数涨了就是有调用刚回来；
-  `isRunning` 收尾）。读取它的 hook 必须**在 runtime provider 之内**——`App` 自己渲染那个 provider，
-  在它的函数体里读会直接抛（浏览器里验过）。
+- **取数时机与 composer 下面那条状态条同一个**：挂载时（那一帧就是存量），之后由推送改它——头的
+  `:incomplete` / `:behind` **每一帧都到**，所以 run 落定不需要重开任何流（那一次重开从前是为了刷新
+  一个布尔，`isRunning` 因此不必参与）。读取它的 hook 必须**在 runtime provider 之内**——`App` 自己渲染
+  那个 provider，在它的函数体里读会直接抛（浏览器里验过）。
 - **两种看法是同一批标记的两种排法**，不是两份数据：`duration` 是真实时间轴（空档就是空档，
   等审批那两分钟看得见），`turns` 每轮等宽（长的安静的轮与短的吵的轮变得可比）。
   并发的工具调用在 lane 内**堆叠**，不排成首尾相接。

@@ -22,8 +22,9 @@
 
 ## 推送那一半
 
-- **一条 socket，按 `threadId` 路由**：`ui/src/lib/mux.ts`（ADR 0004）。今天的三个家族是
-  window（这一页手里那份对话）、run（正在跑的 run 的 AG-UI 事件）、fact（`turn/*` 与 `model/*`）。
+- **一条 socket，按 `threadId` 路由**：`ui/src/lib/mux.ts`（ADR 0004）。今天的家族是五个：
+  window（这一页手里那份对话）、run（正在跑的 run 的 AG-UI 事件）、fact（`turn/*` `model/*` `step/*`）、
+  task（右栏那一份载荷）、trajectory（模型每一轮看到了什么）。
 - **推的是「变了」，不是「变了之后的全部」**：谁要画它，谁把自己那一格状态改掉。
 - **一个新的可推对象 = 服务端要有一个写点**挂在它上面（一轮 run 的边、一次工具调用、一个进程的结局）。
   没有写点就推不了——那就先问「它凭什么没有写点」，**而不是先开一个定时器**。
@@ -31,7 +32,8 @@
 ## 断了怎么办
 
 推送会丢，所以**重连之后必须补一次存量**：socket 重开时重新声明订阅并带上游标
-（`ui/src/lib/mux.ts` 的 `declaredSet`：window 带 `since`，fact 带 `factSince`，run 带 `runSince`），
+（`ui/src/lib/mux.ts` 的 `declaredSet`：window 带 `since`，fact 带 `factSince`，run 带 `runSince`，
+trajectory 没有游标——重新声明就是重发一次开场快照，那份快照就是它的存量），
 而**游标之外**的事实由下一次快照补齐——`ui/src/components/composer-numbers.tsx` 里那句
 「一页打开一场会话就问一次 `/stats`」就是这半条。**没有这一段，这条原则只是把轮询换成了丢帧。**
 
@@ -59,13 +61,15 @@
   自己 ring 一次 host 流）。在它之前，每一个还没开聊的会话的 composer 都会各发一次 `GET /api/projects`。
 - **composer 下面那条统计条**：挂载一次 `GET …/stats`，之后 `model/end` 推着走，
   `ui/src/components/composer-numbers.tsx` 明写 `THERE IS NO POLLING`。本文件是从它开始写的。
-- **trajectory 那一栏**（`.scratch/memory-hygiene/` 票 02，2026-09-29）：挂载一次（换会话、run 落定也各一次）
-  读一次 `GET /api/threads/<stem>/trajectory`，之后由**服务端推**——只是推它走的不是下行 socket，
-  而是这条响应自己，而它的门铃**归这一页的下行订阅所有**（服务端看不见一条普通流式响应的读者走没走，
-  实测 `open?` 在读者走了以后还是 true）。所以**重连之后它要再问一次**：`onDownlinkOpen`
-  （`ui/src/lib/mux.ts`）叫它重开，`ui/src/components/trajectory-view.tsx` 是唯一的读者；没有人在订阅
-  这场会话时，服务端把折好的那一份给完就结束，不留门铃。
+- **trajectory 那一栏**（`.scratch/memory-hygiene/` 票 02，2026-09-29；**改走下行 socket**：票见
+  `.scratch/trajectory-on-the-downlink/`）：存量与推送都走**同一条 socket 的第五族帧**
+  （`{:type "trajectory"}`）——挂载即订阅（订阅声明里带 `trajectory: true`），开场帧带 `:snapshot`
+  （整份折），其后每帧只带「自上次以来最终化的轮 + 当前那一轮」，头（`:incomplete` / `:behind`）
+  每帧都到。`ui/src/components/trajectory-view.tsx` 是唯一的读者；它**不再有自己的长响应**，
+  也不再靠 `onDownlinkOpen` 重开——重连时握手重新声明整份集合，服务端照发开场帧，那就是补的存量。
 
 **没有欠账了**——上面五处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
 左栏那一半）；目录选择器那一处是 2026-09-29 随手合上的，trajectory 那一处同一天随
-`.scratch/memory-hygiene/` 票 02 一起（它本来就在推，缺的是「重连之后补一次」。）
+`.scratch/memory-hygiene/` 票 02 一起（它本来就在推，缺的是「重连之后补一次」）。
+**trajectory 现在正从那两半的例外改回正常的一格**（第五族帧，`.scratch/trajectory-on-the-downlink/`
+票 01–03）：上面那一条按**目标状态**写，落地之前它的读者还是 `GET …/trajectory` 那条长响应。

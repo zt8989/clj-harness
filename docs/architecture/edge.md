@@ -135,11 +135,10 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 | `/api/threads/<stem>/fork-points` | GET | **这一场能在哪些行 fork**：每个 `step/end`，最老的在前，各带 `:seq`（记录行号）、`:at`（时刻）、`:tools`（那一步调了什么）与 `:compactionId`（**紧跟其后**发生的那次压缩，没有就是 null）——压缩跑在两步之间，所以「压缩前的那一刀」就是它前面那个 `step/end`。尾部截到 200 条，`:total` 说一共有多少 | 无（只读） |
 | `/api/threads/<stem>/fork` | POST | **从某一步的结束另开一场会话**：body 里 `stepSeq`（`fork-points` 里的行号，切在它**之后**、**保留**这一行）；**不给**就取最后一个 `step/end`。新 thread-id、新记录文件（截点之前的行逐字复制），被截断的 run 补上终局；继承项目绑定，标题写成 `[fork] 原标题`，原会话**一个字节不动**。有 run 在跑 → 409；未知会话 → 404；给的行不是 `step/end` → 400 | `session/forked`（新会话），截断过则先有 `session/closed-off` |
 | `/api/threads/<stem>/sofar` | GET | **记录到哪了**：已记下的消息 + 三个状态（`running` / `parked` / `settled`）。在跑时返回半轮（含没有结果的调用），**不写一个字**；被切断（没有终帧且本进程没在跑它）**按名字拒绝**并指向 rebuild。服务端持有这场会话时读**内存**，但**有 run 正在跑时仍读记录**——那一刻「到哪里了」的答案在文件里。它**不是客户端的轮询**：有窗口的页面由下行（`events.mux`）报，只有**没有窗口**的那几扇门在自己驱动的一轮结束后读它一次。与 `rebuild` 的分界：那条是「交给我、我接手」（会合上、会写），这条是「给我看看」 | 无（只读） |
-| `/api/events.mux` | GET | **下行那条流**（WebSocket，ADR 0004）：一页一条，按 `?subscriber=<token>&sessions=<json>` 声明持有哪几场、各自从哪个游标开始；此后**每场被订阅的会话每落盘一批推一帧**（帧带 `threadId`），窗口结束一帧 `end`。**只推这条连接订阅的会话**——没订阅的会话一条都不推；token 随连接生、随连接死，服务端不记连接之外的订阅。run 的帧与子 agent 的帧也从这里下行 | 无（只读） |
+| `/api/events.mux` | GET | **下行那条流**（WebSocket，ADR 0004）：一页一条，按 `?subscriber=<token>&sessions=<json>` 声明持有哪几场、各自从哪个游标开始、**要不要这场会话的轨迹**（`trajectory: true`）；此后**每场被订阅的会话每落盘一批推一帧**（帧带 `threadId`），窗口结束一帧 `end`。**只推这条连接订阅的会话**——没订阅的会话一条都不推；token 随连接生、随连接死，服务端不记连接之外的订阅。run 的帧、子 agent 的帧、事实（`turn/*` `model/*` `step/*`）、右栏那份 `task` 载荷，以及**轨迹那一族**（`{:type "trajectory"}`：开场一帧整份折、其后每帧是增量）都从这条 socket 下行 | 无（只读） |
 | `/api/threads/<stem>/frames` | GET | **子 agent 重放的半边**（JSON）：这场会话的帧按运行时要读的顺序（`RUN_STARTED` 起头、`MESSAGES_SNAPSHOT` 随后、记录的帧按序）加一个 `:running`。面板读它、再从 `events.mux` 取实时尾巴，两边靠帧自己的 `:seq` 对齐（ticket 04） | 无（只读） |
 | `/api/events.mux/subscribe` | POST | **改一条活着的下行的订阅集合**（socket 只下行，发不了订阅）：`{subscriber, subscribe: [{threadId, since, generation}], unsubscribe: [threadId]}`。连接已关闭或从未开 ⇒ 404 | 无（只读） |
 | `/api/threads/<stem>/page` | GET | **窗口那一页**：没有 `beforeSeq` 是尾页，有它是读者手上最老那条**之前**的一页（一次一页）。活着的会话读内存（**有 run 正在跑时读记录**，见下），不活着的读记录——向前翻页是一次读，不需要是服务这场会话的那个进程 | 无（只读） |
-| `/api/threads/<stem>/trajectory` | GET | **模型每一轮看到了什么**：system 消息的字节、拼在它旁边的指令文件与技能清单、每条用户消息、每次工具调用的参数与结果、每轮发出去的工具表；折自记录（见下）。**NDJSON 流**：首行是头（`:threadId` / `:incomplete` / `:behind`），其后一轮一行，`fold-trajectory` 折完一轮就吐一轮。**这场会话有人订阅（一条活着的下行）时它保持连接并接着推**，没人订阅就给完折好的那一份、结束——见下面「门铃归连接所有」 | 无（只读） |
 | `/api/threads/<stem>/archive` | POST | 归档 / 取消归档（一个路由两个方向，body 说方向） | 无（日志必须一字节不动） |
 | `/api/threads/<stem>/stats` | GET | **会话统计**：这条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度 + 上下文圈）。**三个来源按序**：进程内持有该会话时读它的活折；否则读 `sessions.numbers`（**一次 SELECT**，快照带 `:numbersAt` 说明它是哪个时刻写的）；都没有才折记录。`?fold=1` 强制折记录（修复/对照用的门）。带 `:behind`（= 还有几批没落盘，为 0 时不出现） | 无（只读，且**从不写**） |
 | `/api/threads/<stem>/jobs` | GET | **本进程为这一场跑着的后台作业**：id、命令、状态、起点、记录的路径。读的是**进程内的作业注册表**，不是日志——没有作业、或作业随上一个进程死掉，都是 `:jobs []`（**不 404**）；状态就是记录末行（`[running]` / `[exit N]` / `[stopped]`，与 `job_output` 同一处出处） | 无（只读） |
@@ -179,7 +178,8 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 **provider 用它的 id**（它在 `config.edn` 里就是那个键，也是凭据名的来源）。
 **这个形状上不该被服务的动词**由这里答 405，而不是掉进 run 端点——那正是它从前会变成一个
 「body 根本不存在的 500」的原因。**方法说有没有副作用**：`rebuild` 与 `archive` 是 POST，
-`stats` / `trajectory` / `sofar` / `feed` / `page` 是 GET——前三个只读日志，后两个是窗口那两条（见下）。
+`stats` / `sofar` / `page` 是 GET——前两个只读日志，`page` 是窗口那一条（见下）；轨迹从前也在这张
+表上（`GET …/trajectory`），现在它的折只从下行来，没有路由。
 `jobs` 一个动词**两种方法**：GET 列本进程为这一场跑着的作业（只读注册表，不是日志），POST 停一条
 （发起人是人）——方法说有没有副作用，这一条两种都有。
 
@@ -241,7 +241,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 没报 `prompt_tokens` 的调用被跳过（不把上一次的数抹掉）、谁都没报过就没有 `:usedTokens`；**最后那次调用所在的 run**
 还没写完**（没有终帧、或返回侧还没落盘）时只缺 `:parts`：厂商的数已经在记录里了，不拿半份消息凑一个三分。
 
-**`trajectory` 折的是另外两半**（`harness.edge.trajectory`，`GET /api/threads/<stem>/trajectory`）：
+**`trajectory` 折的是另外两半**（`harness.edge.trajectory`，随下行的 `trajectory` 帧送出）：
 它读 `message` + `event`（`tools/*`、`system-prompt` 都在其中），回答「**模型每一轮到底看到了什么**」——system 消息的字节
 （**从 `:source "system-prompt"` 的 `message` 行里取**：全文一场会话只写一次，只有 hash 的那几轮靠往前带，见
 [overview](overview.md#状态放在哪) 那张表）、
@@ -346,10 +346,12 @@ generation 不是这条窗口的（会话被放掉 / 被接管 / 换了进程）
 「你还在吗」——主人说没了就不算读者：清扫那一拍**先 `prune-watches!` 再决定**放不放，于是没有一条
 没人能再敲响的门铃能被当成读者留在内存里（`.scratch/memory-hygiene/` 票 02 实测：2 条活连接 / 5 条
 订阅，却挂着 199 个门铃、钉住 32 场会话——`detach!` 那一行读的是整张表而不是那一行，所以它一个都
-没松开；而 trajectory 那条流的读者，服务端根本看不见）。**一条普通流式响应的 socket 不能当主人**：
-http-kit 对它**不报关闭**，读者走了以后 `open?` 还是 true、写还「成功」（实测）。所以 trajectory
-那条长响应把**这一页的下行订阅**当主人（`harness.edge.mux/watching?`）：有人订阅这场会话它才继续
-推，没人订阅就拿到折好的那一份、流结束、不留门铃——读者是 curl 也一样。
+没松开）。**能当主人的只有观测得到的连接**：一条普通流式响应的 socket 不能——http-kit 对它**不报
+关闭**，读者走了以后 `open?` 还是 true、写还「成功」（实测）。所以今天门铃的主人一律是**下行
+socket 的订阅**（`harness.edge.mux`：这场会话还有没有哪条连接声明着它）——**一场会话、一条连接，
+一个门铃**，它推的是**要重读记录才知道的那两族**：窗口的增量与轨迹那一份折；run、fact、task 三族
+由各自的写点直接按连接推（`mux-broadcast!` / `family-send!` / `task-send!`）。读者是 curl、或没有
+一条连接在声明它时，一个门铃都不留。
 
 **记录在长也算「会话变了」。** run 进行中窗口读的是**记录**（内存要到终帧才把那半轮折进来），而记录
 是**一行一行**长的：每一帧写下去，能答给读者的东西就多一段。所以**唯一那条写路径**（`http/log!`）每
