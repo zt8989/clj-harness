@@ -1970,10 +1970,19 @@ export const SettingsPanel: FC<{
             AND IT IS BIGGER THAN IT WAS (2026-09-30), because one of these pages is a LIST rather
             than a form: the session page draws every conversation this home keeps and shares the
             column with a row of verbs, so 48rem wide and a screenful of height was a handful of rows
-            in a mostly empty box. `sm:max-w-5xl` and 78vh of the window -- with a 40rem ceiling, so
+            in a mostly empty box. `sm:max-w-5xl` and a share of the window -- with a 40rem ceiling, so
             it never grows past a laptop screen -- is the same rule with a size that fits what these
-            pages now hold. */}
-        <div className="flex h-[min(40rem,78vh)] min-w-0 gap-4">
+            pages now hold.
+
+            THE SHARE IS OF THE VISIBLE WINDOW AND IT SUBTRACTS THIS DIALOG'S OWN CHROME, and both
+            halves of that sentence are fixes (measured 2026-09-30, at 844x390): `vh` on a phone is
+            the LARGEST viewport, so a `78vh` row plus the ~108px of header, footer and padding this
+            dialog carries sat 22px past the bottom of what a person can actually see -- and, being
+            centred, it was cut at BOTH ends with nothing to scroll, so the close button was off
+            screen for good. `dvh` is the height that is there right now, and 9rem covers those 108px
+            plus slack: the dialog fits whatever the browser's chrome does. And it still SCROLLS
+            rather than grows, which is what the fixed height was for in the first place. */}
+        <div className="flex h-[min(40rem,calc(100dvh-9rem))] min-w-0 gap-4">
           {/* TWO SHAPES, ONE `sm` APART. From `sm` up this is two columns. Below it the nav
               is not a column at all (`hidden sm:flex`): the list below is its narrow
               spelling, and a tap on one of its rows swaps the list for that page. */}
