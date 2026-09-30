@@ -149,11 +149,14 @@
    :telemetry {}})
 
 (defn- spy-run [thread-id]
+  ;; THE CONSUMER ANSWERS THE DRAIN BARRIER (`loop/answer-drain!`): a reader that does not
+  ;; makes the kernel wait out the barrier's whole five-second deadline on every run.
   (let [seen (atom [])
         ch   (loop/run-chan {:protocol :tool-spy :seen seen :reply "ok"} []
                              {:thread-id thread-id})]
     (loop []
-      (when-let [_ (async/<!! ch)]
+      (when-let [ev (async/<!! ch)]
+        (loop/answer-drain! ev)
         (recur)))
     @seen))
 
@@ -175,10 +178,13 @@
 ;; ------------------------------------------------------------------ lifecycle
 
 (defn- drain-events [provider thread-id]
+  ;; THE CONSUMER ANSWERS THE DRAIN BARRIER (`loop/answer-drain!`) -- see `spy-run` above.
   (let [ch (loop/run-chan provider [] {:thread-id thread-id})]
     (loop [acc []]
       (if-let [ev (async/<!! ch)]
-        (if (= :run/done (:type ev)) acc (recur (conj acc ev)))
+        (if (= :run/done (:type ev))
+          acc
+          (do (loop/answer-drain! ev) (recur (conj acc ev))))
         acc))))
 
 (deftest the-seam-reports-a-lifetime-for-every-call

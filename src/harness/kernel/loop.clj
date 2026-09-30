@@ -1055,6 +1055,36 @@
      :added    @added
      :unplaced @unplaced}))
 
+(defn answer-drain!
+  "THE CONSUMER'S HALF OF THE DRAIN BARRIER: settle the promise EV carries, if EV is one.
+
+  A CONSUMER OF `run-chan` HAS TO CALL THIS ON EVERY EVENT IT TAKES, because the kernel's
+  own rows wait on that answer before they are written (`drained!` above says what for).
+  `harness.edge.http`'s two drain loops and `harness.edge.replay/resume!` are the production
+  consumers; a test helper that drains a channel is a consumer too, and `harness.kernel.loop-test`'s
+  `drain-chan` has done this since the barrier existed.
+
+  THE ANSWER MEANS 'I HAVE DEALT WITH EVERYTHING BEFORE THIS', and a consumer that deals with
+  an event before taking the next one has -- by the time it takes the barrier -- finished with
+  every event in front of it. It belongs on this side rather than in the producer for that
+  reason: the promise is a question TO the consumer, and the producer cannot answer it. (An
+  unbuffered channel looks like it could -- the producer's put only returns once somebody has
+  taken the event -- but 'taken' and 'dealt with' are not the same fact, and the difference is
+  what the next row's place on the record depends on.)
+
+  A CONSUMER THAT NEVER CALLS IT COSTS A FULL DEADLINE, EVERY TIME. Measured 2026-09-30: the
+  helpers in `harness.approval-test`, `harness.session-tools-test`, `harness.edge.ag-ui-test`,
+  `harness.cap.skills-test` and one case in `harness.kernel.tools-test` did not, so `drained!`
+  waited out its whole five seconds on every barrier of every run. One scripted turn, no tools,
+  measured both ways by `dev/scratch_drain_barrier.clj`: 151ms drained by a consumer that
+  answers against 5,182ms drained by one that does not. That is what made a full backend run 22
+  minutes, `harness.approval-test` 224s and `harness.session-tools-test` 122s.
+  `harness.edge.replay/resume!` had the same hole in a path a person actually presses."
+  [ev]
+  (when (= :drained (:type ev))
+    (when-some [done (:done ev)] (deliver done true)))
+  nil)
+
 (defn run-chan
   "Drive one run, returning a channel of harness.kernel.event values. After the run a
   terminal event {:type :run/done :history <final-history> :added <what this run put
@@ -1063,6 +1093,10 @@
   history's tail would be a guess (see `drive!`). The channel is unbuffered and the
   producer BLOCKS on every put (>!!): a slow consumer applies natural backpressure
   rather than dropping events or queueing them up.
+
+  THE CONSUMER OWES ONE THING: `answer-drain!` on every event it takes. The run carries a
+  drain barrier -- a question about what the consumer has dealt with -- and the kernel's
+  next row waits on the answer.
 
   The producer runs on async/thread because the run does blocking I/O (the
   network stream and the tools), so it must not occupy a go block."

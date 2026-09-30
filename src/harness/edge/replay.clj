@@ -1754,6 +1754,14 @@
                                 :before-llm project/before-llm})]
      (loop []
        (when-let [event (async/<!! events)]
+         ;; THE CONSUMER ANSWERS THE DRAIN BARRIER (`harness.kernel.loop/answer-drain!`), and
+         ;; forgetting it cost this path the barrier's WHOLE five-second deadline per run:
+         ;; `harness.kernel.loop/drained!` waits for this answer before the kernel writes its
+         ;; own row, and the deadline is the safety valve for a consumer that is stuck -- not
+         ;; a pause for one that simply never said. Measured 2026-09-30 on the same hole in
+         ;; the test helpers, by `dev/scratch_drain_barrier.clj`: one scripted turn took
+         ;; 5,182ms drained by a consumer that never answers, against 151ms by one that does.
+         (loop/answer-drain! event)
          (when-not (= :run/done (:type event))
            (doseq [frame (emit event)] (swap! frames conj frame))
            (recur))))

@@ -22,12 +22,16 @@
 
 (defn- run-events
   "Drive one scripted run through loop/run-chan and return the kernel events,
-  the :run/done terminal dropped."
+  the :run/done terminal dropped.
+
+  THE CONSUMER ANSWERS THE DRAIN BARRIER (`loop/answer-drain!`), which is the one thing a
+  reader of a run channel owes the kernel; see that var for what it costs to forget."
   [turns]
   (let [ch  (loop/run-chan (fake/scripted turns) [])
         out (atom [])]
     (loop []
       (when-let [ev (async/<!! ch)]
+        (loop/answer-drain! ev)
         (when-not (= :run/done (:type ev))
           (swap! out conj ev)
           (recur))))
