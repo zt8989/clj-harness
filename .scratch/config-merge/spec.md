@@ -117,19 +117,8 @@ instructions/skills 归 `ctx.systemPrompt` 那一带）。**config-merge 先落�
 `.scratch/security-sensitive-paths/spec.md`（敏感路径那一轮做过；本轮改的是设置面板的文案与
 subagents 的写入路径，`npm run build` + 面板文案的人工核对已做，**没有**再走一遍完整走查）。
 
-## 实现进度（2026-09-29）
+## 实现进度（2026-09-29 的那一版，已被上面那节取代）
 
-- **票 01 已落地并删票**（本分支，绿）：`providers` 的段表收进 `:session` / `:mcp`，形状检查只做
-  「未知键按名字失败」这一层，两个读取入口 `session-config` / `mcp-servers`（保留 nil 与 {} 的区分）。
-  判据：`providers-test` 96 tests / 547 assertions；`project-test` + `system-prompt-test` + `editing-test`
-  + `mcp-test` 118 tests / 737 assertions——**0 failures**。
-- **票 02 起了头、停在半路**：分支 `config-merge-02-wip` 上一个 WIP 提交（`edac6d8`）——
-  `project.clj` 的读取侧已改（删 `read-harness-edn` / `harness-edn-levels`，`harness-config` 改读
-  `providers/session-config`，新增 `harness-config-path`），`compaction.clj` 与 `llm_timeout.clj` 已单级。
-  **但 `editing.clj` 与 `subagents.clj` 还在调已被删掉的 `harness-edn-levels`——那个分支编译不过**，
-  接着做先跑 `clojure -M -e "(require 'harness.edge.http)"`。
-- **03–07 一行没动。**
-- 为什么停在这里：票 02 顺带要求把约十个测试夹具从「写 harness.edn」改成「写 config.edn 的 `:session`」，
-  而其中多数今天靠**项目级** harness.edn 设 `:editing` / `:skills` / `:instructions` / `:approval`
-  ——项目级一去掉，它们的写法全要改（那也是票 02 验收里「`.harness/harness.edn` 写什么都不再影响会话」
-  这一条要钉住的东西），再加十几个命名空间的测试轮次，不是一次坐得完的量。
+票 01 当时落地（`providers` 的段表与两个读取入口），票 02 起了头又停在半路，03–07 未动——
+那一版的现场记录在 `config-merge-02-wip` 分支的提交信息里（已随本票合进 main 并被删除）。
+**上面那节是最终状态。**
