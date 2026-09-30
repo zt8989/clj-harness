@@ -17,6 +17,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
             [harness.edge.context :as context]
+            [harness.edge.pressure :as pressure]
             [harness.edge.http :as http]
             [harness.test-support :as support]
             [harness.fake :as fake])
@@ -48,8 +49,21 @@
 
 (defn- user [id text] {:id id :role "user" :content text})
 
-(defn- message [ts role text]
-  (record ts "message" {:role role :content text}))
+(defn- message
+  "A `message` row -- one message of the conversation, as the record spells one since
+  `.scratch/jsonl-two-kinds` 票 02.
+
+  THE ENVELOPE IS PART OF THE MEANING, and getting it right is what this helper is for. A row
+  reaches `harness.edge.replay/entries` only when it carries the source the conversation knows
+  it by (`client` / `opening` / `injection`) and -- except for a client's message -- an id.
+  THE ROWS THE RUN'S SIDE PRODUCED get into the conversation through the FRAMES instead, which
+  is exactly why the ring's conversation bucket is read from the conversation and not from a
+  run's own rows (ticket 01 of `.scratch/context-ring`). An assistant row written here stands
+  in for what the frames would carry: the fixture wants those bytes in the conversation, and
+  the source plus the id is the only thing that puts them there."
+  [ts role text]
+  (assoc (record ts "message" {:role role :content text})
+         :source "client" :id (str "m" ts "-" role)))
 
 (defn- system-prompt
   "The system message as the record holds it (owner, 2026-09-21): a `message` row -- the
@@ -85,7 +99,15 @@
                      :description (apply str (repeat n "d"))
                      :parameters {:type "object" :properties {}}}})])
 
-(defn- context-of [records] (context/records->context (vec records)))
+(defn- context-of
+  "RECORDS -> the section the route assembles, with the array the chosen call was handed
+  taken from the band -- the same two arguments `records->context` takes from
+  `harness.edge.http`. A suite that folded that array itself would be the second spelling of
+  the rule this file exists to keep in one place."
+  [records]
+  (let [records (vec records)]
+    (context/records->context records
+                              (pressure/anchor-face (pressure/meter-of-records records)))))
 
 (defn- tokens-of-parts [answer] (map :tokens (:parts answer)))
 (defn- keys-of-parts [answer] (map :key (:parts answer)))
@@ -294,10 +316,14 @@
       (is (= 500 (:usedTokens answer)))
       (is (not (contains? answer :windowTokens))))))
 
-(deftest a-run-that-has-not-finished-reports-the-numbers-and-no-split
-  ;; The session is being read WHILE it runs: the call came back, the split of what
-  ;; it was sent cannot be complete yet (the returned side of the message record
-  ;; lands one beat after the run's terminal frame).
+(deftest a-run-that-has-not-finished-reports-its-split-too
+  ;; THE SESSION IS BEING READ WHILE IT RUNS, and the ring draws the same three buckets it
+  ;; draws for a finished one. It used to withhold them until the run's terminal frame, on the
+  ;; reasoning that the message side lands one beat after that frame -- but the frame being
+  ;; waited for is the RUN's, not the call's. The array a call was handed is written before it
+  ;; goes out, and `harness.edge.pressure`'s anchor keeps it from the `model/start` on.
+  ;; Withholding it left the page drawing one arc in the fallback colour (near black in the
+  ;; light theme) for the whole length of every long run -- reported from a browser 2026-09-30.
   (let [answer (context-of [(input 0 (user "u1" "hi"))
                             (system-prompt 1 "s")
                             (message 2 "user" "hi")
@@ -306,21 +332,24 @@
     (is (= 500 (:usedTokens answer)))
     (is (= 1000 (:windowTokens answer)))
     (is (= 50 (:percent answer)))
-    (is (not (contains? answer :parts))
-        "half a message set would make the conversation look like a small share")))
+    (is (= ["system" "tools" "conversation"] (keys-of-parts answer))
+        "the split is drawn with no terminal frame anywhere in the log")
+    (is (= 500 (reduce + (tokens-of-parts answer)))
+        "and it is still the whole of the vendor's number")))
 
-(deftest a-finished-run-whose-tail-has-not-landed-says-the-same
-  ;; The race the other readers also live with: the terminal frame is written and the
-  ;; message tail one beat later. Counting only what is on disk would divide the
-  ;; prompt by a conversation that has not arrived.
-  (let [answer (context-of [(input 0 (user "u1" "hi"))
-                            (system-prompt 1 "s")
-                            (message 2 "user" "hi")
-                            (start 10 1000 nil)
-                            (end 20 (usage 500 5))
-                            finished])]
-    (is (= 500 (:usedTokens answer)))
-    (is (not (contains? answer :parts)))))
+(deftest the-runs-own-terminal-frame-changes-nothing-about-the-split
+  ;; The race the other readers also live with: the terminal frame is written and the message
+  ;; tail one beat later. Neither is what the split is read from -- it is the array the call was
+  ;; handed, snapshotted at that call -- so a log whose run has not ended answers the same
+  ;; section a whole one does. Pinning the EQUALITY is the point: a reader that went back to
+  ;; counting the run's own rows would answer something different here.
+  (let [rows [(input 0 (user "u1" "hi"))
+              (system-prompt 1 "s")
+              (message 2 "user" "hi")
+              (start 10 1000 nil)
+              (end 20 (usage 500 5))]]
+    (is (= (context-of rows) (context-of (conj rows finished))))
+    (is (= 500 (:usedTokens (context-of rows))))))
 
 (deftest the-split-describes-the-run-the-call-belonged-to
   ;; Two turns in one log: the numbers and the parts belong to the SECOND, not to
@@ -341,6 +370,37 @@
                             (message 5040 "assistant" "two")])]
     (is (= 900 (:usedTokens answer)) "the second turn's call")
     (is (= 900 (reduce + (tokens-of-parts answer))))))
+
+(deftest the-conversation-bucket-is-the-whole-conversation
+  ;; TICKET 01 OF `.scratch/context-ring`, PINNED. The conversation was counted as 'this run's
+  ;; own rows' (`(:submitted run)` + `(:returned run)`); ADR 0002 keeps the history in the
+  ;; session and has the client submit only NEW messages, so every earlier turn was missing
+  ;; from the bucket -- and `apportion` then handed the vendor's total to the tool table, which
+  ;; came out at 68.7% of a prompt it was under 3% of (measured 2026-09-30, session `62f30024-…`).
+  ;; The bucket is now the array the call was handed, which IS the whole conversation.
+  (let [first-turn (fn [text]
+                     [(input 0 (user "u1" text))
+                      (system-prompt 1 "s")
+                      (message 2 "user" text)
+                      (start 10 1000 (tool-table 10))
+                      (end 20 (usage 100 5))
+                      (record 30 "event" {:type "RUN_FINISHED" :threadId "t" :runId "r1"})
+                      (message 40 "assistant" "one")])
+        second-turn [(input 5000 (user "u2" "second"))
+                     (system-prompt 5001 "s")
+                     (message 5002 "user" "second")
+                     (start 5010 1000 (tool-table 10))
+                     (end 5020 (usage 900 5))]
+        conversation (fn [history]
+                       (let [answer (context-of (concat (first-turn history) second-turn))]
+                         (is (= 900 (reduce + (tokens-of-parts answer)))
+                             "the three buckets are still the whole of the vendor's number")
+                         (nth (tokens-of-parts answer) 2)))]
+    (is (> (conversation (apply str (repeat 4000 "h"))) (conversation "hi"))
+        "growing the EARLIER turn grows the second call's conversation bucket")
+    (is (> (conversation (apply str (repeat 4000 "h"))) 800)
+        "and that history dominates the vendor's 900 -- a bucket of this run's rows alone
+         would be a sliver of it, which is what put the tool table at two thirds")))
 
 ;; ----------------------------------------------------------------- the endpoint
 
@@ -373,20 +433,16 @@
     [(.statusCode resp) (json/read-str (.body resp) :key-fn keyword)]))
 
 (defn- stats-until-complete
-  "GET THREAD-ID's stats until the route reports the SPLIT, or give up after ~3s and
-  answer the last read.
+  "GET THREAD-ID's stats, waiting for the SPLIT to be there, or give up after ~3s and answer
+  the last read.
 
-  THE RETURNED SIDE LANDS ONE BEAT AFTER THE TERMINAL FRAME. `harness.edge.context`
-  turns that into a rule -- a run whose tail has not landed has no parts at all, because
-  half a message set would make the conversation look like a small share of a large
-  prompt -- and this case reads the endpoint the instant the SSE body closes, so on a
-  loaded machine it can read the record one line short of complete and see the vendor's
-  numbers with no split beside them. That is what happened once here (the strip's
-  numbers arrived, `:parts` was absent) while another suite ran in the same shell.
-
-  So the case waits for the run to be WHOLE, which is the state it is about: what the
-  route folds once a real run has finished. 'Absent while the run is still going' is
-  pinned on hand-written records above, where it is deterministic."
+  THE WAIT USED TO BE A REAL RACE. `harness.edge.context` withheld `:parts` for a run with no
+  terminal frame, and the returned side was thought to land a beat after that frame -- so this
+  case could read the endpoint the instant the SSE body closed and see the vendor's numbers
+  with no split beside them (it happened once here while another suite ran in the same shell).
+  The split is now the array the chosen call was HANDED, snapshotted at that call, so it is
+  there as soon as the call reported. The loop is kept as a guard against a torn read on a
+  loaded machine, not because a wait is expected."
   [port thread-id]
   (loop [tries 0]
     (let [answer (get-json port (str "/api/threads/" thread-id "/stats"))]

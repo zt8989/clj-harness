@@ -3869,10 +3869,20 @@
 
       :else
       (let [records (:ok read)
-            folded  (try (let [records (vec records)]
+            folded  (try (let [records (vec records)
+                               ;; THE BAND IS FOLDED ONCE AND BOTH READERS TAKE FROM THAT WALK:
+                               ;; the ring's split is the array the chosen call was handed
+                               ;; (`pressure/anchor-face`) and the meter is the surface it prices.
+                               ;; `meter-of-records` + `state->pressure` + `messages-in` is
+                               ;; `pressure/records->pressure` spelled out, which is the price of
+                               ;; not walking the whole record twice for one answer.
+                               band    (pressure/meter-of-records records)]
                            {:ok (assoc (stats/records->stats records)
-                                       :context  (context/records->context records)
-                                       :pressure (pressure/records->pressure records))})
+                                       :context  (context/records->context records
+                                                                           (pressure/anchor-face band))
+                                       :pressure (pressure/state->pressure band
+                                                                           (pressure/messages-in records)
+                                                                           pressure/default-ratios))})
                          (catch Throwable t {:error (ex-message t)}))]
         (if (some? (:error folded))
           (api-response 400 {:error (:error folded) :threadId stem})
@@ -3886,19 +3896,28 @@
 
   BOTH FOLDS OR NEITHER. `stats` and `context` are registered together (`start!`), and half an
   answer from memory beside half from a file would be two moments of one log pretending to be
-  one -- which is the failure `stats-get` has always refused."
+  one -- which is the failure `stats-get` has always refused.
+
+  THE RING'S SPLIT DEPENDS ON THE THIRD FOLD, and that is worth naming where it is spent: the
+  context section's three buckets are the array the CHOSEN CALL was handed, and `pressure` is
+  the fold that keeps one array per call (`anchor-face`). A section asked for without the band
+  is the vendor's number with no split beside it -- a single arc in the fallback colour on the
+  page, which is what sent somebody looking (2026-09-30) -- so the band is read here beside
+  the other two, and a session whose band is missing answers a thinner section rather than a
+  wrong one."
   [stem]
   (when-some [st (sessions/fold-value stem :stats)]
     (when-some [ctx (sessions/fold-value stem :context)]
-      (assoc (stats/stats-answer st)
-             :context (context/state->context ctx)
-             ;; THE BAND IS THE THIRD FOLD, and the surface it is asked about is the REQUEST the
-             ;; next call would carry -- the conversation PLUS the system message in force
-             ;; (`harness.edge.pressure/live-surface`; `sessions/messages` alone is the smaller
-             ;; array, and the meter subtracts one surface from the other). Memory for a session
-             ;; held here, and the same shape the compaction trigger measures mid-run.
-             :pressure (pressure/band-pressure stem (pressure/live-surface stem)
-                                               (compaction/config stem))))))
+      (let [band (sessions/fold-value stem :pressure)]
+        (assoc (stats/stats-answer st)
+               :context (context/state->context ctx (pressure/anchor-face band))
+               ;; THE BAND IS THE THIRD FOLD, and the surface it is asked about is the REQUEST the
+               ;; next call would carry -- the conversation PLUS the system message in force
+               ;; (`harness.edge.pressure/live-surface`; `sessions/messages` alone is the smaller
+               ;; array, and the meter subtracts one surface from the other). Memory for a session
+               ;; held here, and the same shape the compaction trigger measures mid-run.
+               :pressure (pressure/band-pressure stem (pressure/live-surface stem)
+                                                 (compaction/config stem)))))))
 
 (defn- trajectory-get
   "GET /api/threads/<stem>/trajectory -- one session's LEDGER as the MODEL saw it,

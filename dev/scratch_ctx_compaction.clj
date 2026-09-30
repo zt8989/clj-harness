@@ -36,7 +36,10 @@
     (reduce (fn [st [i row]]
               (let [st' (ctx/state-step st nil [i row])]
                 (when (and (interesting? row) (<= 10100 i 10245))
-                  (let [{:keys [usedTokens percent]} (ctx/state->context st')]
+                  ;; THE FACE IS NIL HERE ON PURPOSE: this script watches the NUMBER a compression
+                  ;; moves (`:usedTokens` / `:percent`), not the three buckets -- and the buckets
+                  ;; are the array the chosen call was handed, which this walk does not keep.
+                  (let [{:keys [usedTokens percent]} (ctx/state->context st' nil)]
                     (println (format "%-6d %-18s ts=%s used=%s pct=%s"
                                      i (name (or (:name (replay/payload row))
                                                  (replay/kind row)))

@@ -241,7 +241,7 @@
                    (sessions/model-view (vec entry-messages))
                    injections)))
 
-(defn- messages-in
+(defn messages-in
   "RECORDS -> the messages the model was handed, AS FAR AS THE RECORD DESCRIBES THEM: the
   conversation's own entries (deduped and card-stripped the way a run hands them over),
   the newest system message in front, and the last run's own injections (which carry no id
@@ -249,7 +249,11 @@
  
   THE SYSTEM MESSAGE IS ADDED BY HAND because it is not a conversation entry -- the
   client never holds the prompt (`harness.edge.replay/entries`) -- and it is the single
-  largest fixed cost in every request."
+  largest fixed cost in every request.
+
+  PUBLIC SINCE THE STATS ROUTE FOLDS THE BAND ONCE (2026-09-30): that route hands these
+  to `state->pressure` on the same walk that built the band, rather than paying a second
+  `meter-of-records` over the whole record for them."
   [records]
   (let [entries (vec (replay/entries records))]
     (messages-of (replay/compacted-messages entries
@@ -257,6 +261,28 @@
                                           (vec (replay/prune-facts records)))
                  (some-> (system-row records) replay/payload)
                  (injected-rows (last (trajectory/run-segments records))))))
+
+(defn anchor-face
+  "BAND -> the array the LAST REPORTING CALL was handed, as the band kept it -- or nil
+  when no call reported a prompt. THIS IS THE BAND'S `:anchor` SPELLED OUT as the one
+  thing it holds: the conversation as of that call (`:messages`), the system message in
+  force, and that run's own injections.
+
+  IT IS HANDED OUT RATHER THAN FOLDED AGAIN BY WHOEVER WANTS IT. Which messages a call
+  carried is one rule (`messages-of`), and `harness.edge.context/shares` -- the ring's
+  three buckets -- sizes exactly this array: a second spelling of it there is a second
+  chance to disagree about what went out, which is what that split did when it counted
+  the conversation as 'this run's own rows' and left the history out of it. The two
+  halves of the composer's reading come from the same call because they come from the
+  same fold: the vendor's `prompt_tokens` is what the ring divides, and this array is
+  what it splits.
+
+  AN ANCHOR TAKEN BEFORE THIS BAND SAW A SNAPSHOT still answers, with the pieces it has
+  (`:messages` nil reads as no conversation): a reader that gets a thinner array is
+  better served than one that gets nil and draws no split at all."
+  [band]
+  (when-some [a (:anchor band)]
+    (messages-of (:messages a) (:system a) (:injections a))))
 
 (defn- identity-index
   "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
