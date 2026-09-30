@@ -135,11 +135,30 @@ promise，然后 `(deref done 5000 nil)`：
 HTTP/SSE、真记录）。这台机器上：一次真 run 在客户端侧约 **300ms**（`dev/scratch_mux_cost.clj`），
 一次 `bash -lc` 约 **730ms**（其中约 700ms 是登录 profile）——这两条是工作的下界。
 
+**票里点名的那两处轮询**：`mux-run!` 的订阅重试是「POST 到 `/subscribe`，200 就走」（20ms × 最多
+40 次是失败上限），`await-log` 是 25ms 轮询到那行出现为止——两者都是**到了就走**的有界轮询，不是
+排水屏障那种「不回答就等满 5 秒」。一次真 run 那 300ms 主要是 WebSocket 连接 + 一次真 HTTP/SSE 往返。
+
 **逐条量**（`dev/scratch_http_time.clj`：跑该家一遍，从 `:begin-test-var`/`:end-test-var` 读每条耗时）：
 单跑 **129.9s / 123 条**。最大两条是 git 用例
 （`a-directory-this-home-lists-is-read-and-moved-without-a-session` 26.9s、
 `the-git-endpoint-reads-and-moves-the-sessions-working-tree` 16.6s，合计 43.5s = 33%），其余 121 条
 合计约 86s（约 0.7s/条）。
+
+**慢的是哪几条**（改动前、单跑，按秒；完整清单由 `dev/scratch_http_time.clj` 现跑现出）：
+
+| 秒 | 用例 |
+|---|---|
+| 26.9 | `a-directory-this-home-lists-is-read-and-moved-without-a-session` |
+| 16.6 | `the-git-endpoint-reads-and-moves-the-sessions-working-tree` |
+| 3.8 | `the-log-the-server-writes-is-one-replay-can-read` |
+| 3.2 | `the-projects-listing-joins-the-store-with-the-disk` |
+| 3.1 | `switching-a-row-off-takes-its-text-out-of-the-next-runs-message` |
+| 2.9 | `removing-a-project-unbinds-it-and-leaves-every-log-where-it-was` |
+| 2.8 | `a-running-session-reads-what-has-arrived-and-nothing-is-written` |
+| 2.7 | `the-provider-timeline-is-init-once-then-changes` |
+
+top-15 合计 74.7s（57.5%）。除两条 git 用例的夹具 spawn，其余都是各自真跑一到几次 run 的价钱。
 
 **修的是夹具的 spawn 次数**：`init-repo!` 原先八个 `shell/run`（八次 `bash -lc` = 八个登录 profile），
 合成一条 `&&` 链——仍是八条 git 命令，省掉的是 profile。那两条用例 43.5s → 29.1s。
@@ -154,6 +173,10 @@ HTTP/SSE、真记录）。这台机器上：一次真 run 在客户端侧约 **3
 | `edge.http-test`（整轮内） | 134.5s | **120.0s** |
 | 用例 / 断言 | 1397 / 14398 | **1397 / 14398** |
 | 失败 | 12 fail + 4 err | **11 fail + 4 err**（少的正是那条已知 flake） |
+
+（上面排水屏障那一节的 `1381 / 14373`、`4 fail + 3 err` 是 2026-09-30 中午在**当时的树**上量的；从那以后
+又合了几家别的票、负载也不同，所以这里另起一栏量改动前后。用例从 1381 涨到 1397 不是这一刀加出来的。
+票面写的「118 条」也是更早那次的快照——现在是 123 条。）
 
 **命名空间那一档留 300s 没动**：它还没响过；按 `docs/rules/testing.md` 的规矩（响了才调、调了要写清
 为什么），没响就不调。改动后 `http-test` 是 120s，仍是这条线的工作下界，不是可以点掉的等待。
