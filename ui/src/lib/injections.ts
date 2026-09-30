@@ -20,6 +20,11 @@
 /// (`harness.edge.ag_ui`) and this module is what looks it up.
 export const INJECTION_PART = "injected-context";
 
+/// The frame every injection wears (`harness.cap.reminder`), on both ends. Spelled here because
+/// the label line a card's title comes from is the first line INSIDE this frame.
+const REMINDER_OPEN = "<system-reminder>";
+const REMINDER_CLOSE = "</system-reminder>";
+
 /// What the frame carried: the message's role and its bytes.
 export type InjectionValue = {
   readonly role?: string;
@@ -28,10 +33,11 @@ export type InjectionValue = {
 
 /// What the collapsed row says. Every field is a string the row can print as-is.
 export type InjectionView = {
-  /// The tag the block arrived with -- `instructions`, `skill`, `job-ended` -- or the first line
-  /// when it does not open with one.
+  /// The block's LABEL LINE -- `Instructions from: …`, `Skill tdd`, `Background job j1
+  /// ended: …` -- or, for a record written before that shape existed, the tag it opens
+  /// with (`skill`).
   title: string;
-  /// The first line, clipped: the row is one line and truncation is the browser's.
+  /// The label line, clipped: the row is one line and truncation is the browser's.
   preview: string;
   /// The bytes of the whole block, not of the preview.
   bytes: number;
@@ -39,18 +45,28 @@ export type InjectionView = {
 
 /// The tag name a block opens with, or null when it does not open with a tag.
 ///
-/// `<skill name="tdd">` -> `skill`. Deliberately shallow: the tags are the server's own frame for
-/// the first line (see `harness.cap.skills/skill-message`), and a parser here would be this side's
-/// second opinion about a shape it does not own.
+/// `<skill name="tdd">` -> `skill`. Deliberately shallow, and now a FALLBACK to the shape an old
+/// record was written in: the tags were the server's own frame for the first line, and a parser
+/// here would be this side's second opinion about a shape it does not own.
 function tagOf(text: string): string | null {
   const match = /^<([a-z][a-z0-9-]*)[\s>]/.exec(text.trimStart());
   return match?.[1] ?? null;
 }
 
-/// The first non-empty line, as the row's preview.
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    if (line.trim() !== "") return line.trim();
+/// The line inside a block that says what it is.
+///
+/// EVERY INJECTION WEARS ONE FRAME NOW (`harness.cap.reminder`), `<system-reminder>` holding
+/// plain text, and the label is the first non-empty line INSIDE it. That is the whole reason
+/// this is not `tagOf(text)` any more: the frame is the same for a skill body and a job's
+/// ending, so reading the first line of the whole block would title every card
+/// `system-reminder`. A block that is not a reminder (an old record) keeps its own first line,
+/// which is its tag.
+function labelLine(text: string): string {
+  const lines = text.split("\n");
+  const start = lines[0]?.trim() === REMINDER_OPEN ? 1 : 0;
+  for (let i = start; i < lines.length; i += 1) {
+    const line = lines[i]?.trim() ?? "";
+    if (line !== "" && line !== REMINDER_CLOSE) return line;
   }
   return "";
 }
@@ -68,7 +84,10 @@ export function injectionView(value: unknown): InjectionView | null {
   if (typeof value !== "object" || value === null) return null;
   const text = (value as InjectionValue).text;
   if (typeof text !== "string" || text.trim() === "") return null;
-  const line = firstLine(text);
+  const line = labelLine(text);
+  /// A FRAME WITH NOTHING IN IT IS THE SAME ANSWER as no text at all: the block said
+  /// nothing, so a row drawn for it would claim an injection nobody can check.
+  if (line === "") return null;
   return {
     title: tagOf(line) ?? line,
     preview: line,

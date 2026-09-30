@@ -322,7 +322,7 @@
       (testing "the body rides right behind the message that asked, both user-side"
         (is (= ["user" "user" "assistant"] (mapv :role history)))
         (is (= "/alpha go" (:content (first history))) "and the person's text is untouched")
-        (is (str/starts-with? (str (:content (second history))) "<skill name=\"alpha\">"))
+        (is (str/starts-with? (str (:content (second history))) "<system-reminder>\nSkill alpha\n"))
         (is (str/includes? (str (:content (second history))) "ALPHA BODY"))))
     (project/bind! "t-slash" nil)))
 
@@ -350,17 +350,17 @@
                                          [{:role "user" :content "off you go"}]
                                          {:thread-id t :before-llm project/before-llm}))]
           (testing "the first call went out without it"
-            (is (not (str/includes? (str (first @sent)) "job-ended"))
+            (is (not (str/includes? (str (first @sent)) "Background job "))
                 "the job was still running when that call was made"))
           (testing "and the second one had it, without anybody asking"
             ;; THE NOTICE CARRIES THE JOB'S ID, THE COMMAND IT RAN, HOW IT WENT, AND THE LINE
             ;; THAT READS IT -- what the command SAID is not in it (`job_output`, or the
             ;; file, is a call away), and neither is the record's path (the `job` answer
             ;; had it), so the output line is deliberately NOT one of the markers here.
-            (is (str/includes? (str (second @sent)) "job-ended"))
+            (is (str/includes? (str (second @sent)) "Background job "))
             (is (str/includes? (str (second @sent)) (str "[exit 0]"))))
           (testing "exactly once in the history the run ends with"
-            (is (= 1 (count (filter #(str/includes? (str (:content %)) "job-ended")
+            (is (= 1 (count (filter #(str/includes? (str (:content %)) "Background job ")
                                     history)))))
           (testing "and there is nothing left to say"
             (is (= [] (jobs/take-notices! t))))))

@@ -587,7 +587,7 @@
         (is (some #(str/includes? (str (:content %)) "Body of alpha") results))
         (is (some #(str/includes? (str (:content %)) "is the skill's directory") results)
             "the directory line is the other half of what a load answers with")
-        (is (not-any? #(str/starts-with? (str (:content %)) "<skill name=") history)
+        (is (not-any? #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") history)
             "and nothing was spliced for it: one call, its result, no second copy")))
 
     (testing "every assistant message's results stay adjacent in what came back"
@@ -611,13 +611,13 @@
     (testing "asking for the SAME name twice contributes its body once"
       (let [asked (conj msgs {:role "user" :content "/alpha again"})
             out   (skills/derived-injections asked [root])]
-        (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out))))))
+        (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") out))))))
 
     (testing "a tool load beside the ask contributes nothing of its own"
       (let [asked    (into msgs [(assistant-with-skill-call "c1" "alpha")
                                  (skill-result "c1" "alpha")])
             out      (skills/derived-injections asked [root])
-            injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
+            injected (filterv #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") out)]
         (is (= 1 (count injected)) "one body: the one the person asked for")
         (is (= ["user" "user" "assistant" "tool" "user"] (mapv :role out))
             "and it is still the LAST thing in the history")))
@@ -628,10 +628,10 @@
                       {:role "user" :content "/alpha please"}
                       {:role "user" :content "/beta too"}]
             out      (skills/derived-injections asked [root])
-            injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
+            injected (filterv #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") out)]
         (is (= 2 (count injected)))
-        (is (str/starts-with? (:content (first injected)) "<skill name=\"alpha\">"))
-        (is (str/starts-with? (:content (second injected)) "<skill name=\"beta\">"))
+        (is (str/starts-with? (:content (first injected)) "<system-reminder>\nSkill alpha\n"))
+        (is (str/starts-with? (:content (second injected)) "<system-reminder>\nSkill beta\n"))
         ;; AT THE END, BOTH OF THEM, in the order they were asked for -- see the
         ;; function's own note about where a body goes and why it moved there.
         (is (= (mapv :content injected) (mapv :content (take-last 2 out))))))))
@@ -680,7 +680,7 @@
       ;; so deleting a non-empty directory is a silent no-op.
       (io/delete-file (io/file root "alpha" "SKILL.md") true)
       (let [text (:content (last (skills/derived-injections msgs [root])))]
-        (is (str/starts-with? text "<skill name=\"alpha\">"))
+        (is (str/starts-with? text "<system-reminder>\nSkill alpha\n"))
         ;; The wording is the SAME sentence an unknown name gets (absent-notice):
         ;; the question is the same question, and a second sentence for it would be
         ;; a second answer free to disagree. What it must keep saying is the part
@@ -723,7 +723,7 @@
     (testing "one more message, and it is a USER message carrying the whole body"
       (is (= 3 (count out)))
       (is (= "user" (:role (nth out 2))))
-      (is (str/starts-with? (:content (nth out 2)) "<skill name=\"alpha\">"))
+      (is (str/starts-with? (:content (nth out 2)) "<system-reminder>\nSkill alpha\n"))
       (is (str/includes? (:content (nth out 2)) "Body of alpha")))
 
     (testing "the person's own words are left exactly as typed"
@@ -758,7 +758,7 @@
                   (skill-result "c1" "alpha")
                   {:role "user" :content "/alpha again"}]
                  [root])]
-        (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<skill name=") out)))
+        (is (= 1 (count (filter #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") out)))
             "one injected body -- and the tool result in that history is the other copy")))
 
     (testing "two different names both arrive, each after the message that asked"
@@ -766,10 +766,10 @@
       (let [out      (skills/derived-injections [{:role "user" :content "/alpha go"}
                                                  {:role "user" :content "/beta too"}]
                                                 [root])
-            injected (filterv #(str/starts-with? (str (:content %)) "<skill name=") out)]
+            injected (filterv #(str/starts-with? (str (:content %)) "<system-reminder>\nSkill ") out)]
         (is (= 2 (count injected)))
-        (is (str/starts-with? (:content (first injected)) "<skill name=\"alpha\">"))
-        (is (str/starts-with? (:content (second injected)) "<skill name=\"beta\">"))))))
+        (is (str/starts-with? (:content (first injected)) "<system-reminder>\nSkill alpha\n"))
+        (is (str/starts-with? (:content (second injected)) "<system-reminder>\nSkill beta\n"))))))
 
 (deftest a-slash-load-of-a-name-nobody-has-is-a-notice-not-a-silence
   (let [root (lay-user-skills! "alpha")
@@ -779,7 +779,7 @@
       ;; loaded something with nothing to say.
       (is (= 2 (count out)))
       (let [text (:content (second out))]
-        (is (str/starts-with? text "<skill name=\"nope\">"))
+        (is (str/starts-with? text "<system-reminder>\nSkill nope\n"))
         (is (str/includes? text "no skill named"))
         (is (str/includes? text "alpha") "and it lists what this session CAN load"))))
 
@@ -806,7 +806,7 @@
                           {:type "image" :image_url {:url "data:image/png;base64,AA"}}]}]
               [root])]
     (is (= 2 (count out)))
-    (is (str/starts-with? (:content (second out)) "<skill name=\"alpha\">"))))
+    (is (str/starts-with? (:content (second out)) "<system-reminder>\nSkill alpha\n"))))
 
 (deftest a-conversation-that-asks-for-nothing-is-returned-untouched
   ;; The regression the whole feature rests on, in the form this second source

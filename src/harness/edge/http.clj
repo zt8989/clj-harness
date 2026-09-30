@@ -94,6 +94,7 @@
             [harness.kernel.loop :as loop]
             [harness.cap.claims :as claims]
             [harness.cap.preamble :as preamble]
+            [harness.cap.reminder :as reminder]
             [harness.cap.project :as project]
             [harness.edge.replay :as replay]
             [harness.infra.stream :as stream]
@@ -864,27 +865,23 @@
   "WHO PUT THIS MESSAGE INTO THE ARRAY, for a message a RUN added: what the model returned,
   what a tool answered, and what the pre-LLM step derived along the way.
 
-  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the tag answers the rest: a skill
-  body and a job's ending are wrapped by the code that writes them (`harness.cap.skills`
-  writes `<skill name=..>`, `harness.cap.jobs` writes `<job-ended ..>`), and the skills
-  namespace reads the first of those tags back out of the conversation
-  (`loaded-skill-names`), so this is the same reading rather than a new convention. Anything
-  else a run injected is an `injection` and says so."
+  THE ROLE ANSWERS THE FIRST TWO (`model`, `tool`) and the block's LABEL LINE answers the
+  rest. Every injection now wears the same `<system-reminder>` frame, so the frame itself
+  cannot tell them apart; the first line inside it can, and `harness.cap.reminder/kind-of`
+  is that reading, kept beside the writer that puts the label there. Anything it calls an
+  `injection` is one."
   [message]
   (let [content (str (:content message))]
     (case (:role message)
       "assistant" "model"
       "tool"      "tool"
-      (cond
-        (str/starts-with? content "<skill name=")   "skill"
-        (str/starts-with? content "<job-ended ")    "job"
-        ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
-        ;; the instruction files and the skills catalog were folded in at the birth, so a
-        ;; later run's copy is the same kind of fact -- an `opening` -- and the tags are the
-        ;; ones `harness.edge.ag-ui/opening-entries` writes.
-        (str/starts-with? content "<instructions")  "opening"
-        (str/starts-with? content "<skills")        "opening"
-        :else                                       "injection"))))
+      ;; THE CONVERSATION'S OPENING IS READ AGAIN BY EVERY RUN (`.scratch/session-opening`):
+      ;; the instruction files and the skills catalog were folded in at the birth, so a
+      ;; later run's copy is the same kind of fact -- an `opening` -- and `kind-of` reads
+      ;; the label lines `harness.cap.preamble` writes (`Instructions from`, `Available
+      ;; skills`). A skill body (`Skill <name>`) and a job's ending (`Background job <id>
+      ;; ended`) are per-run derivations, which is why they are their own sources.
+      (reminder/kind-of content))))
 
 (defn- log-message!
   "ONE \"message\" line, for one message a RUN put in the array -- the row's payload is the

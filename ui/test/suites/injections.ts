@@ -101,6 +101,39 @@ const cases: readonly Case[] = [
         "project",
       );
       expect(injectionView({ role: "user", text: "plain words" })?.title).toBe("plain words");
+
+      // AND THE SHAPE EVERY INJECTION WEARS NOW (`harness.cap.reminder`): one
+      // `<system-reminder>` frame holding plain text, whose FIRST LINE says what the block
+      // is. The title is that line and not the frame -- otherwise every card in the pane
+      // would read `system-reminder`.
+      const instructions = injectionView({
+        role: "user",
+        text:
+          "<system-reminder>\n" +
+          "Instructions from: /h/AGENTS.md\n\n" +
+          "# 全局 AGENTS.md\n" +
+          "</system-reminder>",
+      });
+      expect(instructions?.title).toBe("Instructions from: /h/AGENTS.md");
+      expect(instructions?.preview).toBe("Instructions from: /h/AGENTS.md");
+
+      expect(
+        injectionView({
+          role: "user",
+          text: "<system-reminder>\nSkill tdd\n\nred green refactor\n</system-reminder>",
+        })?.title,
+      ).toBe("Skill tdd");
+      expect(
+        injectionView({
+          role: "user",
+          text:
+            "<system-reminder>\nBackground job j1 ended: [exit 0]\nCommand: make\n" +
+            'Read what it said with job_output {"job": "j1"}.\n</system-reminder>',
+        })?.title,
+      ).toBe("Background job j1 ended: [exit 0]");
+
+      // A frame with nothing but the frame says nothing, and draws nothing.
+      expect(injectionView({ role: "user", text: "<system-reminder>\n</system-reminder>" })).toBeNull();
     },
   },
   {

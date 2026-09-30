@@ -24,7 +24,8 @@
   provider's shape. AG-UI keeps reasoning as a message of its own; the provider wants
   it as a field on the assistant message. Folding it back is MANDATORY, not cosmetic:
   a request carrying tools must echo reasoning_content or DeepSeek answers HTTP 400."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [harness.cap.reminder :as reminder]))
 
 (defn- open-text [s]
   (if (:text s)
@@ -714,7 +715,8 @@
   (when (seq context)
     {:id      context-entry-id
      :role    "user"
-     :content (str/join "\n" (map #(str "- " (:description %) ": " (:value %)) context))}))
+     :content (reminder/wrap (cons "Session context"
+                                    (map #(str "- " (:description %) ": " (:value %)) context)))}))
 
 (def opening-entry-prefix
   "The prefix `opening-entries` numbers the conversation's opening with: `session-opening-0`,
