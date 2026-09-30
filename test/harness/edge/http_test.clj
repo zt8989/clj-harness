@@ -4898,12 +4898,11 @@
   ;; this used to compose was the same idea and only closed half the window.
   (support/temp-dir "http-git"))
 
-(defn- make-git-repo
-  "A real repository, so the route meets git rather than a story about git.
+(defn- init-repo!
+  "A real repository at DIR, so the route meets git rather than a story about git.
   Renamed rather than `init -b`: see harness.cap.git-test for why."
-  []
-  (let [dir git-repo
-        run (fn [c] (shell/run {:command c :dir dir}))]
+  [dir]
+  (let [run (fn [c] (shell/run {:command c :dir dir}))]
     (.mkdirs (io/file dir))
     (run "git init -q")
     (run "git config user.email test@example.invalid")
@@ -4915,6 +4914,9 @@
     (run "git branch -m main")
     (run "git branch side")
     dir))
+
+(defn- make-git-repo []
+  (init-repo! git-repo))
 
 (deftest the-git-endpoint-reads-and-moves-the-sessions-working-tree
   (make-git-repo)
@@ -4957,6 +4959,62 @@
            (is (str/includes? (:error (read-json resp)) "nope")))
          (is (= 1 (count (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))))
              "the refusal left no trace on disk"))))))
+
+(deftest a-directory-this-home-lists-is-read-and-moved-without-a-session
+  ;; THE SESSION THIS IS FOR DOES NOT EXIST: the page minted the id and has not sent to it
+  ;; (`.scratch/composer-new-session-bar/`). So the strip's question has to be answered about a
+  ;; DIRECTORY, and the directory it may be asked about is exactly the one this home lists.
+  ;;
+  ;; ITS OWN TWO REPOSITORIES, not the fixture the session route uses: that one ends the case
+  ;; above on `side`, and a branch assertion reading somebody else's leftover is a case that
+  ;; passes or fails by the order it ran in.
+  (with-bare-server
+   (fn []
+     (let [listed   (init-repo! (support/temp-dir "http-git-listed"))
+           unlisted (init-repo! (support/temp-dir "http-git-unlisted"))
+           head     (fn [dir] (str/trim (:out (shell/run {:command "git rev-parse --abbrev-ref HEAD"
+                                                           :dir dir}))))
+           url      (fn [dir] (java.net.URLEncoder/encode (.getCanonicalPath (io/file dir)) "UTF-8"))]
+       (api-call :post "/api/projects" (json/write-str {:dir listed}))
+       (testing "a listed directory is read with no session in the way at all"
+         (let [body (read-json (api-call :get (str "/api/git?dir=" (url listed)) nil))]
+           (is (true? (:repo? body)))
+           (is (= "main" (:branch body)))
+           (is (= #{"main" "side"} (set (:branches body))))
+           (is (= (.getCanonicalPath (io/file listed)) (:dir body))
+               "and the answer names the directory it is about, canonical")))
+       (testing "a directory this home does NOT list is not read, even though it IS a repository"
+         (is (= "main" (head unlisted))
+             "the second repository is real -- it is the gate that answers nothing")
+         (let [body (read-json (api-call :get (str "/api/git?dir=" (url unlisted)) nil))]
+           (is (false? (:repo? body)))
+           (is (nil? (:dir body)))))
+       (testing "and picking a branch moves that directory's repository"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:dir listed :branch "side"}))
+               body (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (= "side" (:branch body)))
+           (is (= "side" (head listed)))))
+       (testing "a directory this home does not list cannot be moved either, and says why"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:dir unlisted :branch "side"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "does not list")))
+         (is (= "main" (head unlisted)) "and that repository is where it was"))
+       (testing "AND NOTHING IS WRITTEN FOR THE SESSION IT IS FOR: that session does not exist"
+         ;; The id rides along here on purpose: writing the audit line it would carry is the one
+         ;; thing this form must not do -- a log for a minted id is the row `POST /api/project`
+         ;; stopped creating. If someone teaches this branch to log, this is the case that says no.
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:threadId "composer-held" :dir listed
+                                               :branch "main"}))]
+           (is (= 200 (.statusCode resp))))
+         (is (not (.exists (io/file (log-file-for "composer-held"))))))
+       (testing "and a body naming neither a session nor a directory is refused by name"
+         (let [resp (api-call :post "/api/git" (json/write-str {:branch "side"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "threadId or dir"))))))))
 
 ;; ------------------------------------------------ the provider catalog, over HTTP
 
