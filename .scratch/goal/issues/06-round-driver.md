@@ -22,7 +22,7 @@ phase = active  ∧  armed?  ∧  rounds < max-rounds  ∧  上一轮有进展
 - **`rounds` 落在记录里**（`note-round!`），重启后折得回来；不是进程内存。
 - **driver 只在有 run 的会话上可能触发**：一场会话没有 run 收尾，就没有驱动它的机会。
 
-**Blocked by:** 02、05
+**Blocked by:** 02、05、`.scratch/run-commands` 的 02（「起一场只有命令的 run」那扇门与 driver 同一扇）
 
 **Status:** ready-for-agent
 

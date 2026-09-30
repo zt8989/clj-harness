@@ -3,7 +3,8 @@
 **What to build:** 人看得见、点得动的目标条。
 
 `ui/src/lib/goal.ts`：类型与两份读法——`goalFor(threadId)`（一次 `GET …/goal`，答 `{goal, armed?}`）与
-`applyGoal(threadId, action, body?)`（一次 `POST /api/goal`）。失败/空态照 `lib/todos.ts`：拉不到就是
+`applyGoal(threadId, action, body?)`（把一条 `goal` **命令**包进一次 run 请求的 `commands`，见
+`.scratch/run-commands`——**不是** POST）。失败/空态照 `lib/todos.ts`：拉不到就是
 `{goal: null, armed?: false}`，不抛、不画错。
 
 `ui/src/components/composer-goal.tsx`：挂在 composer 上方（**在任务横条之上**）。**没有目标就什么都不画**
@@ -33,7 +34,8 @@
       一致性由票 09 那条键集合测试钉住。`armed?` 单独一个布尔，不进 `goal` 对象。
 - [ ] 没有目标：组件渲染出**零个节点**。
 - [ ] 四种相位/armed 组合各自画出**正确的那组按钮**（一条用例把四种都渲成字符串断言）。
-- [ ] 点任一颗按钮 → 对应 `applyGoal`，成功后**当格状态立刻换成响应体那份**（不等推送）。
+- [ ] 点任一颗按钮 → 对应 `applyGoal`，**推来的 `goal` 帧**把当格状态换掉（命令没有 HTTP 应答，不再有
+      「响应体那份」）；一条用例证明按钮 → 命令 → 帧 → 当格。
 - [ ] 展开区画 `round n/max`；`blocked` 时画 code 与人话说明；`armed?` 假时画「已停」。
 - [ ] **会话换了旧目标不留屏**：`threadId` 变即清 `null`，迟到旧答案被 `live` 拒掉。
 - [ ] **不轮询**：文件里没有定时器；一次 `GET` + 帧 + 两个 fact + `onDownlinkOpen`，就这些。

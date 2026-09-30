@@ -85,14 +85,17 @@ ref 与当下不符就按名字拒绝（`:goal-moved`），句子让人/模型�
 与待决审批、作业注册表同族）：它是「这个进程还允许替你把下一轮开起来」，
 **重启即失**、会话 resume/fork 后自动失——正是 dsh 那条，也正是「人没说话，就不要再烧钱」那道闸。
 
-### 4. 三个工具、一个管理边、一条人的命令——同一套动词
+### 4. 三个工具、一条命令、一个只读——同一套动词
 
-`harness.cap.goal` 是**唯一**的规则处，五个门都调它，拒绝不写第二份：
+`harness.cap.goal` 是**唯一**的规则处，三处都调它，拒绝不写第二份：
 
 - 模型：`get_goal` / `create_goal(objective, max_goal_rounds?)` / `update_goal(goal_id, revision, action, …)`；
-- 人：`POST /api/goal`（`action` ∈ `show`/`create`/`edit`/`pause`/`resume`/`clear`）+ `GET …/goal`；
-- 人（输入框）：`/goal …`（票 08，落到同一个 `POST`）。
+- 人（输入框）：`/goal …` 是一条 `{:type "goal", :action …}` **命令**，走 `.scratch/run-commands` 那条
+  会话队列、**在 run 里执行**（没有 run 时这条命令起一个，见那份 spec 决定 4）；
+- 人（面板存量）：`GET …/goal` 只读快照——**不是**命令，面板「先拉一次存量」那条纪律要它。
 
+**`POST /api/goal` 不存在**：写入一律经命令，只在 run 里发生（同一份 spec 决定 4）。
+**`show` 是读**：`GET` 与 `/goal` 单打都走它，答一份快照。
 **`show` 是读**：`GET` 与 `/goal` 单打都走它，答一份快照。
 
 ### 5. 模型可以从人的直接请求立目标，但顶不掉未完成的目标
@@ -175,7 +178,8 @@ round 7/25
 /goal clear           清（墓碑）
 ```
 
-解析只有一个模块（`ui/src/lib/goal-command.ts`），composer 在**发送前**认出来、执行、**不发 run**，
+解析只有一个模块（`ui/src/lib/goal-command.ts`），composer 在**发送前**认出来、包成 `commands` 里的
+一条命令（`.scratch/run-commands`），**不发一条提问**：没有 run 在跑时这次请求起一场只有命令的 run。
 形态与技能斜杠同一形状。`goal` 这个名字被保留（一个叫 `goal` 的技能不能用 `/goal` 触发，代价写下来）。
 
 ### 11. 目标条在输入框之上、任务横条之上
@@ -190,6 +194,9 @@ round 7/25
 
 ## 代价（写清楚，不藏）
 
+- **依赖 `.scratch/run-commands` 那条通道**：`/goal …` 是它的一条命令、在 run 里执行；
+  那套没落地之前，人那半边（建/改/暂停/恢复/清）没有入口——模型那三个工具不依赖它。
+  面板的**存量**（`GET …/goal`）与 `goal` 推送帧也不依赖它。
 - **记录 + 投影两处**：crash 之间会不一致，靠 fold 重建兜底（与 `sessions.numbers` 同一条）。
 - **driver 是这套里最重、最险的一块**：它让服务端主动开 run、烧的是按量计费的钱。
   上限默认小、零进展即停、进程重启即 disarmed、人随时能停——四条刹车一条都不能省。
