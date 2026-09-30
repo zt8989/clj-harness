@@ -1,25 +1,26 @@
-# spec：注入物的统一外形 + 轨迹照 dsh 的账本
+# spec：注入物的统一外形 + 两处按轮折叠 + 轨迹照 dsh 的账本
 
 **一句话**：把「每次调用前摆进历史的那些块」统一成**一条 `<system-reminder>` 包着的纯文本**——标签层去掉、
-多个 AGENTS.md 合成一条、作业结束走同一条；轨迹则**照搬 dsh**：一条平铺的账本，
-`system_prompt` 在最前，之后 `turn/start` → `message` → `context` → `assistant` → … → `turn/end`。
+多个 AGENTS.md 合成一条、作业结束走同一条；**会话栏折轮时把注入卡一起折进去**；轨迹则**照搬 dsh**：
+一条平铺的账本，`system_prompt` 在最前，之后 `turn/start` → `message` → `context` → `assistant` → … → `turn/end`。
 
 牛总 2026-09-30 的原话拆成五条：
 
 1. 所有 context 注入用 `<system-reminder>` 包起来，**特别是 job_end**；
 2. `<system-reminder>` 里面不要再次包括 xml；
 3. 多个 AGENTS.md 合并成一个注入；
-4. 按轮次折叠的时候要把上下文注入一起折叠；
+4. **会话栏**按轮次折叠的时候要把上下文注入一起折叠；**轨迹**也要（dsh 的 `Collapse turns`）；
 5. 轨迹**按照 dsh 照搬**：`system_prompt + turn/start message context assistant... turn/end`。
 
 已拍：范围 = 指令文件 / 技能目录 / 运行上下文条目 / 技能正文 / 作业结束通知（**不含** `instruction-update`）；
-内层全改纯文本，来源/路径/命令/id 用**纯文本行**表达（像 dsh 的 `Instructions from: …`）。
+内层全改纯文本，来源/路径/命令/id 用**纯文本行**表达。
 
-> 第 4、5 条讲的是**轨迹**，不是会话栏。改写前我把 4 读成了会话栏的轮折叠，作废——见决定 6 与票 05。
+> **修正**（2026-09-30，实读 dsh 记录后）：第一版我写「dsh 的 AGENTS.md 不合并」——**错的**，见决定 4 的实测。
+> 第一版还把第 4 条读成只讲轨迹——也错，**会话栏与轨迹都要折**，见决定 6。
 
 ---
 
-## 一、现状（2026-09-30，读代码所得）
+## 一、现状（2026-09-30，读代码 / 读 dsh 记录所得）
 
 ### 注入物，与它们现在的样子
 
@@ -50,11 +51,50 @@
 （`trajectory.clj` 的 docstring：「THE SYSTEM MESSAGE IS SHOWN ONCE, and again whenever its bytes change」），
 **不是事件顺序错误，也不是渲染错误**。payload 是 `{:turns [{:index :items :calls}] :incomplete}`。
 
-### 轨迹：dsh 的样子（本机实读）
+### 会话栏：折轮不折卡
+
+`ui/src/components/turn-steps.tsx` 的注释把现状写死了：
+「A CARD IS NOT A STEP … `thread.aui.tsx` draws a card part even in a folded step or head」。
+所以一轮折上之后，**注入卡还挂在屏幕上**（除非它是那一轮的「结论」）。牛总要它跟着轮一起折。
+
+### dsh 的样子（本机实读）
 
 **代码**：`@deepseek-ai/dsh-client-ui-trajectory@0.1.0-rc.6`
 （`~/.npm/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai/dsh-client-ui-trajectory/`）。
 **真记录**：`~/.dsh/sessions/--Users-zhouteng-Documents-workspace-clj-harness--/session-*/session.v3.jsonl.zstd`。
+
+**注入物**：
+
+- **同一级的指令文件合并进一条** `<system-reminder>`。实测 `session-edc108e2-81b8-…` 的**同一条** `user/message`、
+  **同一个** reminder 里有：
+
+  ```
+  <system-reminder>
+  The following workspace instructions may be relevant to your work. Use them as guidance when applicable.
+  More specific instructions take precedence over broader ones. They do not override system, developer, or
+  direct user instructions.
+
+  Instructions from: ~/.dsh/AGENTS.md
+
+  # 全局 AGENTS.md
+  …
+
+  Instructions from: AGENTS.md
+
+  # AGENTS.md
+  …
+  </system-reminder>
+  ```
+
+  ——**`Instructions from: <路径>` 是每文件一段，段间空行，全在一个 reminder 里**。
+- **作用域更窄的**（worktree 那种子目录里的）自出一条 message，首行是 `Additional instructions from: <路径>`；
+  文件中途改了，出一段 `Updated instructions from: <路径>`。
+- 技能目录也是一条 reminder（里面嵌着 `<available_skills>`——牛总要改成纯文本）。
+- 运行上下文快照（approval/file policy）是一条 user 消息，**不包 reminder**。
+- **作业通知是裸纯文本、没包 reminder**（`background job bash-20 (bash: …) finished [status: …]. Read its output with job_output.`）。
+  牛总要「都包」——这是**对 dsh 的一处有意加严**。
+
+**轨迹**：
 
 - 记录是**一条平铺的账本**，按发生顺序一行一条：
   `system/message`、`turn/start`、`step/start`、`user/message`、`request/context`、`assistant/message`、
@@ -65,11 +105,7 @@
   `TrajectoryCellKind = 'system' | 'user' | 'context' | 'compacted' | 'message' | 'tool' | 'subtool'`
   （`trajectory-record.d.ts`）。轮边界是**粗分割线**（`Turn N` / `Between turns`），行内小标记是步。
 - 工具栏有 `Collapse turns` / `Expand turns`、`Collapse calls` / `Expand calls`；`system` 那格的字是
-  `Initial System Prompt`；assistant 那格的字是 `Message`。
-- **AGENTS.md 不合并**（每个文件一条 `user/message`，各带一个 `<system-reminder>`，
-  首行 `Instructions from: …` / `Additional instructions from: …`），但**牛总要合并**——见决定 4。
-- dsh 的技能目录 reminder 里嵌着 `<available_skills>`，作业通知是**裸纯文本**、没包 reminder。
-  牛总要的是「都包、里面都纯文本」——见决定 2、3。
+  `Initial System Prompt`，assistant 那格的字是 `Message`。
 
 ---
 
@@ -91,6 +127,7 @@
 ### 决定 2：里面只有纯文本
 
 reminder 里**不出现任何 XML 元素**，包括原来那些语义标签。实参是**行**的序列，写手不解析、不转义。
+（这是一处对 dsh 的**加严**：dsh 的技能目录里嵌着 `<available_skills>`。）
 
 ### 决定 3：机器可读的那半，从「标签」改成「首行标签行」
 
@@ -99,7 +136,7 @@ reminder 里**不出现任何 XML 元素**，包括原来那些语义标签。�
 
 | 注入物 | reminder 内首行（**锚**） | 之后 |
 |---|---|---|
-| 指令文件（**合并后一段**） | `Instructions from <绝对路径>` | 空行，然后是正文；下一个文件同形，段间空行 |
+| 指令文件（**合并后一段**） | `Instructions from: <绝对路径>` | 空行，然后是正文；下一个文件同形，段间空行 |
 | 技能目录 | `Available skills` | 目录正文（`cap.skills/catalog-text`） |
 | 会话上下文条目 | `Session context` | 原来的 `- 描述: 值` 列表 |
 | 技能正文 | `Skill <name>` | 正文 |
@@ -109,17 +146,22 @@ reminder 里**不出现任何 XML 元素**，包括原来那些语义标签。�
   `Background job ` → `job`；其余 → `injection`（`Session context` 落这里，与今天一致）。
 - `loaded-names` 改读 `Skill <name>` 首行。
 - 两个读法都写成**一张表 + 一个函数**，别让两处各拼一遍前缀；**旧标签前缀兜底**（老记录、老会话）。
-- 模型侧用 dsh 的措辞做参照（`Instructions from: AGENTS.md`、`Additional instructions from:`），但路径给**绝对**。
+- 措辞照 dsh（`Instructions from: <路径>`、开头的 `The following workspace instructions may be relevant…`），
+  但路径给**绝对**；`Additional instructions from:` / `Updated instructions from:` 本仓今天没有对应概念
+  （见非目标），不写。
 
-### 决定 4：多个 AGENTS.md 合成一条注入
+### 决定 4：多个 AGENTS.md 合成一条注入（dsh 就是这么做的）
 
 `harness.cap.preamble/messages` 从「每个文件一条」改成「**所有指令文件一条** + 技能目录一条」。
 `gather` 的字面不变（还是 `[{:path :content} …]`，读盘失败的策略不变），改的只是折叠。
 
+- 形状照 dsh：一个 reminder，每个文件一段 `Instructions from: <绝对路径>` + 空行 + 正文，段间空行。
 - 出生时写进会话的开场条目因此从 `N+1` 条变 `2` 条：`session-opening-0`（指令，内含 N 段）、
   `session-opening-1`（技能目录，若没有可用的技能则没有它）。
 - `opening-entries` / `opening-entry?` / `isOpeningEntryId` 不用改（前缀与正则本来就与条数无关）。
 - `preamble/report` 的「每块来源与字符数」改成「合并块的总字符数 + 逐文件的 `:path` 名」。
+- **与 dsh 的差别只在一处**：dsh 按**作用域**分（同级合并、更窄的另出 `Additional instructions from:` 一条）；
+  本仓的 `:instructions` 只是一个列表、没有作用域概念，所以**整个列表合并成一条**——正是牛总要的。
 
 ### 决定 5：轨迹照搬 dsh 的平铺账本
 
@@ -153,19 +195,23 @@ reminder 里**不出现任何 XML 元素**，包括原来那些语义标签。�
   assistant 的 `:reasoning`、`system` 的 `:tools`——**字段原样保留**（这是本仓已有的自包含读数）。
 - `turn === null` 的格 = dsh 的 **`Between turns`**：独立跑的压缩、以及任何不属于任何一轮的行。
 
-### 决定 6：轨迹按轮折叠时，`context` 跟着折
+### 决定 6：两处折轮都要把注入收进去
 
-dsh 的账本有 `Collapse turns`（`toolbar.collapseTurns`）。照搬之后：**一轮折上，轮内的 `context` 格与
-`message` / `tool` 一起收进摘要行**；展开才画。`system` 格在轮外，永远不折进轮；`turn-start`/`turn-end`
-是分割线，折起来只剩轮标题 + 一行摘要（`N steps · M tool calls`，dsh 的 `summarizeTurn` 同一个形）。
+**(a) 会话栏**（`turn-steps.tsx` + `thread.aui.tsx` + `lib/turns.ts`）：一轮折上时，**属于本轮的注入卡不画**，
+只留摘要行；展开才画。「属于本轮」= 那张 `injected-context` 的 card-only 消息与本轮相邻（在轮的边界之间，
+或紧贴开轮那条之前）。**压缩卡（`compacted-context`）不动**——它是「历史在这里被折过一次」的边界，
+`.scratch/compaction-frames` 刻意让它折了也画。摘要行的步数不变（卡不是步）。
 
-**会话栏那套轮折叠不动**（`turn-steps.tsx` 的 `A CARD IS NOT A STEP` 保持原样）。牛总那句「按轮次折叠」
-指的就是这条轨迹折叠；会话栏若也要，另开一票。
+**(b) 轨迹**（票 05）：账本的 `Collapse turns` 折上时，轮内的 `context` 格与 `message` / `tool` 一起收进摘要；
+`system` 格在轮外，不折进任何轮；`turn-start`/`turn-end` 收成轮标题 + 一行摘要
+（`N steps · M tool calls`，dsh 的 `summarizeTurn` 同一个形）。
 
-### 决定 7：范围不含 `instruction-update` 与 `<project>`/`<env>`
+### 决定 7：范围不含 `instruction-update`、`<project>`/`<env>`、`Updated instructions from:`
 
 - `instruction-update`（`role: "developer"`）不在外形统一里（已拍）。
 - `<project>` / `<env>` 在 **system 消息**（message[0]）里，是「本会话的事实」，不是 context 注入，形状不动。
+- dsh 的 `Additional instructions from:` / `Updated instructions from:` 本仓今天没有对应概念
+  （指令文件只在出生写一次，见 `.scratch/session-opening`），不造这个概念。
 
 ---
 
@@ -185,15 +231,19 @@ dsh 的账本有 `Collapse turns`（`toolbar.collapseTurns`）。照搬之后：
 </instructions>
 ```
 
-后（一条 user 消息）：
+后（一条 user 消息，照 dsh）：
 ```
 <system-reminder>
-Instructions from /Users/zhouteng/AGENTS.md
+The following workspace instructions may be relevant to your work. Use them as guidance when applicable.
+More specific instructions take precedence over broader ones. They do not override system, developer, or
+direct user instructions.
+
+Instructions from: /Users/zhouteng/AGENTS.md
 
 # 全局 AGENTS.md
 …
 
-Instructions from /Users/zhouteng/Documents/workspace/clj-harness/AGENTS.md
+Instructions from: /Users/zhouteng/Documents/workspace/clj-harness/AGENTS.md
 
 # AGENTS.md
 …
@@ -209,7 +259,7 @@ Instructions from /Users/zhouteng/Documents/workspace/clj-harness/AGENTS.md
 A person stopped it from the pane; read what it said with job_output {"job": "j1"}.
 ```
 
-后：
+后（这是对 dsh 的加严——dsh 是裸文本）：
 ```
 <system-reminder>
 Background job j1 ended: [exit 0]
@@ -243,22 +293,23 @@ Skill tdd
 ## 四、非目标
 
 - **不改注入的位置、顺序、次数**（`.scratch/context-frames` 决定 7、`.scratch/session-opening`）。
-- **不动 `<project>` / `<env>`**、**不动 `instruction-update`**。
+- **不动 `<project>` / `<env>`**、**不动 `instruction-update`**、**不造 `Updated instructions from:`**。
 - **不改记录格式**：注入仍各是一条 `message` 行，信封仍带 `:source`。
 - **不改 `job_output` / `job_kill` / `bash` 语义**，不改通知的「一个作业只说一次」。
-- **不照搬 dsh 的 `subtool`**、不照搬它的虚拟滚动 / 补页（本仓已有自己的轨迹时间线与走查）。
-- **不动会话栏的轮折叠**（决定 6）。
-- **不重做注入卡外观**；只改标题来源（首行标签行）。
+- **不照搬 dsh 的 `subtool`**、不照搬它的虚拟滚动 / 补页。
+- **不动压缩卡的折叠行为**（决定 6a）。
+- **不重做注入卡外观**；只改标题来源（首行标签行）与折叠时机。
 
 ---
 
 ## 五、验收
 
 - **外形**：有 AGENTS.md 的会话（无论几份）只产生**一条**注入消息、一个 `<system-reminder>`；
-  里面第一行是 `Instructions from <绝对路径>`，且**没有** `<instructions …>` 这类标签。
+  里面每个文件一段 `Instructions from: <绝对路径>`，且**没有** `<instructions …>` 这类标签。
 - **分类不变**：技能正文 / 作业通知的 `:source` 仍是 `skill` / `job`（不是 entry、每轮重算）；
   `opening` / `injection` 的 entry 语义与今天逐字相同。
 - **卡片**：会话栏里每个注入的折叠行标题来自首行标签行（不再是 `system-reminder`），字节数不变。
+- **会话栏折叠**：一轮折上之后，属于它的注入卡**不画**；展开又有；摘要行的步数不变；压缩卡**仍画**。
 - **轨迹（payload）**：顶层是 `:cells`；`cells[0].kind == "system"` 且 `:turn` 为 `nil`；
   每一轮由 `turn-start` … `turn-end` 夹出；轮内 `user` 在 `context` 之前；`message` / `tool` 随记录顺序；
   独立压缩是 `turn: nil` 的 `compacted` 格。字节变了的系统提示词在**它所属轮的 `turn-start` 之前**多出一条。
@@ -275,14 +326,15 @@ Skill tdd
 
 | # | 票 | Blocked by | 交付什么 |
 |---|---|---|---|
-| 01 | `plain-text-reminder-writer` | — | `cap/reminder.clj`（写手 + 首行标签表）；`preamble` 指令合并成一条、目录一条、上下文条目包一层；`preamble-test` / `ag-ui-test` / `http-test` 的条数与字节断言 |
+| 01 | `plain-text-reminder-writer` | — | `cap/reminder.clj`（写手 + 首行标签表）；`preamble` 指令合并成一条（照 dsh 的分段与前言）、目录一条、上下文条目包一层；`preamble-test` / `ag-ui-test` / `http-test` 的条数与字节断言 |
 | 02 | `skill-body-and-job-notice` | 01 | `skills/skill-message` + `jobs/notice` 换形；`loaded-names` 与 `returned-source` 改读首行标签行（旧标签兜底）；`skills-test` / `jobs-test` / `http-test` 的分类断言 |
 | 03 | `the-card-reads-the-label-line` | 01, 02 | `ui/lib/injections.ts` 的标题来源 + `context-card.tsx` + i18n + `ui/test/suites/injections.ts` |
 | 04 | `trajectory-as-a-flat-ledger` | — | `edge/trajectory.clj` 出平铺 `:cells`（system 在轮外、turn-start/turn-end、between-turns、映射表）；`ui/lib/trajectory.ts` 类型；`trajectory-test`；`.worktrees/trajectory-on-the-downlink` 的 payload 约定跟着改 |
 | 05 | `the-ledger-viewer-and-turn-collapse` | 04 | `trajectory-view.tsx` / `trajectory-timeline.tsx` 改画账本：轮分割线、`Collapse turns`（`context` 一起折）、`system` 在顶、`Between turns`；前端套件 |
-| 06 | `docs-and-gates` | 01–05 | `CONTEXT.md`（注入、轨迹）、`docs/architecture/skills-and-instructions.md` / `edge.md` / `client.md`；两套全量报数；真浏览器走查记录 |
+| 06 | `the-conversation-fold-takes-the-injection-card` | 03 | `ui/lib/turns.ts` + `turn-steps.tsx` + `thread.aui.tsx`：会话栏折轮时注入卡一起折，压缩卡不动；`ui/test/suites/turns.ts` |
+| 07 | `docs-and-gates` | 01–06 | `CONTEXT.md`（注入、轨迹）、`docs/architecture/skills-and-instructions.md` / `edge.md` / `client.md`；两套全量报数；真浏览器走查记录 |
 
-01–03 与 04–05 两条线互不依赖，可以先做任一条。
+01–03 与 04–05 两条线互不依赖，可以先做任一条；06 要 03 的形状先定。
 
 ---
 
@@ -292,11 +344,12 @@ Skill tdd
   由票 03 换成「首行标签行」。
 - `.scratch/job-endings` 决定 7（「界面一个字都不用改」）早已被 `.scratch/context-frames` 取代；
   本特征再动通知的**字节**，不动它的**时机与次数**。
+- `.scratch/compaction-frames`：压缩卡「折了也画」的规矩**保留**（决定 6a）——这正是它那条钉住的反例用例。
 - `.scratch/trajectory` / `.scratch/turn-and-model-events`：payload 的**读者换了形状**（票 04 起不再有 `:turns`），
   折法的**判据**（一轮的边界、`:incomplete`、工具的四时刻）原样搬进账本。
 - `.worktrees/trajectory-on-the-downlink`：那条线把轨迹搬到下行；它的帧里带的是 `:turns`，
   **票 04 之后要带 `:cells`**。两条线要合的时候，先定 payload。
 - `ADR 0006` / `ADR 0011`（轮与步的两级）：账本的 `turn-start`/`turn-end` 与步的分组照这两条 ADR 的读数，
   不新造判据。
-- 上游对照：`@deepseek-ai/dsh-client-ui-trajectory@0.1.0-rc.6`。**照搬**的是账本形状与折叠，
-  **不照搬**的已列在非目标。
+- 上游对照：`@deepseek-ai/dsh-client-ui-trajectory@0.1.0-rc.6` 与真记录 `session-edc108e2-…`。**照搬**的是
+  指令合并的分段、账本形状与折叠；**不照搬**的（加严或不做）已列在非目标。
