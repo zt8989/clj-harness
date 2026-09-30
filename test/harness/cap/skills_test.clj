@@ -166,8 +166,8 @@
                 (let [e (try (skills/roots bad proj) nil (catch Exception e e))]
                   (is (some? e) (str (pr-str bad) " should fail"))
                   (is (re-find re (ex-message e)) (str (pr-str bad) " -> " (ex-message e)))
-                  (is (re-find #"harness\.edn" (ex-message e))
-                      "the message names the files to look in")))]
+                  (is (re-find #"config\.edn" (ex-message e))
+                      "the message names the file to look in -- one file now (.scratch/config-merge)")))]
     (project/bind! "sk-3" proj)
 
     (testing "the section itself not being a map is caught before a key is asked for"
