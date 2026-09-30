@@ -9,13 +9,14 @@
   worktree does not have. Both are ordinary answers here, not exceptions, and both
   would be re-derived differently at a second call site.
 
-  THE BRANCH NAME NEVER REACHES A SHELL UNQUOTED, and that is the whole reason
-  `switch!` takes the string it validated against a LIST rather than the string it
-  was handed. A branch name is attacker-shaped input the moment it crosses the
-  wire, and `harness.infra.shell` runs its command through `bash -lc` -- so the value
-  that gets interpolated is one GIT ITSELF printed a moment ago, single-quoted on
-  the way in. Validating against the listing is not belt-and-braces: it is what
-  makes the quoting a second line rather than the only one.
+  THE BRANCH NAME NEVER REACHES A SHELL, and that is now a property of HOW GIT IS RUN
+  rather than of how carefully it is quoted. `git` below hands the program its arguments
+  as ARGV (`harness.infra.shell/run-program`), so a value with a quote, a space or a `;`
+  in it arrives as ONE ARGUMENT because that is what an argument is. `switch!` still
+  validates the name against the LIST git just printed -- but that is now purely a
+  refusal by name for a branch the worktree does not have, not a second line of defence
+  for a value about to be spliced into a command line. It used to be both, because the
+  command line was a bash one and `bash -lc` reads what it is given.
 
   SWITCHING IS THE ONE WRITE, AND IT CAN FAIL IN WAYS THAT ARE NOT OUR BUSINESS.
   A dirty worktree, a branch checked out in another worktree, a conflict -- git
@@ -34,31 +35,26 @@
   an HTTP request open indefinitely."
   10000)
 
-(defn- quoted
-  "S as a single-quoted POSIX word. The `'\\''` dance is the only way to put a
-  quote inside one -- see the namespace docstring for why a value ever gets here
-  at all."
-  [s]
-  (str "'" (str/replace (str s) "'" "'\\''") "'"))
-
 (defn- git
-  "Run `git ARGS` in DIR. Answers {:exit :out :err} from `harness.infra.shell/run`, with
-  the output TRIMMED because every caller here compares or prints it and a
-  trailing newline is never part of the answer.
+  "Run `git ARGS` in DIR. Answers {:exit :out :err :timeout} from
+  `harness.infra.shell/run-program`, which hands the PROGRAM its arguments as argv --
+  see the namespace docstring for why that matters here.
 
-  :timeout is carried through rather than thrown: a git that hung is a fact the
-  caller may want to report, and it is not the same fact as git refusing.
+  THE OUTPUT IS TRIMMED because every caller here compares or prints it and a trailing
+  newline is never part of the answer.
 
-  IT REFUSES BY NAME FIRST when this machine has no POSIX shell: every argument
-  below is spliced into a single-quoted command line (see `quoted`), so running a
-  git it could not quote for would be the harness quietly asking a different
-  question than the one it wrote down."
+  :timeout is carried through rather than thrown: a git that hung is a fact the caller
+  may want to report, and it is not the same fact as git refusing.
+
+  NO POSIX SHELL IS REQUIRED ANY MORE. Every argument used to be spliced into a
+  single-quoted command line, which is why this refused by name on a machine without one
+  (`require-posix!`); argv takes that requirement away, and a machine with git and no Git
+  Bash now reads branches instead of refusing to look."
   [dir & args]
-  (shell/require-posix! "`git`, which this session reads its branch and directory with,")
   (let [{:keys [exit out err timeout]}
-        (shell/run {:command (str/join " " (cons "git" (map quoted args)))
-                    :dir dir
-                    :timeout-ms timeout-ms})]
+        (shell/run-program {:argv (into ["git"] (map str args))
+                            :dir dir
+                            :timeout-ms timeout-ms})]
     {:exit exit
      :out (str/trim (str out))
      :err (str/trim (str err))

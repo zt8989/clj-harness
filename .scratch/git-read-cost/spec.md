@@ -37,3 +37,33 @@ profile；`-c` 只要 ~84ms，但仓库记录过它会**破坏超时子进程的
 3. **判定接受这个价钱**（git 读本来就不频繁）——那就把它写进文档，别留着当惊喜。
 
 动的是**产品行为**，不是测试，所以这张先 triage，不直接派。
+
+## 落地（2026-09-30）：走第 1 条——不经 shell 的 spawn
+
+**新入口**：`harness.infra.shell/run-program` 收 `:argv`（`[program arg ...]`）直接起程序。`run` 里
+「起进程并按一次性协议等」的那半抽成私有的 `await-program!`，两个入口共享同一套保证（stdin 写完即关、
+两条管道各自抽干、到点连子孙一起杀、退出钩子先装）。`run-program` 不加 SHLVL 钉子（那是登录 shell 的
+logout 文件用的），程序起不来时答 `{:exit 127 ...}` 而不是抛——那是一切 shell 对「命令不在」的答案，
+也让「没装 git」继续是一个普通的非零答案，而不是 500。
+
+**`harness.cap.git` 改用它**：`git` 助手从「拼一条单引号命令行交给 `bash -lc`」变成把参数当 argv 交给
+程序。`quoted` 与 `require-posix!` 随之消失——没有命令行可插值，也就不需要 POSIX shell（因此装机没有
+Git Bash 的机器现在也能读分支，而不是按名字拒绝）。
+
+**实测（同一个刚建好的小仓库，各六次）**：
+
+| | 改动前 | 改动后 |
+|---|---|---|
+| `harness.cap.git/state`（一次 `/api/git` 读） | 1609–1744ms | **127–132ms**（12×） |
+| `cap.git-test`（整只命名空间，全量里） | 45.8s | **18.5s** |
+
+`cap.git-test` 顺带快了是因为它测的就是这个命名空间，它的 `state` / `switch!` 调用跟着一起不付 profile。
+
+**一个量出来的 Windows 边**（`dev/scratch_argv_probe.clj`）：JVM 按 MSVCRT 规则写命令行，**原生程序**
+（`node`、`java`、`git.exe`——MINGW）整着收到参数（空格也在）；**MSYS 程序**（Git Bash 及它旁边的
+coreutils）会重新解析那一行，空格会拆、`'` 会吃。git 是前一种，分支名又不许有空格，所以对调用方无影响；
+这条边写在 `run-program` 的注释里，别再假设 argv 对谁都逐字。
+
+**用例**：`shell_test` 四条（argv 不被 shell 解读、`:dir`、缺程序 127、超时照杀）；`git_test` 一条
+（带 `'` 的分支名——这正是 `quoted` 当年存在的原因——能被列出并切过去）。`harness.infra.shell-test`
+33.3s / `harness.cap.git-test` 18.5s，全绿。

@@ -12,6 +12,11 @@
   process that is still there after it has answered, and that a caller talks to
   line by line. A hook is the first kind; an MCP server is the second.
 
+  AND THE ONE-SHOT KIND HAS TWO SHAPES: `run` gives its command to a shell, and `run-program`
+  gives a program its argv with no shell in between at all. Read their own notes before
+  picking: on this machine the difference is a login profile, and a caller that already
+  knows the program and its arguments wants the second.
+
   AND BOTH KINDS ARE TAKEN ALONG WHEN THE PROCESS ITSELF GOES. A caller decides when
   a command is over; nobody runs a caller when the JVM ends, and the processes
   running at that moment -- the in-flight ones -- used to be orphaned. `reap!` below
@@ -668,6 +673,48 @@
   []
   (reset! exit-hook-installed false))
 
+(defn- await-program!
+  "Start PB under the ONE-SHOT protocol and answer what became of it.
+
+  THE PROTOCOL IS THE SAME FOR A SHELL AND FOR A PROGRAM SPAWNED DIRECTLY, which is why
+  it lives here rather than inside `run`: stdin written then CLOSED, both pipes drained on
+  their own threads (a process that fills a pipe buffer blocks forever, so reading only
+  after waitFor is how a well-behaved command becomes a timeout), a BOUNDED wait, and AT
+  THE LIMIT THE WHOLE TREE GOES (`kill-tree!`'s own note says why the child is not the
+  command).
+
+  THE REAPER COMES FIRST: `ensure-exit-hook!` runs BEFORE `.start`, so no process exists
+  during a moment when this process's exit has nothing to remove it.
+
+  `{:exit n :out .. :err ..}` it finished; `{:exit nil .. :timeout true}` it was stopped
+  at the limit, and THE OUTPUT IT PRODUCED BEFORE THEN IS RETURNED rather than discarded
+  (a hook that hangs after printing its reason should still be readable)."
+  [^java.lang.ProcessBuilder pb {:keys [stdin timeout-ms on-spawn]}]
+  ;; BEFORE THE SPAWN, so that no process exists during a moment when this process's exit
+  ;; has no reaper for it.
+  (ensure-exit-hook!)
+  ;; THE HANDLE IS OFFERED BEFORE ANYBODY WAITS ON IT: `:on-spawn` is called with the
+  ;; Process the moment it exists, so a caller that has to stop this command later (a run
+  ;; whose stop switch gets rung) is never racing the wait to hold it -- and a caller that
+  ;; passes no `:on-spawn` pays one `nil` check.
+  (let [p    (.start pb)
+        _    (when on-spawn (on-spawn p))
+        w    (future
+               (try
+                 (with-open [os (.getOutputStream p)]
+                   (.write os (.getBytes (str stdin) StandardCharsets/UTF_8)))
+                 (catch Exception _ nil)))
+        o    (future (slurp (.getInputStream p) :encoding "UTF-8"))
+        e    (future (slurp (.getErrorStream p) :encoding "UTF-8"))
+        done (.waitFor p (long (or timeout-ms 30000)) TimeUnit/MILLISECONDS)]
+    (when-not done (kill-tree! p))
+    (let [out (try (deref o 5000 "") (catch Exception _ ""))
+          err (try (deref e 5000 "") (catch Exception _ ""))]
+      @w
+      (if done
+        {:exit (.exitValue p) :out out :err err}
+        {:exit nil :out out :err err :timeout true}))))
+
 (defn run
   "Run COMMAND the way A: once, with STDIN written to it and then CLOSED, and no
   more than TIMEOUT-MS of waiting. Returns
@@ -695,51 +742,69 @@
   is used, so a caller that does not care never learns there was a choice. A kind this
   machine does not have is a refusal by name (`require-shell!`), NEVER a quiet fallback
   to the machine's own -- running under a shell nobody asked for is the one outcome
-  worse than not running."
+  worse than not running.
+
+  THIS IS THE SHELL SHAPE, which was far from free on this machine: `run-program` below
+  is the same protocol for a caller that already knows the program and its arguments."
   [{:keys [command stdin dir timeout-ms kind on-spawn]}]
-  ;; `:on-spawn` IS HOW A CALLER HOLDS THE PROCESS: `(on-spawn p)` is called once the
-  ;; process exists, with the same Process the wait below is parked on. It exists for
-  ;; the one caller that has to stop a command while somebody else is waiting on it --
-  ;; a run whose stop switch was rung -- and `stop-tree!` is what such a caller does
-  ;; with it. Passing none is the ordinary case and costs nothing.
   (let [r  (require-shell! kind)
         ;; THE PIN WRAPS THE PB CONSTRUCTION, AND NOTHING ELSE: the child's
         ;; environment is copied and adjusted in that one moment, and neither the
-        ;; wait nor the drains below has a use for it.
+        ;; wait nor the drains has a use for it.
         pb (with-shlvl!
              #(child-env
                (doto (ProcessBuilder.
                       (vec (concat [(:command r)] (:argv-prefix r)
                                    [(command-word (:kind r) command (windows?))])))
-                 (.redirectErrorStream false))))
-        _  (when dir (.directory pb (io/file dir)))
-        ;; BEFORE THE SPAWN, so that no process exists during a moment when this
-        ;; process's exit has no reaper for it (see `ensure-exit-hook!`).
-        _  (ensure-exit-hook!)
-        ;; THE HANDLE IS OFFERED BEFORE ANYBODY WAITS ON IT: `:on-spawn` is called
-        ;; with the Process the moment it exists, so a caller that has to stop this
-        ;; command later (a run whose stop switch gets rung) is never racing the wait
-        ;; to hold it -- and a caller that passes no `:on-spawn` pays one `nil` check.
-        p  (.start pb)
-        _  (when on-spawn (on-spawn p))
-        w  (future
-             (try
-               (with-open [os (.getOutputStream p)]
-                 (.write os (.getBytes (str stdin) StandardCharsets/UTF_8)))
-               (catch Exception _ nil)))
-        ;; Drain both pipes on their own threads: a process that fills a pipe
-        ;; buffer blocks forever, so reading them only after waitFor is how a
-        ;; well-behaved hook becomes a timeout.
-        o  (future (slurp (.getInputStream p) :encoding "UTF-8"))
-        e  (future (slurp (.getErrorStream p) :encoding "UTF-8"))
-        done (.waitFor p (long (or timeout-ms 30000)) TimeUnit/MILLISECONDS)]
-    (when-not done (kill-tree! p))
-    (let [out (try (deref o 5000 "") (catch Exception _ ""))
-          err (try (deref e 5000 "") (catch Exception _ ""))]
-      @w
-      (if done
-        {:exit (.exitValue p) :out out :err err}
-        {:exit nil :out out :err err :timeout true}))))
+                 (.redirectErrorStream false))))]
+    (when dir (.directory pb (io/file dir)))
+    (await-program! pb {:stdin stdin :timeout-ms timeout-ms :on-spawn on-spawn})))
+
+(defn run-program
+  "Run ARGV -- `[program arg ...]` -- DIRECTLY, with NO SHELL between this process and
+  it, and answer the same shape `run` does.
+
+  WHY THIS EXISTS BESIDE `run`. `run` hands its command to a shell, and a shell is the
+  right thing when the command IS a command line: a pipe, an `&&`, a quoted argument, a
+  builtin. It is pure cost when the caller already knows the program and its arguments --
+  and on Windows that cost is a LOGIN PROFILE: a `bash -lc` spawn measured ~770ms
+  (2026-09-30), of which ~700ms is /etc/profile, and the profile is not removable (see
+  `how-to-start`: `-c` breaks the kill at the limit). `harness.cap.git` asks git two
+  questions per read, and those were two profiles -- ~1.6s for reads that take ~100ms
+  each. Spawned directly they are ~60ms per process.
+
+  ARGV GOES AS ARGV, so there is nothing for a shell to interpret: a `;`, a `|`, a `$(...)`
+  or a quote in an argument cannot run anything, and a caller needs no POSIX shell to
+  splice them into a line that is safe enough -- which is the requirement `require-posix!`
+  exists for, and it does not apply here.
+
+  ONE WINDOWS CAVEAT, MEASURED RATHER THAN ASSUMED (2026-09-30, `dev/scratch_argv_probe.clj`):
+  the JVM writes each argument into the Windows command line the way MSVCRT reads it, and
+  a program that reads that line NATIVELY receives it whole -- a space included, and
+  `node`, `java` and `git.exe` (MINGW) all do. A program built against the MSYS runtime
+  RE-PARSES the line by rules of its own: Git Bash splits an argument on a space and eats
+  a `'`. An argument with either aimed at an MSYS program is therefore not something this
+  function can promise -- `harness.cap.git` is the caller, and git is the first kind (and
+  a branch name cannot hold a space anyway).
+
+  NO SHLVL PIN IS APPLIED: `with-shlvl!` exists for a login shell's logout file, and
+  there is no login shell here to read one.
+
+  A PROGRAM THAT CANNOT BE STARTED ANSWERS {:exit 127 ...} RATHER THAN THROWING, and that
+  is the split from `run`: a SHELL this process cannot find is 'there was no question to
+  ask' and throws, while a program that is simply not installed is a fact a caller asked
+  about -- 127 is what every shell answers for a command that is not there, and it keeps
+  'git is not installed' an ordinary non-zero answer rather than a 500."
+  [{:keys [argv stdin dir timeout-ms on-spawn]}]
+  (when (empty? argv)
+    (throw (ex-info "run-program needs a program to run" {:argv argv})))
+  (let [pb (doto (ProcessBuilder. (mapv str argv))
+             (.redirectErrorStream false))]
+    (when dir (.directory pb (io/file dir)))
+    (try
+      (await-program! pb {:stdin stdin :timeout-ms timeout-ms :on-spawn on-spawn})
+      (catch java.io.IOException e
+        {:exit 127 :out "" :err (str (ex-message e))}))))
 
 ;; ----------------------------------------------------------- long-lived spawn
 
