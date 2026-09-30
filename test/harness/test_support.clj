@@ -154,6 +154,38 @@
   (doseq [f (reverse (file-seq (io/file dir)))]
     (io/delete-file f true)))
 
+(defn copy-tree!
+  "SRC copied to DST with plain file operations -- NO PROCESS, which is what makes it worth
+  having here: a fixture that needs the same repository, workspace or scaffold twice can
+  pay for it once and copy the answer.
+
+  PATHS ARE RELATIVIZED WITH `java.nio.file.Path`, NOT SLICED AS STRINGS. On Windows
+  `File.getPath` answers with backslashes, so subtracting a prefix spelled with slashes
+  matches nothing and the copy lands in the wrong place or nowhere -- `harness.layers-test`'s
+  own docstring is about the day that happened, and this is the version of the arithmetic
+  that means the same thing on both platforms.
+
+  IT DOES NOT REGISTER DST. A caller that hands this a COMPOSED name -- `(str (temp-dir
+  \"git\") \"-detached\")` -- owes `track-temp-dir!` for it, or the sweep at the end of a run
+  never hears about that tree; a caller that hands it a `temp-dir` owes nothing, because
+  that one registered itself."
+  [src dst]
+  (let [root (io/file src)
+        from (.toPath root)
+        to   (.toPath (io/file dst))
+        none (make-array java.nio.file.attribute.FileAttribute 0)]
+    (doseq [f (file-seq root)]
+      (let [target (.resolve to (.relativize from (.toPath f)))]
+        (if (.isDirectory f)
+          (java.nio.file.Files/createDirectories target none)
+          (do (java.nio.file.Files/createDirectories (.getParent target) none)
+              (java.nio.file.Files/copy (.toPath f) target
+                                        (make-array java.nio.file.CopyOption 0))))))
+    ;; DST, so a caller can use the answer in an expression -- the fixtures hand it
+    ;; straight to the next call (and the old body's `doseq` answered nil, which read as a
+    ;; missing repository one call further on).
+    dst))
+
 (defonce ^:private live-temp-dirs
   ;; THE TREES `temp-dir` HAS HANDED OUT AND NOBODY HAS REMOVED YET, as absolute path
   ;; strings. A SET, so a path that is handed back twice (nothing does, but the registry
