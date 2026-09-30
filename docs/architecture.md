@@ -3,10 +3,15 @@
 这套文档记录 clj-harness **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`b7fe690`（2026-09-18）。** 工作树里的在办改动不算现状，见文末「在办」。
-（`b7fe690` 是 `context-usage` 合进 main 的那一提交（`c7faa43` + 修回退的 `9767c8e`）：`edge.context`
-一行进模块地图、`GET .../stats` 的载荷多一节 `context`、composer 里 model 左边那颗圈，以及
-[client](architecture/client.md) 里「上下文占用」那一节。上一版快照是 `ada4bc5`。）
+**快照：`dde9aa9`（2026-09-30）。** 工作树里的在办改动不算现状，见文末「在办」。
+（`dde9aa9` 是 `git-read-cost` 合进 main 的那一提交：`infra.shell` 多一个**不经 shell 的一次性**
+`run-program`（收 `:argv` 直接起程序；`run` 里那份一次性协议抽成共享的 `await-program!`），`cap.git`
+的读改走它——一次 `/api/git` 读从两条 `bash -lc`（约 1.6s）变成两个直接 spawn（约 0.13s）。上一版
+快照是 `b7fe690`。）
+
+**`b7fe690`（2026-09-18）** 是 `context-usage` 合进 main 的那一提交（`c7faa43` + 修回退的
+`9767c8e`）：`edge.context` 一行进模块地图、`GET .../stats` 的载荷多一节 `context`、composer 里
+model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文占用」那一节。
 
 **`ada4bc5`（2026-09-17）** 是把 `trajectory-injection-once` 合进来的那一提交。它给本目录添的是
 [edge](architecture/edge.md) 里 `message` 行与入站那一节的两句——**submitted 侧 = 第一次模型调用真正
