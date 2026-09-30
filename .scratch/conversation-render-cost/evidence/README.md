@@ -91,22 +91,19 @@ reconciliation 只有个位数百分比。这就是「不要每帧重建整条�
 ```bash
 cd ui && npm run typecheck   # 绿
 cd ui && npm run build       # 绿（tsc --noEmit + vite build）
-cd ui && npm test            # 201 passed / 2 failed / 203
+cd ui && npm test            # 203 passed / 203（合进 main 之后；见下）
 ```
 
-两个红的是**改之前就红的**，与这一票无关（在未改动的主检出上单独跑同样红）：
+**这个数不是一开始就这样的**，写下来是因为它解释了一件事：量这些读数的时候，`main` 上本来就
+有两条红，与这一票无关——
 
 - `elicitation > a-servers-question-parks-the-run-and-the-answer-finishes-it`
   （`the run parked on one question: expected +0 to be 1`）
 - `subagents > the-endpoint-answers-in-the-shape-both-screens-read`
   （`body.path?.endsWith("harness.edn")`）
 
-核对办法（在主检出、未改动的 `main` 上）：
-
-```bash
-cd ui && npx vitest run -t "a-servers-question-parks-the-run-and-the-answer-finishes-it"
-cd ui && npx vitest run -t "the-endpoint-answers-in-the-shape-both-screens-read"
-```
+——我按上面两条命令在**未改动的主检出**上单独跑过，同样红，所以它们不是这一票带进来的。收尾时
+main 上已经有人把这两条修掉了（`Merge red-suite 进 main`），本票合进去之后整轮是 **203 / 203 绿**。
 
 新增的 `markdown-commit` 用例读的是 `markdown-text.tsx?raw`：把 JSX 里那行
 `smooth={MARKDOWN_SMOOTH}` 删掉，它会红（验证过）；只断言两个并排定义的常量则不会。
