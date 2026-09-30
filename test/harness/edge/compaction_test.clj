@@ -364,3 +364,71 @@
     (is (= "PROMPT" (:content (last out))) "the instruction rides last")
     (is (= ["assistant" "tool" "user" "user"] (mapv :role (butlast out)))
         "the late answer now sits directly behind the call that named it")))
+
+;; ------------------------------------------------- the surface the plan plans over
+
+(deftest the-plan-folds-the-surface-the-caller-hands-it
+  ;; TICKET 05 OF `.scratch/compaction-shape`. The trigger measures the array the MODEL is handed
+  ;; (`pressure/live-surface`: the session's own messages + the system message + this run's
+  ;; injections). The record's fold is NOT that array -- it drops every run's injections except
+  ;; the last -- so a plan over the record fold answers a head for a surface nobody measured:
+  ;; on the real thread `62f30024-…` (2026-09-30) that head was ONE summary, the fold re-wrote a
+  ;; summary the same size, the surface did not move, and the trigger fired again 2 min 22 s worth
+  ;; of compactions later. A SURFACE HANDED IN IS WHAT IS PLANNED OVER, ids and all.
+  (let [records [(big 0) (big 1) (big 2) (big 3) (big 4) (big 5)]
+        ;; THE LIVE ARRAY: the same entries PLUS what only a live conversation has -- the
+        ;; injections of earlier runs, which carry the record lines they arrived in as their ids
+        ;; and are several times the size of the whole record fold.
+        live    (into (mapv (fn [i r] {:id i :message (:payload r)}) (range) records)
+                      (map (fn [i] {:id (+ 1000 i)
+                                     :message {:role "user" :content (apply str (repeat 4000 "b"))}})
+                           (range 4)))
+        record-plan (compaction/plan records 2000 0.16)
+        live-plan   (compaction/plan records 2000 0.16 live)]
+    (testing "the record's own fold answers a head from ITS nodes"
+      (is (= [0 1 2] (:shadowed record-plan)) "the three oldest record lines")
+      (is (= 324 (:head-tokens record-plan)) "three 400-character entries, framing included"))
+    (testing "and a surface handed in is what is planned over -- the ids come from THAT array"
+      (is (= 3672 (:head-tokens live-plan))
+          "nine nodes: the six of the record fold AND three the live array has besides")
+      (is (= [0 1 2 3 4 5 1000 1001 1002] (:shadowed live-plan))
+          "the live array's own lines: this head removes nodes the record's fold would have kept")
+      (is (> (:head-tokens live-plan) (* 10 (:head-tokens record-plan)))
+          "eleven times the relief the record's own fold would have bought for the same window")
+      (is (every? some? (:shadowed live-plan))))
+    (testing "the guard: a head under the relief the caller needs is no head at all"
+      (is (nil? (compaction/plan records 2000 0.16 nil {:min-head-tokens 1000}))
+          "324 tokens cannot bring a request that is 1000 tokens over its threshold back down")
+      (is (some? (compaction/plan records 2000 0.16 nil {:min-head-tokens 100}))))))
+
+(deftest a-head-that-cannot-be-named-is-not-a-head
+  ;; `:shadowed` addresses entries by the record line they arrived in. A live surface's newest
+  ;; entries are the ones whose line has not landed yet (`:seq` nil) -- they belong to the
+  ;; retained tail -- but a surface that is ENTIRELY unlanded has no addressable head at all,
+  ;; and folding it would write rows naming nothing.
+  (let [records [(big 0) (big 1) (big 2) (big 3) (big 4) (big 5)]
+        unlanded (mapv (fn [i] {:id nil :message {:role "user" :content (apply str (repeat 4000 "c"))}})
+                       (range 6))]
+    (is (nil? (compaction/plan records 2000 0.16 unlanded)))
+    (is (some? (compaction/plan records 2000 0.16 nil)) "the record's fold is still addressable")))
+
+(deftest a-compaction-under-the-asked-relief-writes-nothing-and-calls-nobody
+  ;; THE WHOLE POINT OF THE GUARD, asserted where it costs money: `perform!` must not write a
+  ;; `compaction/start` row and must not make the summary call.
+  (let [records [(big 0) (big 1) (big 2) (big 3) (big 4) (big 5)]
+        written (atom [])
+        asked   (atom 0)]
+    (is (nil? (compaction/perform! records
+                                   {:window 2000 :retain-ratio 0.16
+                                    :min-head-tokens 1000
+                                    :append (fn [k p] (swap! written conj [k p]) nil)
+                                    :summarize (fn [_ _] (swap! asked inc) "S")}))
+        "a head that cannot relieve anything is no compaction")
+    (is (= [] @written) "no rows at all")
+    (is (zero? @asked) "and the summarizer was never asked")
+    (testing "while the same records compact happily when no relief is demanded"
+      (is (some? (compaction/perform! records
+                                      {:window 2000 :retain-ratio 0.16
+                                       :append (fn [k p] (swap! written conj [k p]) nil)
+                                       :summarize (fn [_ _] "S")}))))
+      (is (= 3 (count @written)) "start, the fact, end")))
