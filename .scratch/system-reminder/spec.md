@@ -388,6 +388,10 @@ Skill tdd
    工具栏的 **`折起全部轮`** 折上那一轮后，轮里的 `上下文` 格**一起消失**（只剩 `4 个条目 · 3 次模型调用`
    的摘要行），而最上面那个 `系统` 格**不受影响**；`展开全部轮` 回来。
    证据：`evidence/trajectory-ledger.png`。
+   **合进 main 之后照同一套步骤又走了一趟**（2026-09-30 20:0x，merge `0a3d11e`）：四条同样的结果，
+   一条不差 —— 一张指令卡（标题 `Instructions from: …`）、折轮收卡/展开回来、`job` 通知卡
+   （标题 `Background job j1 ended: [exit 0]`）、轨迹最上是轮外的 `系统` 格而 `折起全部轮`
+   只收轮里的 `上下文`。
    **没走到的**：一条真的有压缩的会话（`compacted` 格落在 `Between turns`）——`trajectory-test` 的两条
    用例钉着它（`a-compaction-is-a-cell-between-turns`），走查这一趟没有可压缩的记录。
 
