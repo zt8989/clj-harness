@@ -1950,7 +1950,13 @@ export const SettingsPanel: FC<{
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         data-slot="settings-panel"
-        className="sm:max-w-5xl"
+        // THE TRACK IS `minmax(0,1fr)` RATHER THAN THE IMPLICIT `auto`, and that is a PHONE fix, not a
+        // desktop one (measured 2026-09-30 at 390x844): an `auto` track is sized by its items'
+        // MAX-content, so this panel sized a 358px dialog to a 705px column -- the third verb sat at
+        // x=429, off the right edge of a 390px screen, with nothing clipping it. A `minmax(0,1fr)` track
+        // is exactly the dialog's width, which is what lets the inner `min-w-0` chain (the scroller, the
+        // rows' truncating titles, the wrapping verb bar) do the job it was written for.
+        className="grid-cols-[minmax(0,1fr)] sm:max-w-5xl"
         aria-describedby={undefined}
       >
         <DialogHeader>
@@ -1967,7 +1973,7 @@ export const SettingsPanel: FC<{
             in a mostly empty box. `sm:max-w-5xl` and 78vh of the window -- with a 40rem ceiling, so
             it never grows past a laptop screen -- is the same rule with a size that fits what these
             pages now hold. */}
-        <div className="flex h-[min(40rem,78vh)] gap-4">
+        <div className="flex h-[min(40rem,78vh)] min-w-0 gap-4">
           {/* TWO SHAPES, ONE `sm` APART. From `sm` up this is two columns. Below it the nav
               is not a column at all (`hidden sm:flex`): the list below is its narrow
               spelling, and a tap on one of its rows swaps the list for that page. */}
