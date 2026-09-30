@@ -17,6 +17,7 @@
             [harness.kernel.hooks :as hooks]
             [harness.kernel.llm :as llm]
             [harness.kernel.loop :as loop]
+            [harness.kernel.session :as session]
             [harness.edge.ag-ui :as ag]
             [harness.edge.host :as host]
             [harness.edge.http :as http]
@@ -4898,12 +4899,11 @@
   ;; this used to compose was the same idea and only closed half the window.
   (support/temp-dir "http-git"))
 
-(defn- make-git-repo
-  "A real repository, so the route meets git rather than a story about git.
+(defn- init-repo!
+  "A real repository at DIR, so the route meets git rather than a story about git.
   Renamed rather than `init -b`: see harness.cap.git-test for why."
-  []
-  (let [dir git-repo
-        run (fn [c] (shell/run {:command c :dir dir}))]
+  [dir]
+  (let [run (fn [c] (shell/run {:command c :dir dir}))]
     (.mkdirs (io/file dir))
     (run "git init -q")
     (run "git config user.email test@example.invalid")
@@ -4915,6 +4915,9 @@
     (run "git branch -m main")
     (run "git branch side")
     dir))
+
+(defn- make-git-repo []
+  (init-repo! git-repo))
 
 (deftest the-git-endpoint-reads-and-moves-the-sessions-working-tree
   (make-git-repo)
@@ -4957,6 +4960,62 @@
            (is (str/includes? (:error (read-json resp)) "nope")))
          (is (= 1 (count (filterv #(= "git/branch" (replay/kind %)) (log-lines-for id))))
              "the refusal left no trace on disk"))))))
+
+(deftest a-directory-this-home-lists-is-read-and-moved-without-a-session
+  ;; THE SESSION THIS IS FOR DOES NOT EXIST: the page minted the id and has not sent to it
+  ;; (`.scratch/composer-new-session-bar/`). So the strip's question has to be answered about a
+  ;; DIRECTORY, and the directory it may be asked about is exactly the one this home lists.
+  ;;
+  ;; ITS OWN TWO REPOSITORIES, not the fixture the session route uses: that one ends the case
+  ;; above on `side`, and a branch assertion reading somebody else's leftover is a case that
+  ;; passes or fails by the order it ran in.
+  (with-bare-server
+   (fn []
+     (let [listed   (init-repo! (support/temp-dir "http-git-listed"))
+           unlisted (init-repo! (support/temp-dir "http-git-unlisted"))
+           head     (fn [dir] (str/trim (:out (shell/run {:command "git rev-parse --abbrev-ref HEAD"
+                                                           :dir dir}))))
+           url      (fn [dir] (java.net.URLEncoder/encode (.getCanonicalPath (io/file dir)) "UTF-8"))]
+       (api-call :post "/api/projects" (json/write-str {:dir listed}))
+       (testing "a listed directory is read with no session in the way at all"
+         (let [body (read-json (api-call :get (str "/api/git?dir=" (url listed)) nil))]
+           (is (true? (:repo? body)))
+           (is (= "main" (:branch body)))
+           (is (= #{"main" "side"} (set (:branches body))))
+           (is (= (.getCanonicalPath (io/file listed)) (:dir body))
+               "and the answer names the directory it is about, canonical")))
+       (testing "a directory this home does NOT list is not read, even though it IS a repository"
+         (is (= "main" (head unlisted))
+             "the second repository is real -- it is the gate that answers nothing")
+         (let [body (read-json (api-call :get (str "/api/git?dir=" (url unlisted)) nil))]
+           (is (false? (:repo? body)))
+           (is (nil? (:dir body)))))
+       (testing "and picking a branch moves that directory's repository"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:dir listed :branch "side"}))
+               body (read-json resp)]
+           (is (= 200 (.statusCode resp)))
+           (is (= "side" (:branch body)))
+           (is (= "side" (head listed)))))
+       (testing "a directory this home does not list cannot be moved either, and says why"
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:dir unlisted :branch "side"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "does not list")))
+         (is (= "main" (head unlisted)) "and that repository is where it was"))
+       (testing "AND NOTHING IS WRITTEN FOR THE SESSION IT IS FOR: that session does not exist"
+         ;; The id rides along here on purpose: writing the audit line it would carry is the one
+         ;; thing this form must not do -- a log for a minted id is the row `POST /api/project`
+         ;; stopped creating. If someone teaches this branch to log, this is the case that says no.
+         (let [resp (api-call :post "/api/git"
+                              (json/write-str {:threadId "composer-held" :dir listed
+                                               :branch "main"}))]
+           (is (= 200 (.statusCode resp))))
+         (is (not (.exists (io/file (log-file-for "composer-held"))))))
+       (testing "and a body naming neither a session nor a directory is refused by name"
+         (let [resp (api-call :post "/api/git" (json/write-str {:branch "side"}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "threadId or dir"))))))))
 
 ;; ------------------------------------------------ the provider catalog, over HTTP
 
@@ -5630,6 +5689,14 @@
   [dir tid]
   (boolean (:running (session-row-of dir tid))))
 
+(defn- blank-numbers!
+  "Leave TID's conversation the way a process that had NO NUMBERING left it: every entry unnumbered
+  (`.scratch/window-self-heal/`). A TEST-ONLY door, and a `swap!` on the private registry is the only
+  honest way to spell 'this number was never written' -- the repair under test is what puts it back."
+  [tid]
+  (swap! @#'session/registry update-in [tid :entries]
+         (fn [es] (mapv #(assoc % :seq nil) (or es [])))))
+
 (defn- bind!
   "Bind TID to DIR through the ordinary route, asserting it worked."
   [tid dir]
@@ -6295,8 +6362,67 @@
                "no entry appears twice after the source changed")
            (is (= (:messages settled) (mapv :message (:entries body)))
                "and the window says what `sofar` says about the settled conversation")))
+       (testing "and every entry the window answers with wears the number the record's own fold gives it"
+         ;; THE DELTA A READER ASKS FOR IS A SUBTRACTION ON THESE NUMBERS (`since`, ADR 0003
+         ;; decision 7): an entry with no number counts as AFTER ANYTHING, so a reader that
+         ;; reconnected would be handed the whole conversation again and would merge it into the
+         ;; window it already held -- the scrambled transcript of 2026-09-30, where the newest
+         ;; turn ended up in the middle and the bottom of the page was an old one. `settle!`
+         ;; therefore takes its numbers from the READER's own fold of the rows this run wrote
+         ;; (`harness.edge.replay/entries-of-rows`), which is what makes the live table and the file
+         ;; answer the SAME number for the same entry -- and that is what this compares.
+         (let [body    (read-json (api-call :get "/api/threads/sofar-a/page" nil))
+               seqs    (mapv :seq (:entries body))
+               lines   (count (str/split-lines (slurp (log-file-for "sofar-a") :encoding "UTF-8")))
+               on-file (into {} (map (juxt (comp :id :message) :seq))
+                             (replay/entries (replay/read-records (log-file-for "sofar-a"))))]
+           (is (every? some? seqs)
+               (str "unnumbered entries: " (pr-str (remove some? seqs))))
+           (is (every? #(<= (long %) (dec lines)) seqs)
+               "and every number is a real offset in this conversation's own record")
+           (is (every? (fn [entry] (= (get on-file (get-in entry [:message :id])) (:seq entry)))
+                       (:entries body))
+               "and each entry wears the number the record's own fold gives that same entry")))
        (testing "and the run kept exactly ONE terminal frame"
          (is (= 1 (count (terminals "sofar-a")))))))))
+(deftest a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read
+  ;; A SESSION THIS PROCESS ALREADY HOLDS, WHOSE RUNS ENDED IN A PROCESS THAT HAD NO NUMBERING
+  ;; (`.scratch/window-self-heal/`): its entries carry `:seq nil`, and the rows that decided them died
+  ;; with the run that wrote them -- only the RECORD still says where each entry arrived. So a read
+  ;; hands the numbers back (a STREAMING fold of that file, `harness.edge.http/reconcile-numbers!`),
+  ;; and the window it answers with is one a reader can cut a page from and ask a delta of. Before
+  ;; this, such a session waited for a put-away or a restart, and until then `since` answered the
+  ;; WHOLE conversation -- the scrambled window of 2026-09-30.
+  (with-server
+   "heal-a"
+   [{:content "an answer"}]
+   (fn []
+     (let [sock (fire-run! "heal-a")]
+       (try
+         ;; THE RUN MUST HAVE REACHED ITS TERMINAL, and 'the file appeared' is not that: the birth
+         ;; writes the first rows BEFORE the run registers, so a file that exists says nothing about
+         ;; whether `running?` is a real reading yet (the same race the crash case names).
+         ;; (the read is guarded: the file does not exist until the writer creates it, and a case that
+         ;; throws on the way in would fail for the wrong reason)
+         (is (until #(try (boolean (seq (terminals "heal-a"))) (catch Throwable _ false)) 5000)
+             "the run reached its terminal frame")
+         (is (until #(not (http/running? "heal-a")) 5000) "and the run ended")
+         (finally (.close sock))))
+     (testing "the state an older process left behind: numbers that were never written"
+       (blank-numbers! "heal-a")
+       (is (some nil? (map :seq (session/display "heal-a")))
+           "the fixture really has unnumbered entries, or this case proves nothing"))
+     (testing "and the next read hands back the ones the RECORD gives, entry for entry"
+       (let [body    (read-json (api-call :get "/api/threads/heal-a/page" nil))
+             on-file (into {} (map (juxt (comp :id :message) :seq))
+                           (replay/entries (replay/read-records (log-file-for "heal-a"))))]
+         (is (every? some? (map :seq (:entries body)))
+             "a read of a session this process holds must answer numbers")
+         (is (every? (fn [e] (= (get on-file (get-in e [:message :id])) (:seq e))) (:entries body))
+             "each entry wears the number the record's own fold gives it")))
+     (testing "and it happens once: the session now says it has been looked at"
+       (is (true? (sessions/fold-value "heal-a" :numbered-from-record)))))))
+
 (deftest a-run-that-is-being-written-tells-the-window-watcher-the-record-grew
   ;; A PAGE THAT RELOADED INTO A RUNNING SESSION HOLDS A WINDOW AND NOTHING ELSE, and a
   ;; window reads the RECORD while a run of the session is in flight (memory folds a run's

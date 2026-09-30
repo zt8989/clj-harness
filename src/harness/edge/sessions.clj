@@ -22,10 +22,13 @@
                      The records stay where they are -- an ending outlives the id that named
                      it -- while the commands go, because a session this process no longer
                      serves is one whose background commands nothing here could reach again.
-    :put-away!        `harness.infra.stream/fsync!`: the other half of the same moment -- the PROCESSES
+    :put-away!        `harness.infra.stream`: the other half of the same moment -- the PROCESSES
                       stop, and the BYTES this process was the only one holding get their promise
                       (ticket 04 of `.scratch/event-persistence`). A record is not a command: it
-                      stays, and it should stay on the platter.
+                      stays, and it should stay on the platter. AND THE SAME MOMENT TAKES THE
+                      CONVERSATION'S IN-MEMORY RING ROW (`stream/forget-kept!`, ticket 03 of
+                      `.scratch/memory-hygiene`): what this process keeps is a cache of JUST NOW,
+                      and history is what the file is for.
 
   THE IRON LAW RIDES ON `:build`: the mechanism never reads a record during a run, and the one
   read -- the walk a session is BORN by -- is the fold installed here."
@@ -36,7 +39,88 @@
             [harness.infra.stream :as stream]
             [harness.edge.replay :as replay]
             [harness.infra.home :as home]
+            [harness.kernel.frames :as frames]
+            [harness.kernel.tools :as tools]
             [harness.kernel.session :as session]))
+
+;; ------------------------------------------- the parks a conversation is stranded with
+;;
+;; A PARK LIVES IN THE PROCESS THAT MADE IT (`harness.kernel.tools/park-approval!` says
+;; why), so a conversation read after a restart names interrupts nothing here holds: the
+;; card a person is looking at is a form whose question cannot be fetched
+;; (`GET /api/elicitation` answers 404) and whose answers go nowhere (`resume` refuses the
+;; id). The CALL is still in that same conversation, with everything the question was made
+;; of -- so the reader builds the one thing a restart cannot keep, the in-memory park, back
+;; out of what the conversation itself says.
+
+(defn- named-parks
+  "The parked calls a rebuilt conversation says it is WAITING on: [{:interrupt-id ..
+  :tool-call-id ..} ..], deduped by call, in the order the conversation names them.
+
+  THE SAME KEY THE CLIENT READS ITS CARDS FROM (`metadata.custom.agui.interrupts`, folded
+  out of `RUN_FINISHED.outcome.interrupts` by `harness.kernel.frames/apply-frames`): the
+  id the card holds and the call it is about, written together on one message. A pair
+  missing either half names nothing this can rebuild, so it is left out rather than
+  completed by guessing."
+  [entries]
+  (let [pairs (for [e entries
+                    i (get-in e [:message :metadata :custom frames/park-namespace :interrupts])
+                    :let [{:keys [id toolCallId]} i]
+                    :when (and (string? id) (string? toolCallId))]
+                {:interrupt-id id :tool-call-id toolCallId})]
+    (reduce (fn [acc p]
+              (if (some #(= (:tool-call-id p) (:tool-call-id %)) acc) acc (conj acc p)))
+            [] pairs)))
+
+(defn- calls-by-id
+  "ENTRIES' tool calls as id -> the call, for the ids in WANTED (a set). The shape is the
+  OpenAI one the fold carries (`{:id .. :function {:name .. :arguments ..}}`), which is
+  what `harness.kernel.tools/repark!` reads."
+  [entries wanted]
+  (into {} (for [e entries
+                 c (:toolCalls (:message e))
+                 :when (contains? wanted (:id c))]
+             [(:id c) c])))
+
+(defn revive-parks!
+  "ENTRIES -> THE SAME ENTRIES, with one repair behind them: the calls this conversation is
+  still waiting on are PARKED AGAIN, under the very interrupt ids it names.
+
+  WHY A READER DOES THIS. A restart strands a question in two places, and the run path
+  (`harness.kernel.loop`) repairs only one of them -- the run it hands the unanswered call
+  to. The other is the page. The conversation a client reads names the interrupt its card
+  was drawn from, that id and its call written side by side, and on a fresh process every
+  door that id goes through answers 'nothing here': the card's `GET /api/elicitation` is a
+  404 with no fields to draw, and the resume is refused as an unknown interrupt. The person
+  is looking at a question they cannot answer.
+
+  SO THE READER REBUILDS THE PARK FROM THE CONVERSATION, and nothing else: the id is the
+  one the conversation named, the call is the one it carries, and what the park holds is
+  derived from that call exactly as the run path derives it -- `harness.kernel.tools/
+  repark!` is what decides whether a call can be rebuilt at all (a server's elicitation, a
+  tool this session no longer serves, and a call whose question is not a function of its
+  arguments cannot).
+
+  IT WRITES NOTHING BUT THAT: the record is not touched, no claim is taken, no session is
+  born, and an id ALREADY parked here is skipped -- so a page passing over a conversation
+  cannot re-park a question somebody is halfway through answering, nor overwrite a decision
+  that has already been taken. A second read finds every park present and writes nothing.
+
+  Returns ENTRIES unchanged: a caller threads it through the answer it is building (`let`
+  rather than a bare call), which is what keeps the repair from becoming a second reading
+  of the conversation."
+  [thread-id entries]
+  (let [pairs   (named-parks entries)
+        missing (remove #(tools/parked (:interrupt-id %)) pairs)]
+    (when (seq missing)
+      (let [by-id (calls-by-id entries (set (map :tool-call-id missing)))]
+        (tools/repark! thread-id
+                       (into []
+                             (keep (fn [{:keys [interrupt-id tool-call-id]}]
+                                     (when-some [call (by-id tool-call-id)]
+                                       (assoc call :interrupt-id interrupt-id))))
+                             missing))))
+    entries))
 
 ;; ------------------------------------------------------------------- the seams it installs
 
@@ -46,7 +130,7 @@
     (if-some [f (replay/find-log (home/projects-dir) thread-id)]
       (let [{:keys [entries context state compactions prunes]
              folds :folds} (replay/fold-sofar f registered)]
-        {:entries     (vec entries)
+        {:entries     (revive-parks! thread-id (vec entries))
          :compactions (vec compactions)
          :prunes      (vec prunes)
          :context     (vec context)
@@ -85,7 +169,14 @@
    :hand-over! claims/hand-over!}
 
   :stop-jobs! jobs/stop-session!
-  :put-away!  stream/fsync!})
+  :put-away!  (fn [thread-id]
+                ;; TWO FACTS, ONE MOMENT, and the second one is why this is a function rather than
+                ;; `stream/fsync!` itself: THE BYTES GET THEIR PROMISE, and the IN-MEMORY RING ROW
+                ;; for this conversation goes with it (`forget-kept!` -- a reader with a cursor pulls
+                ;; the file, so nothing askable is lost). `.scratch/memory-hygiene/` ticket 03.
+                (stream/fsync! thread-id)
+                (stream/forget-kept! thread-id)
+                nil)})
 
 (defn install!
   "Install the adapter's half of the session mechanism (tickets 08-10): the map above,
@@ -138,6 +229,7 @@
 (def append! session/append!)
 (def settle! session/settle!)
 (def land-at! session/land-at!)
+(def number-entries! session/number-entries!)
 (def land! session/land!)
 ;; THE RUN STATE'S ADAPTER HALF. The kernel owns the REGISTRY (the pins, the refusal,
 ;; the stop switch -- it cannot see the store and must not), and the store's column
@@ -182,6 +274,7 @@
 (def start! session/start!)
 (def watch! session/watch!)
 (def unwatch! session/unwatch!)
+(def prune-watches! session/prune-watches!)
 (def watch-unflushed! session/watch-unflushed!)
 (def record-grew! session/record-grew!)
 (def ring-growth! session/ring-growth!)

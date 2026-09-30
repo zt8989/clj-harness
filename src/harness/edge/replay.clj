@@ -725,12 +725,57 @@
       (update :entries into (map (fn [m] {:seq seq-n :message m}) msgs))
       (update :messages into msgs)))
 
+(defn- parked-interrupts
+  "The interrupts a frame ends a RUN on, or nil -- the parked terminal's own fact, for the
+  one reader that needs it apart from the group it arrives in (`entries-step`, where the
+  call's message is still in reach)."
+  [frame]
+  (when (and (= "RUN_FINISHED" (:type frame))
+             (= "interrupt" (get-in frame [:outcome :type])))
+    (seq (get-in frame [:outcome :interrupts]))))
+
+(defn- park-on-call
+  "Attach a parked run's INTERRUPTS to the entry that CARRIES the call they name -- the
+  assistant message the run was building when it stopped, which is where the live path puts
+  them and where the client reads them back (`findRequiresActionAssistant`).
+
+  WHY IT IS NOT LEFT TO `frames/apply-frames`, WHICH ALREADY DOES THIS: that fold sees ONE
+  group, and a run's frames are flushed as MORE THAN ONE when one of its own `message` rows
+  lands between them (`entries-step` closes the group at every message row). Measured on a
+  record the CURRENT writer leaves (2026-09-29, session 24b97ff5): the model's row lands
+  right after the tool-call frames, the terminal follows in a group of its own -- so the
+  fold's own attach found no assistant message to put the interrupts on, the card was
+  written out of the conversation, and a page refreshed on a parked session drew no card
+  at all.
+
+  THE CALL NAMES ITS OWN MESSAGE, so nothing is guessed and nothing is scanned for: the
+  interrupts carry the `toolCallId` they parked, and the entry holding that call is the
+  message the card belongs to. A message still PENDING -- the whole run in one group, which
+  is the ordinary record -- is not in `:entries` yet: the group's own `apply-frames`
+  attaches it there, and this finds nothing to do (`nil` interrupts likewise)."
+  [acc interrupts]
+  (if (empty? interrupts)
+    acc
+    (let [calls (into #{} (keep :toolCallId) interrupts)
+          es    (:entries acc)
+          at    (last (keep-indexed (fn [i e]
+                                     (when (some #(contains? calls (:id %))
+                                                 (:toolCalls (:message e)))
+                                       i))
+                                   es))]
+      (if (nil? at)
+        acc
+        (assoc-in acc [:entries at :message :metadata :custom
+                       frames/park-namespace :interrupts]
+                  (vec interrupts))))))
+
 (defn- flush-group
   "Close ACC's open FRAME GROUP at FALLBACK's line (or `:after`'s, when a terminal gave
   the group one): the frames become messages, numbered together."
   [acc fallback]
-  (let [new (frames/apply-frames (:pending acc))
-        at  (or (:after acc) fallback)]
+  (let [pending (:pending acc)
+        new     (frames/apply-frames pending)
+        at      (or (:after acc) fallback)]
     (-> (if (seq new) (add-entries acc at new) acc)
         ;; WHICH MESSAGES THIS GROUP BUILT, so the run's own `message` rows can be paired with
         ;; them in order (`entries-step`), and whether the FRAMES already carried the reasoning
@@ -755,6 +800,9 @@
                                                   new)))
                :reasoned? (boolean (or (:reasoned? acc)
                                        (some #(= "reasoning" (:role %)) new)))))))
+;; A PARKED TERMINAL'S INTERRUPTS ARE NOT ATTACHED HERE: they belong to the assistant message
+;; that carried the call, which may be a group BEHIND this one -- the terminal row itself is
+;; where that is known, see `entries-step`.
 
 (defn- entries-init []
   "The conversation's own fold. `:messages` IS THE SAME MESSAGES WITHOUT THEIR NUMBERS -- kept so
@@ -929,7 +977,17 @@
                             (= "RUN_STARTED" (:type value))
                             (assoc :model-ids [] :model-next 0 :reasoned? false :reasoned-n 0
                                    :unpaired-said? false :run-from (count (:entries acc))))]
-                  (if (frames/terminal? value) (assoc acc :after i) acc)))
+                  (if (frames/terminal? value)
+                    ;; ...AND A PARKED TERMINAL SAYS WHERE ITS CARD GOES, HERE, WHILE THE CALL'S
+                    ;; OWN MESSAGE IS STILL IN REACH: the run's frames may have been flushed in
+                    ;; an EARLIER group (`park-on-call` tells why), and the interrupts name the
+                    ;; call whose entry is the one they belong on. Frames still pending are not
+                    ;; in `:entries` yet -- the group's own `apply-frames` attaches those (see
+                    ;; `frames/park-on-last-assistant`), which is the ordinary record.
+                    (-> acc
+                        (assoc :after i)
+                        (park-on-call (parked-interrupts value)))
+                    acc)))
       acc)))
 
 (defn- entries-answer
@@ -944,6 +1002,25 @@
   file."
   [^java.io.File f]
   (entries-answer (fold-records f (entries-init) entries-step)))
+
+(defn entries-of-rows
+  "ROWS as `[line-index row]` pairs -> the entries THEY fold to, numbered by the line each one
+  arrived in -- the SAME fold `entries` runs, handed rows a writer already has in hand
+  (`.scratch/entry-numbering/` ticket 01: the live session's numbers must equal this fold's, entry
+  for entry, and the fold is the one place that rule lives).
+
+  WHY A WRITER NEEDS IT: an entry's `:seq` is decided by WHICH ROWS ARE PRESENT and where -- a
+  `message` row CLOSES the frame group before it (`entries-step`), so the frames of ONE run can be
+  numbered over several lines. A writer that recorded its own rows can therefore reproduce the
+  reader's numbers exactly, without reading anything back.
+
+  IT IS THE FOLD OF THOSE ROWS, NOT OF THE WHOLE FILE: what a caller must hand over is every row
+  IT WROTE, in the order it wrote them, with the line index each one got -- the numbers the fold
+  produces for a run's own entries do not depend on rows outside that run (measured on a real
+  record, 2026-09-30: identical, entry for entry). A partial list IS a different answer, so the
+  caller that has some of the rows must not ask."
+  [pairs]
+  (entries-answer (reduce entries-step (entries-init) pairs)))
 (defn entries
   "Parsed log records -> the conversation's entries IN ORDER, each numbered:
   [{:seq N :message M} ..].
@@ -970,6 +1047,12 @@
       numbers its entries by the LAST line of the run, which is where the record
       stops -- a partial answer is allowed to move once the run ends.
 
+  AND THE WRITER OF A RUN ASKS THIS SAME FOLD FOR ITS NUMBERS (`entries-of-rows` below): the rows it
+  just wrote are the ones that decide them -- a `message` row CUTS the frame group before it -- so
+  the live table and this reading give the SAME number to the SAME entry, which is what a page cut
+  and a delta cursor rest on. (`settle!`'s fourth argument is what is left when a caller has no such
+  map: one number for the whole run, its terminal line -- a coarser, never-wrong reading of the same
+  record, and the one a delegation that died has to fall back on.)
   ENTRIES NUMBERED ALIKE ARRIVED TOGETHER: one run's frames. That is what makes a page cut
   at a group boundary unambiguously right, and it is why the window carries numbers rather
   than a slice of the message list (ticket 05's `tail` / `since` / `before`, and ticket 06's
@@ -1086,8 +1169,9 @@
   IT ALSO ANSWERS THE ENTRIES, NUMBERED (`entries` below): the same conversation with
   the record offset each entry arrived at. A caller that wants the window -- a client
   that refreshed, a page being cut -- needs those numbers, and they are the same numbers
-  the live edge mints (`harness.edge.sessions/land!`), so the two readings of one record
-  cannot disagree."
+  the live edge mints (`harness.edge.sessions/land!`) for everything the FRAMES produced, so the two
+  readings of one record agree to within the lines a `message` row is numbered by here and the run's
+  terminal line is numbered by there (`entries` above says how much, and which ticket closes it)."
   [^java.io.File f]
   (let [records (lines->records (read-lines f))]
     ;; THE CONTEXT IS A MESSAGE AND NOT A FIELD: the conversation is born with the
@@ -1670,6 +1754,14 @@
                                 :before-llm project/before-llm})]
      (loop []
        (when-let [event (async/<!! events)]
+         ;; THE CONSUMER ANSWERS THE DRAIN BARRIER (`harness.kernel.loop/answer-drain!`), and
+         ;; forgetting it cost this path the barrier's WHOLE five-second deadline per run:
+         ;; `harness.kernel.loop/drained!` waits for this answer before the kernel writes its
+         ;; own row, and the deadline is the safety valve for a consumer that is stuck -- not
+         ;; a pause for one that simply never said. Measured 2026-09-30 on the same hole in
+         ;; the test helpers, by `dev/scratch_drain_barrier.clj`: one scripted turn took
+         ;; 5,182ms drained by a consumer that never answers, against 151ms by one that does.
+         (loop/answer-drain! event)
          (when-not (= :run/done (:type event))
            (doseq [frame (emit event)] (swap! frames conj frame))
            (recur))))

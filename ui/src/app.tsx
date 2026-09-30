@@ -76,7 +76,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FC, type ReactN
 import { useTranslation } from "react-i18next";
 
 import { Thread } from "@/components/assistant-ui/elements/thread.aui";
-import { HeldSessionContext, ThreadIdContext, type HeldSession } from "@/components/composer-chrome";
+import {
+  HeldSessionContext,
+  SidebarProjectsContext,
+  ThreadIdContext,
+  type HeldSession,
+} from "@/components/composer-chrome";
 import { SessionRunContext, SessionWritableContext } from "@/components/session-run-state";
 // THE TURN'S OWN WORD (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): which turn the
 // server says is open, as a value this host holds and the message footer reads -- see
@@ -441,10 +446,14 @@ function useWindowFeed(args: {
   /// host asks `sofar` once, as it opens (ticket 04 of `.scratch/record-normalization`), and hands
   /// the verdict up: the composer's gate and the notice that offers the fork are the page's.
   onWritable: (verdict: { normalized: boolean; reasons: readonly string[] } | null) => void;
+  /// WHETHER THIS SESSION IS THE ONE ON SCREEN, which the hook reads for one thing only: a host
+  /// that is SHOWN AGAIN re-reads the window it holds (`docs/rules/panel-data.md`: the push half can
+  /// be missed and the pull half is what closes the gap). It is the page's own fact, not a hook's.
+  visible: boolean;
   onControls: (controls: WindowControls) => void;
 }): void {
   const { threadId, read, t, runtime, start, started, onRecord, isOwnRun, onState, onControls,
-    onWritable } =
+    onWritable, visible } =
     args;
 
   /// WHAT THIS PAGE HOLDS, and the mirror of it that re-renders: the ref is what the
@@ -601,6 +610,29 @@ function useWindowFeed(args: {
       },
     );
   }, [threadId, commit, onRecord]);
+
+  /// A HOST THAT COMES BACK ON SCREEN OWES ITSELF ONE 存量 READ.
+  ///
+  /// `docs/rules/panel-data.md`'s two halves, at the transcript: the push half CAN be missed (a
+  /// socket that dropped, a page that slept, a session shown while another was on screen), the pull
+  /// half is what closes that gap, and for a WINDOW the pull is the tail page -- merged in place by
+  /// `align`, which keeps the reader's place. THE MOUNT'S OWN READ DOES NOT COUNT: whatever door
+  /// this host was opened through, that read already ran (`sessionHistory`). Every LATER show is one,
+  /// and the rising edge is where 'again' is knowable without a timer (a panel never polls what the
+  /// server can push).
+  ///
+  /// IT IS ALSO THE DOOR A DAMAGED COPY COMES BACK THROUGH: a window whose numbers run backwards
+  /// (the 2026-09-30 scramble) is REBUILT from that page instead of merged into (`lib/window.ts`'s
+  /// `aligned`), so a reader whose transcript went stale heals by clicking the session it belongs to.
+  const shownOnce = useRef(false);
+  useEffect(() => {
+    if (!visible) return;
+    if (!shownOnce.current) {
+      shownOnce.current = true;
+      return;
+    }
+    verbs.current.align();
+  }, [visible]);
 
   /// THE TAIL PAGE, MERGED INTO WHAT WE HOLD (`aligned`): the repair for a connection
   /// that dropped, and for a frame that skipped ahead of us. It answers whether the
@@ -1091,6 +1123,7 @@ const SessionHost: FC<{
   const isOwnRun = useCallback(() => ownRunNow.current, []);
   useWindowFeed({
     threadId,
+    visible,
     read,
     t: tErrors,
     runtime,
@@ -1479,6 +1512,15 @@ export function App() {
   /// read one authority instead of two that could drift (a fork's name is written by the
   /// fork, and the runtime's messages cannot know it).
   const [storeTitles, setStoreTitles] = useState<Record<string, string>>({});
+  /// AND THE WHOLE LISTING THE SIDEBAR LANDS, because a component OUTSIDE the sidebar needs
+  /// a half of it: the composer's directory picker offers this page's PROJECTS, and handing
+  /// them down from here is what keeps it from asking `GET /api/projects` a second time
+  /// (`components/composer-chrome.tsx`'s `SidebarProjectsContext`). Same payload the sidebar
+  /// draws from, written by the same call (`onListed` below).
+  const [sidebarListing, setSidebarListing] = useState<SidebarListing>({
+    projects: [],
+    tasks: [],
+  });
   // WHICH SESSIONS ARE SITTING ON BYTES THAT DID NOT REACH THE RECORD, reported by
   // their host on the read that opens the session and on every poll after it. A
   // session that is absent from this map is FINE -- that is the ordinary answer, and
@@ -1866,6 +1908,7 @@ export function App() {
       // it lands. The restore below is the part that happens once.
       forgetListedTitles(listing);
       setStoreTitles(listingTitles(listing));
+      setSidebarListing(listing);
       if (restored.current || pending === null) return;
       restored.current = true;
       const listed = listedSession(pending, listing);
@@ -1901,6 +1944,7 @@ export function App() {
           that brings it back are `absolute` (see `components/sidebar.tsx` and
           `components/sidebar-toggle.tsx`), so this row is the box they are placed
           against -- and it is the one element that knows the viewport's height. */}
+      <SidebarProjectsContext.Provider value={sidebarListing.projects}>
       <SubagentViewContext.Provider value={openMirror}>
       <div className="relative flex h-dvh">
         {/* THE BACKDROP EXISTS ON NARROW WINDOWS ONLY, where the sidebar floats
@@ -2059,6 +2103,7 @@ export function App() {
         )}
       </div>
       </SubagentViewContext.Provider>
+      </SidebarProjectsContext.Provider>
     </TooltipProvider>
   );
 }

@@ -553,6 +553,26 @@
   worked out from the KIND when nobody said (`producer-of`)."
   nil)
 
+(def ^:dynamic *written-rows*
+  "THE ROWS ONE RUN HAS WRITTEN, as `[line row]` pairs, while a caller that wants them binds this
+  to an atom -- the agent route and a delegation each bind one for their own run, and `log!` fills
+  it. NIL IS 'NOBODY IS COLLECTING', which is the ordinary state of a process that only writes.
+
+  WHAT READS IT IS `harness.edge.replay/entries-of-rows` AT THE END OF THE RUN: an entry's number
+  is decided by the rows (`message` rows close the frame group before them), so the writer that has
+  its own rows can reproduce the READER's numbers exactly instead of handing the whole run one
+  number (`.scratch/entry-numbering/` ticket 01). It holds the payloads of ONE run and dies with
+  the run's own state -- the same lifetime `:frames` already has."
+  nil)
+
+(defn- entry-lines
+  "THE ROWS A RUN WROTE -> `{entry-id line}`, folded by the READER's own fold (`replay/entries-of-rows`).
+  The ids are the frames' (`<run-id>-mN`), which is what the session's entries carry; a row the fold
+  answers without one is skipped, because this map is keyed by name and nothing else."
+  [rows]
+  (into {} (keep (fn [e] (when-some [id (get-in e [:message :id])] [id (:seq e)])))
+        (replay/entries-of-rows rows)))
+
 (defn- producer-of
   "The default producer of a row of KIND carrying PAYLOAD: an audit row derived from a kernel
   event, a CUSTOM frame (a fact the harness stated on its own), or a plain wire frame. A `message`
@@ -635,6 +655,10 @@
      ;; listener `harness.kernel.session` installs at load, and a window's mark rides the same one
      ;; -- so the one write path WRITES and knows nobody. Adding a consumer is attaching a reader
      ;; (`harness.infra.stream/listen!` / `listen-every!`), never editing this function.
+     ;; AND A RUN THAT IS COLLECTING ITS OWN ROWS GETS THIS ONE (`*written-rows*`): the ROW, not the
+     ;; bytes, and the line it landed on -- the two things `harness.edge.replay/entries-of-rows`
+     ;; folds to answer the same numbers a window gives (`.scratch/entry-numbering/` ticket 01).
+     (when (some? *written-rows*) (swap! *written-rows* conj [offset row]))
      offset)))
 
 (defn- move-log!
@@ -1123,10 +1147,16 @@
   [thread-id run-id state]
   (fn [frame]
     ;; THE TERMINAL FRAME'S LINE IS WHERE THIS RUN'S ENTRIES LAND: `settle!` folds the run's
-    ;; messages into the conversation at this same moment, and the record's offset of this line
-    ;; is the number they are given (`sessions/land!`). The line is logged before `settle!` runs,
-    ;; so the number is already on its way back when the entries appear -- and `land!` is
-    ;; idempotent and by group, so either order works.
+    ;; messages into the conversation at this same moment, and this line's record offset is the
+    ;; number they are given (`sessions/land!`). THE NUMBER IS HELD, NOT APPLIED, and the order is
+    ;; the whole reason: the write is synchronous (ADR 0007), so the offset comes back HERE --
+    ;; before `settle!` has put those entries in the table -- and `land!` numbers only entries
+    ;; that are already there. Landing it here numbered NOTHING AT ALL, which is how every entry a
+    ;; run produced came to keep `:seq nil` (measured 2026-09-30: 7 of a session's 563 in memory,
+    ;; 563 of 563 in the file), and `since` then answered the whole conversation to a reader
+    ;; asking what it had missed. `settle!` takes it as its fourth argument and applies it before
+    ;; the doorbell; the note there says why that is the only moment that works. (The comment
+    ;; here used to claim 'either order works' -- it does not.)
     ;; THE PER-TOKEN REASONING DELTAS ARE NOT RECORDED (ADR 0009): they were **63% of the LINES of one
     ;; real log** (8,640 of 13,631) and **80% of the BYTES of another** (41,896,984 of 52,248,775 --
     ;; measured, `.scratch/reasoning-out-of-the-record/evidence/read_routes.txt`), and the same text is
@@ -1141,9 +1171,13 @@
     ;; keeps is a whole frame rather than a line -- so the wire-only test reads ROW.
     (doseq [row (text-lines state frame)]
       (when-not (or (reasoning-frame? row) (wire-only-frame? row))
-        (log! thread-id run-id "event" row
-              (when (contains? terminal (:type row))
-                (fn [offset] (sessions/land! thread-id run-id offset))))))
+        (let [offset (log! thread-id run-id "event" row
+                           (when (contains? terminal (:type row))
+                             (fn [offset] (swap! state assoc :terminal-line offset))))]
+          ;; AND THE LAST LINE THIS RUN WROTE, which is all a run that DIED has to be numbered by:
+          ;; the crash path below settles the frames it managed to write, and the terminal it never
+          ;; reached is exactly the number the ordinary path hands `settle!`.
+          (when (some? offset) (swap! state assoc :last-line offset)))))
     ;; THE RUN'S OWN HALF OF THE CONVERSATION, kept for the moment it ends: the session's
     ;; history is what this run was handed, and these frames are what came of it. Collected HERE
     ;; because this is the one place that sees every frame exactly once, and settled at the
@@ -1155,7 +1189,8 @@
       ;; saying the thread is running (harness.edge.sessions/running? -- the fact the sidebar row
       ;; reads), and where the conversation becomes what it says.
       (unregister-run! thread-id run-id)
-      (sessions/settle! thread-id run-id (:frames @state))
+      (sessions/settle! thread-id run-id (:frames @state) (:terminal-line @state)
+                        (some-> *written-rows* deref entry-lines))
       (swap! state assoc :terminal (:type frame)))
     ;; THE FRAME ITSELF, NOT A DECORATED COPY: this map is what the socket carries, and for every
     ;; family but the reasoning one (ADR 0009) it is also the map the record logs -- `:threadId`, the
@@ -1407,7 +1442,11 @@
       ;; with nothing anywhere saying why. That is the one failure in this file
       ;; that cannot be allowed to be quiet, so the whole run body is wrapped.
       (try
-        (binding [hook/*sink* (sink-for thread-id run-id)]
+        (binding [hook/*sink* (sink-for thread-id run-id)
+                  ;; THIS RUN'S OWN ROWS, collected for the one moment they become the numbers of the
+                  ;; conversation (`entry-lines` below, at `settle!`): the record is what decides them
+                  ;; and this is the writer that has it in hand.
+                  *written-rows* (atom [])]
           ;; ------------------------------------------------------------------ the birth
           ;; WHAT THIS RUN CONTINUES FROM, read once, before anything starts. The session
           ;; holds the conversation (harness.edge.sessions); the client no longer sends
@@ -2009,9 +2048,10 @@
                           ;; THE KERNEL ASKS WHETHER THE DRAIN HAS CAUGHT UP, and this is where the
                           ;; answer comes from: everything put on the channel BEFORE this event has
                           ;; been dealt with -- this loop is the one that deals with them, in order --
-                          ;; so the promise the kernel is waiting on is delivered here.
-                          (when (= :drained (:type ev))
-                            (when-some [done (:done ev)] (deliver done true)))
+                          ;; so the promise the kernel is waiting on is settled here
+                          ;; (`harness.kernel.loop/answer-drain!`, which is the one spelling of the
+                          ;; consumer's half of that barrier).
+                          (loop/answer-drain! ev)
                           (when-let [[kind payload] (lifecycle-record ev)]
                             ;; THE MODEL FAMILY GOES OUT HERE (ADR 0006 decision 4), stamped with the
                             ;; line's own number -- which `log!` now ANSWERS, because the write is
@@ -2181,7 +2221,8 @@
         ;; conversation that never had the half-answer the client is looking at. The
         ;; fold is the emitter's own (`sessions/settle!`), so the session gets exactly
         ;; the messages its frames describe, and nothing is invented for the ending.
-        (sessions/settle! thread-id run-id (:frames @state))
+        (sessions/settle! thread-id run-id (:frames @state) (or (:terminal-line @state) (:last-line @state))
+                          (some-> *written-rows* deref entry-lines))
         (log/error! :run/crashed t {:thread-id thread-id :run-id run-id
                                     :last      (:last @state)})
         ;; AND THE READER IS TOLD: a crashed run emits no terminal, and a reader on the downlink
@@ -2536,10 +2577,20 @@
         ;; conversation. The agent route keeps the same atom for the same reason: it is
         ;; the one place that sees every frame exactly once.
         frames   (atom [])
+        ;; AND THE LINE THE RUN'S TERMINAL FRAME IS WRITTEN ON, held for the `settle!` in the
+        ;; `finally` below for the same reason the agent route holds it (see `runner`): the entries
+        ;; it numbers are not in the table until the frames become the conversation.
+        terminal-line (atom nil)
+        ;; AND THE LAST LINE THIS DELEGATION WROTE, for the `finally` when it died without a
+        ;; terminal -- the same fact the agent route keeps (see `runner`).
+        last-line (atom nil)
         ;; AND THE ONE PLACE THE AGENT ROUTE ALSO USES for its text (`text-lines`): the messages
         ;; still open live here, and what reaches the record is the snapshot, not the token.
         text     (atom {})]
-    (binding [hook/*sink* (sink-for thread-id run-id)]
+    (binding [hook/*sink* (sink-for thread-id run-id)
+              ;; THE DELEGATION'S OWN ROWS, for the same reason and the same reader as the agent
+              ;; route's (`entry-lines`).
+              *written-rows* (atom [])]
         ;; THE PARENT LEARNS THE CHILD'S NAME FIRST, before the child writes a row of
         ;; its own: a card in the PARENT's conversation can then be clicked while the
         ;; subagent is still working, which is the entire point of the timing.
@@ -2638,9 +2689,9 @@
                       ;; Tool-lifecycle and model-call events are audit lines rather
                       ;; than wire frames, keyed by toolCallId.
                       ;; THE KERNEL'S QUESTION IS ANSWERED ON THIS ROUTE TOO: everything put on this
-                      ;; channel before it has been dealt with, and the promise is how it learns that.
-                      (when (= :drained (:type ev))
-                        (when-some [done (:done ev)] (deliver done true)))
+                      ;; channel before it has been dealt with, and the promise is how it learns that
+                      ;; (`harness.kernel.loop/answer-drain!`).
+                      (loop/answer-drain! ev)
                       (when-let [[kind payload] (lifecycle-record ev)]
                         (log! thread-id run-id kind payload))
                       ;; AND THE WIRE FRAMES GO ON THE RECORD, in the subagent's own
@@ -2665,9 +2716,10 @@
                           ;; guard's frame is the wire's alone in a delegation too.
                           (doseq [row (text-lines text f)]
                             (when-not (or (reasoning-frame? row) (wire-only-frame? row))
-                              (log! thread-id run-id "event" row
-                                    (when (contains? terminal (:type row))
-                                      (fn [offset] (sessions/land! thread-id run-id offset))))))
+                              (let [offset (log! thread-id run-id "event" row
+                                                (when (contains? terminal (:type row))
+                                                  (fn [offset] (reset! terminal-line offset))))]
+                                (when (some? offset) (reset! last-line offset)))))
                           ;; AND THE SAME FRAME GOES ON THE BUS: the record is not where
                           ;; a panel watches from -- it is where a panel catches up.
                           (frame-bus/publish! thread-id f)
@@ -2696,7 +2748,8 @@
           ;; answer is not a turn. `settle!` also carries the state the terminal frame
           ;; says (settled / unfinished), so the next reader of this session gets the
           ;; same answer the record would give.
-          (sessions/settle! thread-id run-id @frames))))))
+          (sessions/settle! thread-id run-id @frames (or @terminal-line @last-line)
+                            (some-> *written-rows* deref entry-lines)))))))
 
 ;; The door repairs a run that never closed before it reads the record (see the 4b decision
 ;; below); the repair is defined with the read side further down, so it is named here.
@@ -3858,19 +3911,34 @@
                                             (when (pos? (count turns))
                                               (hk/send! ch (str (json/write-str (peek turns)) "\n") false))))))]
                           (push!)
-                          (when (some? held)
-                            ;; THE SESSION IS HELD HERE, so every change to it can be a push --
-                            ;; and the session's own doorbell is the notification.
+                          (if (and (some? held) (mux/watching? stem))
+                            ;; THE SESSION IS HELD *AND* SOMEBODY IS SUBSCRIBED TO IT, so every
+                            ;; change to it can be a push -- and the session's own doorbell is
+                            ;; the notification.
+                            ;;
+                            ;; AND THAT SUBSCRIPTION IS THE DOORBELL'S OWNER, which is the fix
+                            ;; this route needed (`.scratch/memory-hygiene/` 票 02): THIS
+                            ;; RESPONSE'S OWN CLIENT CANNOT BE OBSERVED AT ALL. http-kit reports
+                            ;; no close for a plain streaming channel and its `open?` stays true
+                            ;; after the reader is gone (measured), so a doorbell tied to this
+                            ;; socket outlives every tab that ever opened one -- holding this
+                            ;; closure (the channel, the folded payload) and pinning the session
+                            ;; in memory, because `watched?` counts it as a reader. The page's own
+                            ;; downlink IS observable, so that is what owns it.
                             (let [watcher (fn [_thread-id event]
                                             (case (:kind event)
                                               :entries (try (push!) (catch Throwable _ nil))
                                               :gone    (hk/close ch)
                                               nil))]
                               (reset! watching watcher)
-                              (sessions/watch! stem watcher)))
-                          ;; NOT HELD: there is nothing here to push from, so the stream ends
-                          ;; after the first load and the client is free to come back.
-                          (when (nil? held) (hk/close ch)))
+                              (sessions/watch! stem watcher (fn [] (mux/watching? stem))))
+                            ;; NOT PUSHABLE: this process does not hold the session (no view to
+                            ;; push from), or NOBODY IS SUBSCRIBED to it -- and a stream whose
+                            ;; reader is a bare HTTP client (a curl, a test) has no owner that
+                            ;; could ever end its doorbell. Either way the reader gets the fold
+                            ;; it asked for and the stream ENDS, which is the other half of 'do
+                            ;; not hold what you cannot watch'.
+                            (hk/close ch)))
                         (catch Throwable t
                           (log/error! :trajectory/stream-failed t {:threadId stem}))))
           :on-close (fn [_ch _status]
@@ -4672,7 +4740,7 @@
               :state (name (:state (replay/record-state records)))})
            (catch Throwable t {:error (ex-message t) :status 400})))))
 
-(defn- read-entries
+(defn- read-entries-raw
   "The entries a WINDOW route answers with: the live session's when this process holds
   it -- EXCEPT while a run of it is in flight, when the record is further along -- else
   the record's. Read-only, and never a birth.
@@ -4717,6 +4785,61 @@
             {:ok (:entries e) :live true :state (live-state stem)})))
     (record-entries stem false)))
 
+(defn- reconcile-numbers!
+  "GIVE A CONVERSATION THIS PROCESS ALREADY HOLDS THE NUMBERS ITS RECORD SAYS -- the repair for a
+  session whose runs ended in a process that PREDATES the numbering (`.scratch/window-self-heal/`):
+  its entries carry `:seq nil`, and nothing in memory can say what they should be, because the rows
+  that decided them died with the run that wrote them. The record is the only place they still exist,
+  so it is read ONCE -- a STREAMING fold (`replay/fold-entries`, the same reader that gives a window
+  its numbers) -- and the names it answers are handed to the session (`number-entries!`).
+
+  WHEN IT DOES NOT RUN, and each of these is a reason on its own:
+    * nobody here holds the conversation, or it has no log -- nothing to number, nothing to read;
+    * a run of it is IN FLIGHT: its newest entries have no number YET, on purpose, and the run that
+      is writing them is the door they will come through (`harness.edge.http/runner`);
+    * `:numbered-from-record` on the session's fold table says it has been looked at. A session
+      BORN from the record is numbered by that walk and never needs this; one that has been looked at
+      once must not be looked at again on every read (the flag, not the scan, is what keeps a
+      well-formed conversation from paying for this at all).
+
+  A READ STILL WRITES NOTHING: no record byte, no claim, no birth -- only numbers in the table. The
+  same shape `revive-parks!` has beside it, and for the same reason: a reader handed a conversation
+  it can neither cut a page from nor ask a delta of is a reader misled."
+  [stem]
+  (let [session (sessions/live-entry stem)]
+    (when (and (some? session)
+               (not (sessions/fold-value stem :numbered-from-record))
+               (not (sessions/running? stem))
+               (some #(nil? (:seq %)) (:entries session)))
+      (when-some [f (replay/find-log (home/projects-dir) stem)]
+        (sessions/number-entries!
+         stem nil
+         (into {} (keep (fn [e] (when-some [id (get-in e [:message :id])] [id (:seq e)])))
+               (replay/fold-entries f))))
+      ;; AND THE SESSION IS MARKED LOOKED AT, log or no log: a conversation with no record has
+      ;; nothing to be numbered BY, and asking that again on every read would be a file lookup (and
+      ;; a scan) per read for an answer that cannot change.
+      (sessions/set-fold-value! stem :numbered-from-record true))))
+
+(defn- read-entries
+  "`read-entries-raw` (above, which says everything about WHERE an answer comes from), with
+  one step in front of the answer: the parks this conversation is waiting on are rebuilt
+  (`harness.edge.sessions/revive-parks!`).
+
+  THE REPAIR IS PART OF HANDING A CONVERSATION OUT, not a second reading of it. What a
+  reader is about to draw are the cards the conversation names -- and after a restart those
+  names are the only thing left of the parks behind them: the card's question would 404 and
+  its answers would go nowhere, which is the state a person sees as 'the page is stuck' (the
+  2026-09-29 session 9fbc5c8c). `revive-parks!` rebuilds them out of the conversation's own
+  words, under the same ids -- so the card goes on being answerable, and a READ still writes
+  nothing but that: no record byte, no claim, no birth, and never twice for one park."
+  [stem]
+  (reconcile-numbers! stem)
+  (let [read (read-entries-raw stem)]
+    (if-some [es (:ok read)]
+      (assoc read :ok (sessions/revive-parks! stem es))
+      read)))
+
 (defn- window-page
   "A LIVE conversation's window: {:entries [..] :baseSeq N :hasMore bool} for the tail page
   (`since` nil) or for what arrived after `since`.
@@ -4731,16 +4854,24 @@
   with nothing to say about which half; the PAGE route is where a broken record is reported
   BY NAME (`read-entries`)."
   [stem since]
-  (let [from-record (when (running? stem) (:ok (record-entries stem true)))]
-    (cond
-      (nil? from-record)
-      (if (nil? since)
-        (sessions/tail stem)
-        {:entries (sessions/since stem since) :baseSeq since :hasMore false})
+  (reconcile-numbers! stem)
+  (let [from-record (when (running? stem) (:ok (record-entries stem true)))
+        page (cond
+               (nil? from-record)
+               (if (nil? since)
+                 (sessions/tail stem)
+                 {:entries (sessions/since stem since) :baseSeq since :hasMore false})
 
-      (nil? since) (sessions/tail-of from-record)
+               (nil? since) (sessions/tail-of from-record)
 
-      :else {:entries (sessions/since-of from-record since) :baseSeq since :hasMore false})))
+               :else {:entries (sessions/since-of from-record since) :baseSeq since :hasMore false})]
+    ;; THE SAME REPAIR THE PAGE ROUTE MAKES, at the streaming door (`read-entries`): a window is
+    ;; a conversation a client draws cards from, and the tail window is where the card of a run
+    ;; that just stopped comes from. A session this process does not hold answers nil from
+    ;; `sessions/tail`, and a nil window has nothing to repair.
+    (if-some [es (:entries page)]
+      (assoc page :entries (sessions/revive-parks! stem es))
+      page)))
 
 (defn- number-param
   "A query parameter that is meant to be a record offset, or nil when it is absent.
@@ -4761,6 +4892,8 @@
   being held here: it reads memory if this process serves the session and the record if
   it does not. NOTHING IS WRITTEN and no claim is taken -- a reader paging through a
   conversation another process is serving is exactly the case the record is still for.
+  (WHAT IS REPAIRED HERE, and it is not the record: `read-entries` rebuilds the in-memory
+  parks the conversation names, so the cards it is about to be drawn from can be answered.)
 
   `beforeSeq` IS THE OLDEST OFFSET THE CLIENT HOLDS, not the newest: the entries it is
   missing are all in front of that one, and the page ends where the client's own window
@@ -5852,17 +5985,36 @@
   way. `:dir` is the binding the answer is about, echoed so a strip can draw the
   directory and the branch from one call.
 
+  `?dir=..` ASKS THE SAME QUESTION ABOUT A DIRECTORY, and it exists for the one session
+  that has no row: the id this page minted and has not sent to (the composer's picker and
+  the sidebar's 'New session' both remember a directory and write nothing). `?threadId=`
+  answers `{:dir nil}` for it -- correctly, for an id this home has never heard of -- so the
+  strip could never draw the branch of the repository in front of it. A directory this home
+  does not list is answered exactly like a session with none; the gate and its reason are
+  `project/listed-dir`'s.
+
   A SESSION WITH NO DIRECTORY ANSWERS `{:dir nil :repo? false}`, not a 400: most
   sessions have no project, the strip simply shows nothing, and a caller drawing
   chrome should not have to treat 'nothing to show' as a failure."
   [req]
-  (let [thread-id (get (query-params (:query-string req)) "threadId")
-        dir       (project/binding-for thread-id)]
+  (let [params (query-params (:query-string req))
+        asked  (get params "dir")
+        dir    (if (str/blank? (str asked))
+                 (project/binding-for (get params "threadId"))
+                 (project/listed-dir asked))]
     (api-response 200 (assoc (git/state dir) :dir dir))))
 
 (defn- git-post
   "POST /api/git {threadId, branch} -- move the session's directory onto BRANCH,
   and answer the state afterwards.
+
+  {dir, branch} IS THE SAME VERB FOR A DIRECTORY, and it is what the composer's branch
+  picker uses before the session exists (`project/listed-dir` is the gate, and the reason is
+  the GET's). IT WRITES NO AUDIT LINE, and that is not an omission: the line belongs in a
+  session's log, and the session this is for is one this page minted and has not sent to --
+  writing a log for it is exactly the row `POST /api/project` stopped creating (点击新增不立刻
+  会话，发送才新建). The checkout itself is not hidden: it is a real change in a real working
+  tree, and `git reflog` in that directory is where git keeps it.
 
   THE ONE THING HERE THAT CHANGES A DIRECTORY RATHER THAN A ROW, and it is
   confined to what was asked for: `git checkout` with no --force, so a dirty tree
@@ -5878,26 +6030,31 @@
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8")
                                         :key-fn keyword)}
                     (catch Throwable _ {:bad true}))
-        {:keys [ok bad]} parsed]
+        {:keys [ok bad]} parsed
+        thread-id (str (:threadId ok))
+        asked     (str (:dir ok))]
     (cond
       bad
       (api-response 400 {:error "request body is not valid JSON"})
 
-      (str/blank? (str (:threadId ok)))
-      (api-response 400 {:error "missing threadId"})
+      (and (str/blank? thread-id) (str/blank? asked))
+      (api-response 400 {:error "missing threadId or dir"})
 
       :else
-      (let [thread-id (str (:threadId ok))
-            dir       (project/binding-for thread-id)]
+      (let [by-dir? (not (str/blank? asked))
+            dir     (if by-dir? (project/listed-dir asked) (project/binding-for thread-id))]
         (if (str/blank? (str dir))
-          (api-response 400 {:error "this session has no project directory, so it has no branch to switch"})
+          (api-response 400 {:error (if by-dir?
+                                      "this home does not list that directory as a project, so it has no branch to switch"
+                                      "this session has no project directory, so it has no branch to switch")})
           (let [before   (git/state dir)
                 answer   (git/switch! dir (:branch ok))]
             (if-some [error (:error answer)]
               (api-response 400 {:error error})
-              (do (log! thread-id nil "git/branch"
-                        {:before (:branch before) :after (:branch (:ok answer))
-                         :dir dir :via "http"})
+              (do (when-not by-dir?
+                    (log! thread-id nil "git/branch"
+                          {:before (:branch before) :after (:branch (:ok answer))
+                           :dir dir :via "http"}))
                   (api-response 200 (assoc (:ok answer) :dir dir))))))))))
 
 (defonce ^:private compaction-lock
@@ -6550,11 +6707,21 @@
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
-                   ;; NEW BYTES into the store, OFF THE WRITE PATH. `stream/push!` must not wait for
-                   ;; a database write, and a pass that misses a tick is a NUMBER
-                   ;; (`harness.edge.projection/lag`) rather than a lost line. It HAS a teardown,
-                   ;; unlike the writer: a process that stops serving stops copying, and the next one
-                   ;; resumes at the offset it left.
+                   ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
+                   ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
+                   ;; turned off) and 04 (what made it worth turning back on). What it cost then: a
+                   ;; round walked EVERY session, and every conversation's every lookup opened its OWN
+                   ;; sqlite connection (plus a migration pass) -- two per conversation per tick,
+                   ;; 3,914 ms against a 2,000 ms interval, 46% of this process's CPU. What it costs
+                   ;; now: ONE connection for the whole round (`db/with-connection`, the listing and the
+                   ;; offsets in one query) and one `stat` per conversation -- a session whose file is
+                   ;; the same one at the same length produces no query, no connection and no write at
+                   ;; all. THAT IS THE DISCIPLINE DECISION 4 LEFT UNSTATED: the projection holds a
+                   ;; connection for the length of a round and never a handle across ticks (`fsync!`
+                   ;; and every write still go through `harness.infra.db`'s own doors).
+                   ;;
+                   ;; IT STILL HAS A TEARDOWN, unlike the writer: a process that stops serving stops
+                   ;; copying, and the next one resumes at the offset it left (`projection_offsets`).
                    (projection/start!)]]
     ;; THE RECORD WRITER COMES UP WITH THE CAPABILITIES, because it is one: every
     ;; line this process produces goes through it (`harness.infra.stream`), and the

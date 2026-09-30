@@ -18,7 +18,14 @@
 
   A CONVERSATION NOBODY SUBSCRIBED TO HAS NO WATCH, and that is the difference that
   matters: this is the filtering the SSE feed never had to do (one connection watched one
-  conversation). A ring for an unsubscribed conversation walks nothing and sends nothing."
+  conversation). A ring for an unsubscribed conversation walks nothing and sends nothing.
+
+  AND A WATCHER BELONGS TO THE CONNECTION THAT REGISTERED IT. `attach!` on a token that is
+  already in use RELEASES the set the earlier socket left (rather than dropping it),
+  `unsubscribe!` and `detach!` release theirs, and the doorbell itself names the connection as
+  its OWNER (`sessions/watch!`'s third argument) so that a path which loses the table row
+  cannot leave a reader behind. Measured before this: 199 doorbells over 32 conversations with
+  2 live connections and 5 subscriptions (`.scratch/memory-hygiene/` 票 02)."
   (:require [harness.edge.sessions :as sessions]))
 
 (defonce ^:private connections
@@ -33,9 +40,17 @@
 
 (defn attach!
   "Remember CH as the connection named TOKEN, watching nothing yet. Replaces any set an
-  earlier connection under the same name left behind (a token is meant to be fresh)."
+  earlier connection under the same name left behind -- A TOKEN IS MEANT TO BE FRESH, and when
+  it is not, that earlier set is RELEASED rather than dropped on the floor: a subs map that
+  goes away without unwatching leaves its doorbells in `sessions/watchers` with nobody to
+  ring them and nothing to end them (`prune-watches!` cannot even see them -- they look like
+  live readers). That is `.scratch/memory-hygiene/` 票 02's leak, and this is one of its doors."
   [token ch]
-  (swap! connections assoc (str token) {:ch ch :subs {}})
+  (locking connections
+    (let [token (str token)
+          [before] (swap-vals! connections assoc token {:ch ch :subs {}})]
+      (doseq [[thread-id sub] (:subs (get before token))]
+        (sessions/unwatch! thread-id (:watch sub)))))
   (str token))
 
 (defn channel
@@ -56,6 +71,22 @@
   [token thread-id]
   (contains? (:subs (get @connections (str token))) (str thread-id)))
 
+(defn watching?
+  "Whether ANY LIVE CONNECTION is subscribed to THREAD-ID right now -- 'is anybody reading
+  this conversation'.
+
+  THIS IS THE OWNER A ROUTE NAMES WHEN ITS OWN READER CANNOT BE OBSERVED. The trajectory stream
+  is a plain streaming response: http-kit reports NO close for one and its `open?` stays true
+  after the client is gone (measured: `.scratch/memory-hygiene/` 票 02), so a doorbell
+  registered on that socket's life is a doorbell nothing can ever end. The subscription that
+  CAN be observed is this one -- the page's own downlink, which says when it goes -- so the
+  stream's watcher names it: while somebody is subscribed the stream may push, and when nobody
+  is, it is not a reader and goes at the next prune (`sessions/prune-watches!`, which
+  `detach!` and `unsubscribe!` call for the conversation they just released)."
+  [thread-id]
+  (let [tid (str thread-id)]
+    (boolean (some (fn [[_ conn]] (contains? (:subs conn) tid)) @connections))))
+
 (defn subscribe!
   "Register THREAD-ID on TOKEN's connection: every ring for that conversation calls PUSH.
   Idempotent -- a second call replaces the push and its doorbell rather than stacking a
@@ -63,38 +94,76 @@
   reconnect) means.
 
   Answers true when the conversation was NOT already subscribed (http reads it to decide
-  whether a whole opening frame is owed), false when it was replaced."
+  whether a whole opening frame is owed), false when it was replaced.
+
+  AND FALSE WHEN THERE IS NO SUCH CONNECTION AT ALL: a token whose socket has gone cannot be
+  subscribed -- there is nothing to open, and a doorbell registered for it would have nobody
+  to ring it and nothing to end it."
   [token thread-id push]
   (let [token (str token)
-        thread-id (str thread-id)
-        existing (get-in @connections [token :subs thread-id])]
-    (when-some [old existing] (sessions/unwatch! thread-id (:watch old)))
-    (let [watch (fn [_ _] (push))]
-      (swap! connections assoc-in [token :subs thread-id] {:watch watch :push push})
-      (sessions/watch! thread-id watch))
-    (nil? existing)))
+        thread-id (str thread-id)]
+    ;; ONE CRITICAL SECTION WITH `detach!`, and that is not tidiness: the two have to agree
+    ;; on whether this doorbell exists. An interleaving where a socket's close lands between
+    ;; the table write and the `sessions/watch!` below leaves a watcher nobody owns -- and a
+    ;; `sessions/watch!` on a token that is already gone RESURRECTS the row as a connection
+    ;; with no channel, which nothing can ever detach.
+    (locking connections
+      (let [existing (get-in @connections [token :subs thread-id])]
+        (if-not (contains? @connections token)
+          ;; A CONNECTION THAT IS GONE CANNOT BE SUBSCRIBED. Answers false -- 'nothing new
+          ;; here' -- because there is nothing to open.
+          false
+          (let [watch (fn [_ _] (push))]
+            (when-some [old existing] (sessions/unwatch! thread-id (:watch old)))
+            ;; THE OWNER IS THE CONNECTION, so even a doorbell that slipped past this section
+            ;; (a path that drops a subs map without unwatching) is not a reader for long:
+            ;; `watched?` asks and the sweeper's `prune-watches!` takes it out.
+            (sessions/watch! thread-id watch (fn [] (contains? @connections token)))
+            (swap! connections assoc-in [token :subs thread-id] {:watch watch :push push})
+            (nil? existing)))))))
 
 (defn unsubscribe!
   "Stop watching THREAD-ID on TOKEN's connection (the client closed it, or moved off it).
   Answers the thread id when something was released, nil when there was nothing."
   [token thread-id]
   (let [token (str token)
-        thread-id (str thread-id)
-        [before] (swap-vals! connections update-in [token :subs] dissoc thread-id)]
-    (when-some [sub (get-in before [token :subs thread-id])]
-      (sessions/unwatch! thread-id (:watch sub))
-      thread-id)))
+        thread-id (str thread-id)]
+    (locking connections
+      (let [sub (get-in @connections [token :subs thread-id])]
+        (when (contains? @connections token)
+          (swap! connections update-in [token :subs] dissoc thread-id))
+        (when-some [sub sub]
+          (sessions/unwatch! thread-id (:watch sub))
+          ;; AND THE WATCHERS THAT NAMED THIS CONVERSATION'S SUBSCRIPTION AS THEIR OWNER (the
+          ;; trajectory stream -- its own reader cannot be observed at all): the set that owned
+          ;; them has just gone, so they go now rather than at the next sweep.
+          (sessions/prune-watches! thread-id)
+          thread-id)))))
 
 (defn detach!
   "Release every subscription TOKEN's connection holds and forget it. This is the close
   handler, so a tab that goes away takes its whole set with it -- there is nothing left
-  for the server to remember."
+  for the server to remember.
+
+  AND NOTHING LEFT FOR ANYBODY ELSE EITHER: a watcher that named this conversation's live
+  subscription as its OWNER (`sessions/watch!`'s third argument -- the trajectory stream) is
+  pruned here, for the conversations this connection was the last reader of."
   [token]
   (when-some [token (some-> token str not-empty)]
-    (let [[before] (swap-vals! connections dissoc token)]
-      (doseq [[thread-id sub] (:subs before)]
-        (sessions/unwatch! thread-id (:watch sub)))
-      nil)))
+    (locking connections
+      (let [[before] (swap-vals! connections dissoc token)
+            ;; THE ROW, NOT THE TABLE. This line read `(:subs before)` -- `before` is the
+            ;; WHOLE registry -- so it was always nil and this close handler never released a
+            ;; single doorbell: the connection row went and its watchers stayed in
+            ;; `sessions/watchers` forever, holding their closures and pinning their
+            ;; conversations. 199 of them over 32 conversations when it was measured
+            ;; (`.scratch/memory-hygiene/` ticket 02, 2026-09-29).
+            subs (:subs (get before token))]
+        (doseq [[thread-id sub] subs]
+          (sessions/unwatch! thread-id (:watch sub)))
+        (doseq [thread-id (keys subs)]
+          (sessions/prune-watches! thread-id))))
+    nil))
 
 (def ^:private run-buffer-size
   "How many of a conversation's most recent RUN frames are kept for a reader that

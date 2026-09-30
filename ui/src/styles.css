@@ -185,10 +185,11 @@
    rounded frame around it, one padding wide on every side) already accounts for.
 
    `:has()` is what keeps this to the DOCKED state: `data-started` is put on the
-   composer's frame when the thread has messages, which is exactly when the footer
-   stops being part of a centred empty page. On an empty session the composer is
-   centred and the footer's padding is upstream's business. Unlayered, like the
-   rule above and for the same reason: `pb-4 md:pb-6` are utilities. */
+   composer's frame when the composer is NOT the new-chat one -- ONE question, answered
+   once, in `lib/thread-view.ts`, for this attribute and for the new-chat bar alike. A
+   session whose history is still loading is docked too, and gets no strip either. On an
+   empty session the composer is centred and the footer's padding is upstream's business.
+   Unlayered, like the rule above and for the same reason: `pb-4 md:pb-6` are utilities. */
 .aui-thread-viewport-footer:has([data-started]) {
   padding-bottom: 0;
   }

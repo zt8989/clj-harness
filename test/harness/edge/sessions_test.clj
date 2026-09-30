@@ -9,6 +9,7 @@
             [harness.edge.sessions :as sessions]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
+            [harness.infra.stream :as stream]
             [harness.kernel.event :as ev]
             [harness.kernel.session :as session]))
 
@@ -70,6 +71,14 @@
                                                               (ev/run-end)]))))
                 "\n")
           :encoding "UTF-8")
+    f))
+
+(defn- ring-file
+  "A file for the RING cases to push into: it is the record's own shape (`push!` writes the line
+  there), so the case can also check that what landed is a FILE fact and never a ring one."
+  [thread-id]
+  (let [f (io/file (home/projects-dir) "sessions-test" (str (home/sanitize thread-id) ".jsonl"))]
+    (.mkdirs (.getParentFile f))
     f))
 
 (defn- forget-everything! []
@@ -179,15 +188,86 @@
   ;; watching their conversation get rebuilt on a timer. The pin ends where the
   ;; connection does (`unwatch!`, which is http-kit's close handler).
   (sessions/touch! "t-watched")
-  (sessions/watch! "t-watched" (fn [_ _] nil))
-  (let [touched (:touched-at (get (sessions/live) "t-watched"))
-        later   (+ touched (* 100 sessions/idle-ttl-ms))]
-    (testing "however long nobody touches it, a watched session stays"
-      (is (= [] (sessions/sweep! later)))
-      (is (contains? (sessions/live) "t-watched")))
-    (testing "and when the window closes it is eligible again"
-      (sessions/unwatch! "t-watched" (first (get (deref (var-get #'sessions/watchers)) "t-watched")))
-      (is (= ["t-watched"] (sessions/sweep! later))))))
+  (let [bell (fn [_ _] nil)]
+    ;; THE BELL IS HELD HERE rather than dug back out of the table: the table is keyed by the
+    ;; fn now (`watch!`'s fourth line of documentation) and a case that asks it what it put
+    ;; there is testing the shape rather than the pin.
+    (sessions/watch! "t-watched" bell)
+    (let [touched (:touched-at (get (sessions/live) "t-watched"))
+          later   (+ touched (* 100 sessions/idle-ttl-ms))]
+      (testing "however long nobody touches it, a watched session stays"
+        (is (= [] (sessions/sweep! later)))
+        (is (contains? (sessions/live) "t-watched")))
+      (testing "and when the window closes it is eligible again"
+        (sessions/unwatch! "t-watched" bell)
+        (is (= ["t-watched"] (sessions/sweep! later)))))))
+
+(deftest a-watcher-whose-owner-is-gone-does-not-hold-the-session
+  ;; (`.scratch/memory-hygiene/` 票 02) A DOORBELL IS NOT A READER ONCE NOBODY CAN RING IT.
+  ;; `watch!`'s third argument is the owner, and the sweep asks it before it decides: without
+  ;; that question the last reader of a conversation that went away is a pin for as long as the
+  ;; process lives -- and the closure it holds (a socket, a page's whole folded payload) sits in
+  ;; memory with it.
+  (sessions/touch! "t-orphan")
+  (let [owner (atom true)
+        bell  (fn [_ _] nil)]
+    (sessions/watch! "t-orphan" bell (fn [] @owner))
+    (let [touched (:touched-at (get (sessions/live) "t-orphan"))
+          later   (+ touched (* 100 sessions/idle-ttl-ms))]
+      (testing "while the owner answers, it is a pin like any other"
+        (is (= [] (sessions/sweep! later)))
+        (is (contains? (sessions/live) "t-orphan")))
+      (testing "and the moment the owner says it is gone, the sweep hands the session back"
+        (reset! owner false)
+        (is (= ["t-orphan"] (sessions/sweep! later)))
+        (is (not (contains? (sessions/live) "t-orphan"))))
+      (testing "and the dead bell is FORGOTTEN, not merely ignored -- it held a closure"
+        (is (empty? (get (deref (var-get #'sessions/watchers)) "t-orphan")))))))
+
+(deftest pruning-answers-which-conversations-lost-a-reader
+  ;; The door that can see its own subscriptions end (`harness.edge.mux/detach!`) prunes THAT
+  ;; conversation rather than waiting for the sweeper, and it has to be able to name it: the
+  ;; answer is the ids it dropped something for, not a count.
+  (let [live  (fn [_ _] nil)
+        gone  (fn [_ _] nil)]
+    (sessions/watch! "t-live" live)
+    (sessions/watch! "t-live" gone (fn [] false))
+    (sessions/watch! "t-gone" gone (fn [] false))
+    (testing "one conversation"
+      (is (= ["t-gone"] (sessions/prune-watches! "t-gone")))
+      (is (= [] (sessions/prune-watches! "t-gone")) "and asking again finds nothing left"))
+    (testing "and it names the conversation whose DEAD bell it took out"
+      (is (= ["t-live"] (sessions/prune-watches! "t-live")))
+      (is (= 1 (count (get (deref (var-get #'sessions/watchers)) "t-live")))
+          "the live reader is still in the table -- pruning is not 'forget anything'"))
+    (testing "and the sweep's own form, once there is nothing dead left to take"
+      (is (not (contains? (set (sessions/prune-watches!)) "t-live"))
+          "a conversation whose readers are all alive is not a name it answers with")
+      (sessions/unwatch! "t-live" live))))
+
+(deftest putting-a-session-away-takes-its-record-ring-with-it
+  ;; (`.scratch/memory-hygiene/` 票 03) THE RING IS A CACHE OF JUST NOW, NOT OF HISTORY: a
+  ;; conversation that leaves this process leaves nothing in `harness.infra.stream`'s ring. Before
+  ;; this, those rows outlived their sessions -- 18 conversations' worth (11.19 MB) in a
+  ;; six-hour-old process, for ids nobody could name any more.
+  (sessions/touch! "t-ring")
+  (let [f (ring-file "t-ring")]
+    (stream/push! "t-ring" f "{\"type\":\"event\"}\n" nil
+                  {:row {:type "event"} :producer :request})
+    (is (= 1 (count (stream/after "t-ring" nil)))
+        "the ring keeps the line the writer just landed")
+    (sessions/drop! "t-ring")
+    (is (= [] (stream/after "t-ring" nil))
+        "and a session put away takes its row with it")
+    (is (str/includes? (slurp f :encoding "UTF-8") "event")
+        "while the line itself is where it always was -- the FILE (a reader with a cursor pulls it)")
+    (testing "and a conversation reborn under the same id starts its ring empty, like a fresh process"
+      (sessions/touch! "t-ring")
+      (is (= [] (stream/after "t-ring" nil)))
+      (stream/push! "t-ring" f "{\"type\":\"event\",\"n\":2}\n" nil
+                    {:row {:type "event" :n 2} :producer :request})
+      (is (= [1] (mapv :seq (stream/after "t-ring" nil)))
+          "and the numbering carries on from the file's own offset, not from zero"))))
 
 (deftest bytes-that-have-not-reached-the-record-hold-a-session
   (sessions/touch! "t-pending")
@@ -613,6 +693,41 @@
                (:interrupts (sessions/live-entry tid)))
             "the card survives a refresh because it is part of the conversation's state")))))
 
+(deftest a-run-this-process-answered-is-numbered-by-the-line-that-ended-it
+  ;; THE LIVE HALF OF `an-entry-is-numbered-by-the-record-line-it-arrived-in`. A session built
+  ;; from a finished file is numbered by the walk that read it; a run THIS PROCESS answered is
+  ;; numbered when its frames become the conversation -- `settle!` -- from the offset the writer
+  ;; answered for the terminal frame. Landing it where the write ANSWERS it (which is what the
+  ;; edge did until 2026-09-30) numbers NOTHING, because the entries are not in the table yet:
+  ;; every entry a run produced kept `:seq nil`, and `since` -- an entry with no number counts as
+  ;; after anything -- then answered the WHOLE conversation to a reader asking what it had
+  ;; missed. That reader merged it into the window it held, and the newest turn ended up in the
+  ;; MIDDLE of the transcript while the bottom of the page was an old turn.
+  (let [tid    "t-live-seq"
+        run    "r-live"
+        emit   (ag/outbound tid run)
+        frames (vec (concat (emit (ev/text-delta "答"))
+                           (emit (ev/run-end))))]
+    (sessions/append! tid run [seed])
+    (sessions/land-at! tid run (:id seed) 3)
+    (testing "the run's frames are not the conversation yet, and the action's entry has its line"
+      (is (= [3] (mapv :seq (sessions/display tid)))))
+    (testing "the terminal's line numbers them as they enter -- and the doorbell already sees it"
+      (let [rung    (atom [])
+            watcher (fn [_ _] (swap! rung conj (mapv :seq (sessions/display tid))))]
+        (sessions/watch! tid watcher)
+        (try
+          (sessions/settle! tid run frames 41)
+          (let [seqs (mapv :seq (sessions/display tid))]
+            (is (= 3 (first seqs))
+                "the action's own entry keeps the line its own row carried")
+            (is (= 41 (second seqs))
+                "and the run's entries take the number the writer answered for its terminal frame")
+            (is (every? some? (rest seqs))
+                (str "unnumbered entries after a live run: " (pr-str (remove some? (rest seqs))))))
+          (is (every? some? (last @rung))
+              "and a reader rung by `settle!` never sees a conversation whose newest entries have no numbers")
+          (finally (sessions/unwatch! tid watcher)))))))
 ;; ------------------------------------------------- a consumer rides the walk (ticket 02)
 
 (deftest a-fold-rides-the-one-walk-the-session-already-makes

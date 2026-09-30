@@ -1,5 +1,6 @@
 (ns harness.kernel.loop-test
   (:require [clojure.core.async :as async]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.fake :as fake]
@@ -27,13 +28,38 @@
          :unplaced (:unplaced ev)
          :seen     acc}
         (= :drained (:type ev))
-        (do (when-some [done (:done ev)] (deliver done true)) (recur acc))
+        (do (loop/answer-drain! ev) (recur acc))
         :else (recur (conj acc ev)))
       {:history nil :added nil :unplaced nil :seen acc})))
 
 (defn- drive
   ([provider messages] (drive provider messages nil))
   ([provider messages opts] (drain-chan (loop/run-chan provider messages opts))))
+
+(deftest a-consumer-that-answers-the-barrier-is-not-made-to-wait-for-it
+  ;; THE OBLIGATION `loop/run-chan`'S DOCSTRING STATES, as a COST rather than as a promise --
+  ;; which is the only way it can be a test: a consumer that answers the kernel's drain
+  ;; barrier finishes a run in the time the run takes, and a consumer that never answers waits
+  ;; out the deadline on EVERY barrier. Measured 2026-09-30 by `dev/scratch_drain_barrier.clj`,
+  ;; one scripted turn with no tools: 151ms answered against 5,182ms not. Seven readers had
+  ;; forgotten, and that wait -- not any shell, server or network -- was most of what made a
+  ;; full backend run 22 minutes (`harness.approval-test` 224s, `harness.session-tools-test`
+  ;; 122s, `harness.edge.ag-ui-test` 35s).
+  ;;
+  ;; THE BUDGET IS THE ASSERTION, and it is derived rather than picked:
+  ;; `harness.kernel.loop/drained!` waits AT MOST 5000ms per barrier, so anything comfortably
+  ;; under that can only mean the barrier was answered. 3000ms sits far below the deadline and
+  ;; far above the work this run does, and the gap between the two is what a machine would
+  ;; have to fall through to make this flaky.
+  (let [t0      (System/currentTimeMillis)
+        drained (drain-chan (loop/run-chan (fake/scripted [{:content "answered"}]) []
+                                           {:thread-id "t-drain-answered"}))
+        elapsed (- (System/currentTimeMillis) t0)]
+    (is (= :run/end (:type (last (:seen drained)))) "the run really ran to its end")
+    (is (< elapsed 3000)
+        (str "the barrier was answered rather than waited out (" elapsed
+             "ms; a consumer that answers costs the run's own time, one that does not costs "
+             "the deadline)"))))
 
 (defn- interrupt-id
   "The interrupt id of a park run's terminal event."
@@ -575,6 +601,94 @@
         "the run carried on with its own array, tool result and all")
     (is (some #(= "tool" (:role %)) history)
         "and the call the broken view would have cut off was answered")))
+
+;; ------------------------------------- a park an earlier process made
+;;
+;; THE RELEASE VALVE FOR THE 2026-09-29 BRICKING (session 9fbc5c8c). A model asked a
+;; question with `ask`; the run ended on the interrupt; the process died before anybody
+;; answered; and when the conversation was continued five days later the call had no
+;; park to answer it, so every run on that session was refused. The park is
+;; process-local on purpose (`harness.kernel.tools/park-approval!`), and that part is
+;; not what changed: what changed is that a call whose park is a function of its own
+;; arguments -- `ask`'s question, a fence's refusal -- is parked AGAIN and asked a
+;; second time, instead of leaving the conversation unanswerable.
+
+(defn- lost-ask-call
+  "A history from before a restart: the model asked, and NOTHING in this process ever
+  parked it. The call is written here rather than produced by a run because a run that
+  made it would also hold the park -- and what is being tested is the state a restart
+  leaves behind."
+  [call-id question]
+  [{:role "user" :content "go"}
+   {:role "assistant" :content ""
+    :tool_calls [{:id call-id :type "function"
+                  :function {:name "ask"
+                             :arguments (json/write-str
+                                         {:questions [{:key "port" :question question}]})}}]}])
+
+(deftest a-question-an-earlier-process-parked-is-asked-again
+  (let [thr       "t-reask"
+        question  "Which port should it listen on?"
+        history   (lost-ask-call "call_lost" question)
+        provider  (fake/scripted [{:content "never asked: the run stops on the question"}])
+        seen      (:seen (drive provider history {:thread-id thr}))
+        term      (last seen)
+        interrupt (first (:interrupts term))]
+    (testing "the run ends on the question rather than on a refusal"
+      (is (= :run/interrupt (:type term)) (str "saw " (pr-str (mapv :type seen))))
+      (is (= "call_lost" (:tool-call-id interrupt)))
+      (is (= :elicitation (:reason interrupt))))
+
+    (testing "the question comes back with it, so a card can be drawn again"
+      (is (= question (:prompt (:question interrupt)))))
+
+    (testing "and the parked record is the shape the elicitation endpoint reads"
+      (let [rec (tools/parked (:id interrupt))]
+        (is (= thr (:thread-id rec)))
+        (is (= "call_lost" (:tool-call-id rec)))
+        (is (= "ask" (:name rec)))
+        (is (= :elicitation (:reason rec)))
+        (is (= :model (:asked-by rec)) "flat, where `GET /api/elicitation` looks")
+        (is (= question (:prompt rec)))
+        (is (map? (:schema rec)))
+        (is (= (:question interrupt) (select-keys rec [:asked-by :prompt :schema])))
+            "the interrupt's question and the record's flat keys are the same map"))
+
+    (testing "the id is NEW: the dead one was minted for a park this process never made"
+      (is (not= "call_lost" (:id interrupt))))
+    (is (not-any? #(= :run/end (:type %)) seen) "the provider was never reached")
+
+    (testing "and the answer really lands: a resume of the new id is this call's result"
+      (let [answers {"port" "8080"}
+            {:keys [history seen]} (drive (fake/scripted [{:content "done"}])
+                                         history
+                                         {:thread-id thr
+                                          :resume [{:interrupt-id (:id interrupt)
+                                                    :verdict :approved
+                                                    :payload answers}]})]
+        (is (= :run/end (:type (last seen))))
+        (is (= ["- Which port should it listen on? -> 8080"]
+               (mapv :content (filter #(= "tool" (:role %)) history)))
+            "the person's answer is the call's result, in the model's own words")))))
+
+(deftest a-call-nothing-can-rebuild-is-still-refused-by-name
+  ;; THE OTHER HALF, and the reason the repair is a narrow one: `bash`'s park is the
+  ;; session's rule, not a function of the command, so a history left with its call
+  ;; unanswered has nothing to rebuild from. Refusing is still right -- and the sentence
+  ;; names the call rather than relaying the vendor's 400.
+  (let [thr      "t-reask-dead"
+        history  [{:role "user" :content "go"}
+                  {:role "assistant" :content ""
+                   :tool_calls [{:id "call_dead" :type "function"
+                                 :function {:name "bash"
+                                            :arguments "{\"command\": \"true\"}"}}]}]
+        {:keys [seen]} (drive (fake/scripted [{:content "never asked"}]) history
+                              {:thread-id thr})
+        err (last seen)]
+    (is (= [:run/start :run/error] (mapv :type (without-audit seen))))
+    (is (str/includes? (:message err) "call_dead"))
+    (is (nil? (tools/parked-for-call thr "call_dead"))
+        "nothing was parked for it, so nothing may be decided under its name")))
 
 ;; ------------------------------------------------------------- the idle guard
 ;;

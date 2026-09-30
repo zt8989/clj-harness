@@ -96,15 +96,30 @@ export type ListedRow = {
 /// every id in it has had a write issued for it -- which is what makes an id in it a row
 /// that is due rather than one nobody has asked for.
 ///
-/// AND THE ROWS THE LISTING NAMES ARE CANDIDATES TOO: an id LEAVES `titles` the moment the
-/// listing names it (the page's own live title is only there to name a row the store has
-/// not answered for yet -- `app.tsx`'s `forgetListedTitles`), and the row that has ARRIVED
-/// is exactly the row the second reason is about -- named but not yet sent to. `titles`
-/// still answers FIRST, so a session with no row at all is asked about before a listed
-/// one that is still catching up.
+/// AND ONLY THE PAGE'S OWN WRITES ARE CANDIDATES, so `titles` is the WHOLE list of them: a row
+/// whose send time is missing is this page's business exactly because THIS page wrote the thing
+/// that is missing from it.
 ///
-/// A ROW IS DUE IN EXACTLY TWO CASES, and both are about the STORE not having caught up
-/// with this page's own write:
+/// A ROW THE LISTING NAMES WITH NO SEND TIME, AND THAT THIS PAGE NEVER MINTED, IS NOT. It is
+/// another window's row, a fork's, a subagent's, a conversation that never had a first send --
+/// and the push carries its writes (`events.host`), so asking about it is asking again on
+/// behalf of a page that is not waiting for anything.
+///
+/// THE LISTED HALF USED TO BE A CANDIDATE TOO, and that is what turned this rule into a POLL.
+/// Measured on the owner's own home (2026-09-29): 126 of its 243 session rows have no
+/// `last_sent_at` -- rows older than the column, forks, subagents, conversations nobody ever
+/// sent to -- and every one of them was due, five times, on EVERY page load. Each ask lands a
+/// fresh listing, which re-arms the effect that made it, so the sidebar read `/api/projects`
+/// once every 400ms for as long as the budget lasted: seven such rows made 36 reads in
+/// eleven seconds, and the owner's report ("已经改成首拉+增量推，还是一直在调用") is that
+/// stream. `titles` already covers the row that has ARRIVED but is not yet sent to: while the
+/// store's title is missing the id stays in `titles` (`app.tsx`'s `forgetListedTitles` drops
+/// it only for a row the store can NAME), so the one row a person is waiting for is still
+/// asked about -- and everything else arrives by push.
+///
+/// A ROW IS DUE IN EXACTLY TWO CASES, both about the store not having caught up with a write
+/// THIS PAGE made -- and the candidates are only this page's own ids (`titles`), for the
+/// reason the header gives:
 ///
 ///   * it is not in the listing (the registration has not been read yet);
 ///   * it is, with no send recorded (the run's own write is not there yet).
@@ -120,8 +135,7 @@ export function nextAsk(
   rows: ReadonlyMap<string, ListedRow>,
   attempts: ReadonlyMap<string, number>,
 ): Ask | undefined {
-  const candidates = [...new Set([...titles, ...rows.keys()])];
-  const id = candidates.find((t) => {
+  const id = titles.find((t) => {
     const row = rows.get(t);
     const due = row === undefined || row.lastSentAt === null;
     return due && (attempts.get(t) ?? 0) < ASK_AGAIN_LIMIT;

@@ -321,7 +321,7 @@
                         false))]
          ;; AND THE TWO WAYS TO READ IT ARE TOLD NOW, AFTER THE LOCK -- a listener is the caller's
          ;; code, exactly like `lands`, so it must not run while the writer holds it.
-         (when ok? (kept! tid @landed line (:row opts) (:producer opts)))
+         (when ok? (kept! tid @landed (:row opts) (:producer opts)))
          (when (and ok? (some? lands))
            (try (lands @landed) (catch Throwable _ nil)))
          @landed)))))
@@ -334,10 +334,16 @@
   (atom {}))
 
 (defonce ^:private kept
-  ;; thread-id -> [item], oldest first, each `{:thread-id … :seq … :line …}`. BOUNDED, by the same
-  ;; reasoning the fact ring uses (`harness.edge.mux/fact-buffer-size`): this answers a reader that
-  ;; reconnects a moment later, NOT one that was away for a whole turn -- that reader PULLS from
-  ;; the FILE (`harness.edge.replay`), which is what the file is for.
+  ;; thread-id -> [item], oldest first, each `{:thread-id … :seq … :row … :producer …}`. BOUNDED, by
+  ;; the same reasoning the fact ring uses (`harness.edge.mux/fact-buffer-size`): this answers a
+  ;; reader that reconnects a moment later, NOT one that was away for a whole turn -- that reader
+  ;; PULLS from the FILE (`harness.edge.replay`), which is what the file is for.
+  ;;
+  ;; AND ONE SHAPE, NOT TWO (`.scratch/memory-hygiene/` ticket 03): the line's own bytes are NOT
+  ;; kept here. They used to be, beside the row, which meant every conversation this process had
+  ;; touched held its recent lines twice -- and the second copy bought nothing, because the ring's
+  ;; only production reader wants the ROW (`harness.kernel.session`'s process-wide listener), and
+  ;; a reader that wants bytes has the file.
   (atom {}))
 
 (defonce ^:private everyone
@@ -353,12 +359,14 @@
   "Remember ITEM for THREAD-ID (bounded) and hand it to every listener. RUNS OUTSIDE this
   namespace's lock: a listener is the caller's code, the same rule `lands` follows.
 
-  THE ITEM CARRIES BOTH SHAPES OF THE SAME LINE: `:line` is the bytes that reached the file
-  (what a wire reader wants) and `:row` is the map they came from, WHEN THE CALLER HAS ONE --
-  because an in-process reader should not have to parse back what it just handed over
-  (`.scratch/record-stream` ticket 04). `:producer` says who wrote it (ticket 03)."
-  [tid seq line row producer]
-  (let [item {:thread-id tid :seq seq :line line :row row :producer producer}]
+  THE ITEM CARRIES ONE SHAPE OF THE LINE, NOT TWO (`.scratch/memory-hygiene/` ticket 03): `:row`
+  is the map it came from, WHEN THE CALLER HAS ONE (`harness.edge.http/log!` does -- an in-process
+  reader should not have to parse back what it just handed over, ticket 04 of `.scratch/record-stream`;
+  a header line or a fork has no row), and THE BYTES ARE DELIBERATELY ABSENT. They are on the file,
+  and `row` re-serialized would not be them anyway (key order, whitespace -- see `after`). `:producer`
+  says who wrote it (ticket 03)."
+  [tid seq row producer]
+  (let [item {:thread-id tid :seq seq :row row :producer producer}]
     (swap! kept update tid (fn [k] (vec (take-last kept-per-thread (conj (or k []) item)))))
     (doseq [f (get @listeners tid)]
       (try (f item) (catch Throwable _ nil)))
@@ -394,7 +402,13 @@
 
   THE RING IS SHORT BY DESIGN (`kept-per-thread`): a reader that was away for a whole turn asks
   the FILE instead, and `harness.edge.replay` is that reader -- the one that can answer 'what did
-  I miss' without a bound."
+  I miss' without a bound.
+
+  AND THERE ARE NO BYTES IN THIS RING (`.scratch/memory-hygiene/` ticket 03): an item carries the
+  ROW the line came from, never the line itself. If what you want is the bytes as they reached
+  the file, READ THE FILE -- `harness.edge.replay` is that reader -- because `row` re-serialized
+  is a DIFFERENT string (key order, whitespace) and would be a silent lie about what was written.
+  Nobody puts a second copy of the bytes back into this table."
   [thread-id since]
   (let [items (or (get @kept (str thread-id)) [])]
     (if (nil? since)
@@ -411,6 +425,24 @@
   (let [tid (str thread-id)]
     (doseq [item (after tid cursor)] (f item))
     (listen! tid f)))
+
+(defn forget-kept!
+  "Forget what this namespace keeps for THREAD-ID. THE CONVERSATION IS GONE -- put away, swept:
+  `harness.edge.sessions`' `:put-away!` seam composes this with `fsync!`, so both doors out of the
+  session table come through here.
+
+  IT IS SAFE BECAUSE THE RING IS A CACHE OF JUST NOW, NOT OF HISTORY: a reader that holds a cursor
+  pulls the FILE (see `after`), and a conversation reborn under the same id starts its ring empty
+  -- which is the same shape this namespace has after a restart. Before this, a row outlived its
+  session: 18 conversations' worth of rows sat in `kept` in a six-hour-old process (11.19 MB), for
+  sessions nobody could name any more (`.scratch/memory-hygiene/` ticket 03).
+
+  THE LISTENERS ARE NOT TOUCHED, deliberately: a listener is somebody's doorbell (`listen!`
+  answers the way to stop it), not this namespace's memory, and dropping one here would silently
+  unplug a reader that is still there."
+  [thread-id]
+  (swap! kept dissoc (str thread-id))
+  nil)
 
 (defn reset-readers!
   "Forget every listener and everything kept -- what a test says between cases. The RECORD is

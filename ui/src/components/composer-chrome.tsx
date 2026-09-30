@@ -94,16 +94,19 @@ import { attachmentGuard } from "@/lib/attachments";
 import {
   choicesFor,
   gitStateFor,
+  gitStateIn,
   modelFor,
   setModel,
   switchBranch,
+  switchBranchIn,
   type Choices,
   type ModelAnswer,
 } from "@/lib/composer";
 import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
-import { bindThread, listSidebar, projectName } from "@/lib/projects";
+import { bindThread, projectName, type ProjectSummary } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
+import { isNewChatView } from "@/lib/thread-view";
 
 import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
@@ -185,19 +188,34 @@ export const HeldSessionContext = createContext<HeldSession | null>(null);
 
 const useHeldSession = (): HeldSession | null => useContext(HeldSessionContext);
 
+/// THE PROJECTS HALF OF THE SIDEBAR'S LISTING, as the PAGE holds it -- supplied by `App`,
+/// which is handed every listing the sidebar lands (`app.tsx`'s `onListed`: one HTTP read at
+/// mount, then a frame per host-level change).
+///
+/// SO THIS BAR READS NO LISTING OF ITS OWN, and that is the whole reason the context exists.
+/// It used to (`useRemote(listSidebar)`), and that was a second `GET /api/projects` for a bar
+/// that is mounted for every session opened before its first message -- the same answer,
+/// asked again, out of a route the page had already paid for (`.scratch/sidebar-ws-and-run-state`
+/// named it a known boundary; 2026-09-29 closed it). WHAT IT TAKES IS THE PROJECTS ALONE: the
+/// tasks in the same payload are conversations with no directory, and this picker is the thing
+/// that gives one.
+///
+/// EMPTY UNTIL THE FIRST LISTING LANDS (a page whose socket is down and whose mount read is
+/// still in flight), and an empty list draws no directory picker at all -- the same shape this
+/// bar had while its own fetch was in the air.
+export const SidebarProjectsContext = createContext<readonly ProjectSummary[]>([]);
+
+const useSidebarProjects = (): readonly ProjectSummary[] => useContext(SidebarProjectsContext);
+
 /// The directory and branch strip, shown only before the conversation starts.
 const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   const { t } = useTranslation("composer");
   // The fetch failures below are this side's fallback sentences (see
   // lib/projects.ts and lib/composer.ts), so they are drawn from `errors`.
   const { t: tErrors } = useTranslation("errors");
-  // THE PROJECTS HALF OF THE SIDEBAR'S LISTING, because that is what a session can
-  // be bound to: the tasks in the same payload are conversations with no directory,
-  // and this picker is the thing that gives one -- so lists them nothing to offer.
-  const projects = useRemote(
-    useCallback(() => listSidebar(tErrors), [tErrors]),
-  );
-  const git = useRemote(useCallback(() => gitStateFor(threadId, tErrors), [threadId, tErrors]));
+  // THE PROJECTS A SESSION CAN BE BOUND TO, from the page's copy of the sidebar's listing
+  // (`SidebarProjectsContext`) rather than from a read of this bar's own.
+  const projects = useSidebarProjects();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // WHETHER THIS SESSION EXISTS IN THIS HOME AT ALL -- null for every session it does,
@@ -209,21 +227,39 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
   // render a pick owes the person who made it, and it is dropped the moment the session
   // stops being held -- the server's answer takes over at the first send.
   const [picked, setPicked] = useState<string | null>(null);
+  /// THE DIRECTORY THIS BAR IS ABOUT when the session has no row to ask about: the page's own
+  /// memory of one for a session it minted (both doors remember and write NOTHING -- see
+  /// `HeldSessionContext`), or the pick this bar just made. NULL is the ordinary answer, for
+  /// every session the store already knows.
+  ///
+  /// IT IS ALSO WHAT MAKES THE BRANCH APPEAR: the loader below is keyed on it, so a pick
+  /// re-asks -- for the directory that was picked, rather than for a session that does not
+  /// exist (`.scratch/composer-new-session-bar/`).
+  const heldDir = held === null ? null : (held.dir ?? picked ?? null);
+  // AND THE BRANCH IS READ FOR WHATEVER THE BAR IS NAMING. `gitStateFor` asks the server about
+  // a SESSION, and for a session this page minted there is nothing to ask: no row names it, so
+  // the answer is `{dir: nil}` however real the repository in front of it. `gitStateIn` is the
+  // other half of that question, and the server's `project/listed-dir` is its gate.
+  const git = useRemote(
+    useCallback(
+      () => (heldDir === null ? gitStateFor(threadId, tErrors) : gitStateIn(heldDir, tErrors)),
+      [heldDir, threadId, tErrors],
+    ),
+  );
 
   // The label is the last path segment -- a row has to be scannable -- and the
   // whole path rides along as the hint: it is what the row is searched by (a
   // person remembers `workspace`) and what it shows when the list is open.
-  const dirs = (projects.data?.projects ?? []).map((p) => ({
+  const dirs = projects.map((p) => ({
     value: p.path,
     label: projectName(p.path),
     hint: p.path,
   }));
-  /// THE DIRECTORY THIS BAR NAMES. THREE SOURCES, in this order, and the order is the
-  /// whole of it: a session the page is HOLDING has no binding to read -- `/api/git`
-  /// answers `{dir: nil}` for an id this home has never heard of, which is the honest
-  /// answer and the wrong one to draw -- so the page's pending directory comes first,
-  /// then the pick that was just made, and only then the server's binding.
-  const current = held === null ? (git.data?.dir ?? "") : (held.dir ?? picked ?? "");
+  /// THE DIRECTORY THIS BAR NAMES: the one this page is holding, for a session it minted (there
+  /// is no binding to read); the server's own answer for every session the store knows. WHICH
+  /// QUESTION WAS ASKED is the loader's business above, and the two agree by construction --
+  /// both are the directory this shows.
+  const current = held === null ? (git.data?.dir ?? "") : (heldDir ?? "");
 
   /// PUT THIS SESSION IN DIR. Two verbs, in one function, because the picker asks one
   /// question and which verb answers it is a fact about the SESSION rather than about the
@@ -249,7 +285,9 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
       // The branch belongs to the directory, so the new one has to be read back:
       // keeping the old answer would name a branch the session is no longer on.
       git.reload();
-      projects.reload();
+      // AND THE PROJECT LIST NEEDS NO RELOAD, unlike the branch: `POST /api/project` rings the
+      // host stream (`rung`), so the pushed listing is what re-draws this bar's options -- and
+      // binding a session into a project that is already in that list does not change the list.
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -262,7 +300,11 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
     setBusy(true);
     setError(null);
     try {
-      await switchBranch(threadId, branch, tErrors);
+      // THE SAME VERB, ADDRESSED AT WHATEVER OWNS THE BRANCH: the directory for a session that
+      // does not exist yet, the session itself otherwise.
+      await (heldDir === null
+        ? switchBranch(threadId, branch, tErrors)
+        : switchBranchIn(heldDir, branch, tErrors));
       git.reload();
     } catch (failure: unknown) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -275,7 +317,16 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
 
   return (
     <div data-slot="composer-context" className="flex flex-col gap-1 px-1.5 pt-1 pb-0.5">
-      <div className="flex items-center gap-4">
+      {/* THE ROW HOLDS ITS HEIGHT FROM THE FIRST PAINT, whether or not the answer has
+          arrived: the listing that fills these pickers lands a moment after this bar draws,
+          and a row that GROWS when it does moves the whole composer -- which is centred while
+          the session is new, so every late arrival is half its own height of jump. The rule
+          and the reason are the status strip's (`.scratch/mobile-adaptation` 04: 'the strip
+          holds its row from the first paint, so a number arriving late cannot shove the
+          composer'). `min-h-5` IS THE TALLEST THIS ROW EVER IS -- a trigger that has words
+          in it (20px, `text-sm`'s line box) -- so neither the listing arriving nor a pick
+          moves anything: a picker with no label yet is `min-h-4`'s 16px of icon. */}
+      <div className="flex min-h-5 items-center gap-4">
         {dirs.length > 0 && (
           <Picker
             slot="composer-directory"
@@ -788,7 +839,14 @@ const SkillPicker: FC<{ threadId: string }> = ({ threadId }) => {
 /// copied element, so the declaration lives here and `thread.aui.tsx` is untouched.
 export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
   const threadId = useThreadId();
-  const started = useAuiState((s) => s.thread.messages.length > 0);
+  // WHETHER THIS IS THE NEW-CHAT COMPOSER, and it is the LAYOUT's answer rather than a
+  // second count of the messages. `lib/thread-view.ts` owns the question, and the two
+  // halves of the screen must not answer it differently: counting messages here said a
+  // session whose history is still in flight WAS a new chat, so for that instant the
+  // frame drew the project/branch bar over a docked conversation, and the footer kept the
+  // `pb-4 md:pb-6` strip `styles.css` removes once this attribute is on
+  // (`.scratch/composer-loading-state`).
+  const started = useAuiState((s) => !isNewChatView(s));
   // The attachment rule's refusal, if the last file offered was turned away. THIS
   // IS THE ONLY PLACE A REFUSAL IS DRAWN -- both reasons a file can be refused
   // arrive here (see lib/attachment-rules.ts), which is what keeps "what a refusal

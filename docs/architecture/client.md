@@ -89,6 +89,11 @@ lib/
   turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、它做了几次调用几条消息、
                     摘要那行写什么。**零 import**（`turnBounds` / `turnIsSettled` /
                     `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
+  thread-view.ts    「这一屏是新建的，还是已经在会话里」这道题（`isNewChatView`）：布局按它决定
+                    composer 居中还是贴底，composer 的 chrome 按它决定画不画项目/分支条、
+                    `ui/src/styles.css` 按它决定收不收 footer 那 16–24px。**一处定义、两处读**——
+                    它原先是两份（布局一份、composer 那份数消息），两份的差额就是「加载中」那
+                    第三种形态（`.scratch/composer-loading-state/`）
   picker.ts         选择器那份清单的**过滤与分组**：查什么（标签 / hint / 组名）、
                     同组的连续段怎么并、顺序为什么不动。**零 import**，同样被 UI 套件直接测
   reasoning-preview.ts  思考行那一行字说的是什么（想完了说**首行**，还在想就把**已经到达的那一段**
@@ -257,9 +262,12 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   **列表首次走 HTTP、之后全靠推送**（`.scratch/sidebar-ws-and-run-state` 票 02）：挂载时一次
   `GET /api/projects`（socket 连不上时那颗刷新键是兜底），此后每一个 host 级变化——run 起止、别窗
   发送、项目增删、归档——都由 `events.host` 推来（ADR 0004），**切换会话不再重取**（当年重取的理由
-  是 mtime 失真，那个理由随体积/mtime 一起退场了）。唯一还按需再问的是**懒创建**那一格：侧边栏握着
-  一个「有标题、列表里还没有、也还没跑完」的会话时会自己再问一次库（`asked` ref，每个 id 每次页面
-  加载至多 5 次，所以成不了环；见 `lib/sidebar-refetch.ts`）。
+  是 mtime 失真，那个理由随体积/mtime 一起退场了）。唯一还按需再问的是**懒创建**那一格：侧边栏只为自己
+  铸的那些会话再问——**「有标题」就等于「本页刚写过」**（`app.tsx` 的 `liveTitles` 只收本页铸、且已经发过第
+  一句的那些）——而那之后至多 5 次（`asked` ref，每个 id 每次页面加载；见 `lib/sidebar-refetch.ts`）。
+  **列表里「有行、没记发送时间」的别的会话不再是候选**（2026-09-29）：它们是别人的行、fork、子代理、没人发过
+  的会话，推送负责它们；把它们当候选让这条规则变成了轮询——主人那句「已经改成首拉+增量推，还是一直在调用」
+  就是它（实测：7 条这样的行，一次页面加载 36 次 `GET /api/projects`，每 400ms 一次）。
 - **两个块，一个动词，而且它不立刻建会话。** 「新建任务」与项目行那颗「新建会话」**都只铸一枚 id**
   （`lib/id.ts`，就是 `@ag-ui/client` 自己导出的 `randomUUID()` —— AG-UI 的设计就是客户端铸 thread-id，
   它的 `AbstractAgent` 也是 `threadId ?? v4()`；而**不能**用 `crypto.randomUUID`：那个只在安全上下文有，
@@ -319,8 +327,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
   左上角那颗浮标把它打开（那颗归 `app.tsx` 画，因为窄窗折起来的是隐藏子树，画不了一颗要被看见的按钮）。
   三处出口共用 `SIDEBAR_ID`（`components/sidebar-toggle.tsx`，它们与它们约定的事都写在那儿）。
 - **折 ≠ 卸载**，而且这是正确性、不是省事：`sidebar.tsx` 的挂载读是**侧栏那份** `GET /api/projects`
-  （composer 的目录选择器另有一份自己的，见票 02 的走查说明），挂载恢复
-  正是从那一次读取里知道「记住的那一场还在不在」（`app.tsx` 的 `onListed`）。手机宽的窗口一开就是折着的，
+  （composer 的目录选择器曾经另有一份自己的，2026-09-29 起它读页面这一份——`SidebarProjectsContext`），挂载恢复
   卸载它等于让**这些窗口恢复不了任何东西**，记住的 id 一直陈旧到有人把列表展开；列表自己那份状态
   （滚到哪儿、哪个项目是展开的）也会每折一下丢一次。
 - **窄窗（< `lg`）是断点，不是第二份状态**：侧边栏 `absolute` 浮在对话上、盖一层背板，所以「多宽算窄」
@@ -505,8 +512,9 @@ abort 一次两段都停，所以始终只有一个在飞的东西），只在�
 - **会话开始之后，composer 底下不留空隙**：抄来那份 footer 带着上游的 `pb-4 md:pb-6`，于是停靠的
   composer 与窗口底边之间留着 16–24px 的页面底色——一段读起来像「剩下来的地方」的空白。
   规则写在 `ui/src/styles.css`：`.aui-thread-viewport-footer:has([data-started]) { padding-bottom: 0 }`，
-  `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框在会话有消息时挂上），
-  首次会话居中的时候仍是上游的间距。
+  `:has()` 把范围钉在**已开始**那一态（`data-started` 由 composer 那圈框挂上，判据是 `lib/thread-view.ts`
+  的 `isNewChatView`——与布局决定居中还是贴底的**是同一句**，所以「这场会话的历史还在读」那一瞬
+  也贴底、也不留空隙），首次会话居中的时候仍是上游的间距。
 
 抄进来的清单（**对账是读 `LOCAL:` 标注**——i18n 那批落地之后这些文件就地改，逐字节 diff 不再是手段）：
 

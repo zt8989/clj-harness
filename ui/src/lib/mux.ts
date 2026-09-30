@@ -178,6 +178,23 @@ const taskSubscriptions = new Map<string, Set<(task: TaskFrame) => void>>();
 /// takes it away.
 const openListeners = new Set<() => void>();
 
+/// ASKED WHEN THE SOCKET HAS BEEN AWAY AND IS BACK, for a reader whose own connection the
+/// server cannot watch.
+///
+/// THE TRAJECTORY STREAM IS THAT READER (`.scratch/memory-hygiene/` 票 02): it is a long-lived
+/// HTTP response, and http-kit reports NO close for one -- `open?` stays true after the reader
+/// is gone (measured) -- so the doorbell that pushes into it is not owned by that socket at
+/// all. It is owned by THIS page's downlink subscription: when the socket goes, the server
+/// prunes that doorbell and the stream goes quiet, so coming back is a gap only a fresh answer
+/// closes -- the repair every pane owes after a reconnect (`docs/rules/panel-data.md`). Answers
+/// the way to stop listening.
+export function onDownlinkOpen(reader: () => void): () => void {
+  openListeners.add(reader);
+  return () => {
+    openListeners.delete(reader);
+  };
+}
+
 /// HOW FAR EACH CONVERSATION'S FACT STREAM HAS BEEN READ -- the `:seq` of the last fact this
 /// page saw, WHICH IS A RECORD LINE NUMBER (`harness.edge.mux/facts-after`), not a counter the
 /// sender keeps. A reconnecting socket re-declares it (`factSince`), and it is a SEPARATE number

@@ -29,6 +29,10 @@
   ;; AND THE FACT RING IS THE SAME KIND OF THING (ticket 05), for the same reason: it outlives a
   ;; connection on purpose, so a case must not inherit another case's remembered facts.
   (reset! (var-get #'mux/facts) {}))
+  ;; AND THE SESSION DOORBELLS (`.scratch/memory-hygiene/` 02): a case that left one behind pins
+  ;; its conversation for the rest of the run, because that is exactly what a reader IS -- so the
+  ;; next case must not inherit it any more than it inherits a connection.
+  (reset! (var-get #'sessions/watchers) {})
 
 (use-fixtures :each (fn [f]
                       (forget-everything!)
@@ -102,6 +106,90 @@
       (is (nil? (mux/channel "tok-e")))
       (sessions/append! "mux-e" "ge" [(user "e1" "after detach")])
       (is (= before (count @sent)) "a released connection is rung no more"))))
+
+;; ------------------------------------------ what owns a doorbell (`.scratch/memory-hygiene/` 02)
+
+(defn- bells
+  "The doorbells registered for THREAD-ID right now -- nil when the table has no row for it."
+  [thread-id]
+  (get (deref (var-get #'sessions/watchers)) (str thread-id)))
+
+(deftest a-doorbell-belongs-to-the-connection-that-registered-it
+  ;; A DOORBELL THAT OUTLIVES ITS CONNECTION IS NOT A READER. It holds the connection's
+  ;; closure, and `watched?` counts it, so the conversation is pinned in memory for as long as
+  ;; the process lives. Measured on the live process before this: 199 doorbells over 32
+  ;; conversations with 2 connections and 5 subscriptions.
+  (sessions/touch! "mux-own")
+  (let [ch (fake-channel (atom []))]
+    (mux/attach! "tok-own" ch)
+    (mux/subscribe! "tok-own" "mux-own" (fn [] nil))
+    (testing "a subscription is a reader"
+      (is (= 1 (count (bells "mux-own")))))
+    (testing "and the connection going away takes it"
+      (mux/detach! "tok-own")
+      (is (empty? (bells "mux-own")) "the ROW is gone, not merely an empty set"))))
+
+(deftest reconnecting-with-a-new-token-does-not-stack-doorbells
+  ;; The count must never be more than the live subscriptions -- a page that reconnects gets a
+  ;; new token, and the old socket's bell is what used to stay behind.
+  (sessions/touch! "mux-recon")
+  (mux/attach! "tok-1" (fake-channel (atom [])))
+  (mux/subscribe! "tok-1" "mux-recon" (fn [] nil))
+  (mux/attach! "tok-2" (fake-channel (atom [])))
+  (mux/subscribe! "tok-2" "mux-recon" (fn [] nil))
+  (is (= 2 (count (bells "mux-recon"))) "two connections, two subscriptions, two doorbells")
+  (mux/detach! "tok-1")
+  (is (= 1 (count (bells "mux-recon"))) "the old token's bell went with the old socket")
+  (mux/detach! "tok-2")
+  (is (empty? (bells "mux-recon"))))
+
+(deftest a-token-that-comes-back-releases-what-the-earlier-socket-left
+  ;; `attach!` promised 'replaces any set an earlier connection under the same name left
+  ;; behind'. The SET went; its doorbells stayed, and nothing could ever end them -- the table
+  ;; had no row pointing at them any more.
+  (sessions/touch! "mux-twice")
+  (mux/attach! "tok-twice" (fake-channel (atom [])))
+  (mux/subscribe! "tok-twice" "mux-twice" (fn [] nil))
+  (is (= 1 (count (bells "mux-twice"))))
+  (mux/attach! "tok-twice" (fake-channel (atom [])))
+  (is (not (mux/subscribed? "tok-twice" "mux-twice")) "the new socket watches nothing yet")
+  (is (empty? (bells "mux-twice")) "and the old socket's bell did not survive it"))
+
+(deftest subscribing-a-connection-that-is-gone-registers-nothing
+  ;; The close can land between the handshake and the subscribe that follows it. Registering
+  ;; the doorbell anyway is an orphan, and writing the row anyway mints a connection with no
+  ;; channel -- which nothing can ever detach.
+  (sessions/touch! "mux-dead")
+  (is (false? (mux/subscribe! "tok-ghost" "mux-dead" (fn [] nil))))
+  (is (empty? (bells "mux-dead")))
+  (is (not (contains? (mux/connections*) "tok-ghost"))))
+
+(deftest watching-answers-whether-anybody-is-reading
+  ;; 'Is anybody subscribed to this conversation' -- the question the trajectory stream names as
+  ;; its owner, because its own reader cannot be observed at all.
+  (sessions/touch! "mux-any")
+  (is (false? (mux/watching? "mux-any")) "nobody yet")
+  (mux/attach! "tok-a" (fake-channel (atom [])))
+  (mux/subscribe! "tok-a" "mux-any" (fn [] nil))
+  (is (true? (mux/watching? "mux-any")))
+  (mux/attach! "tok-b" (fake-channel (atom [])))
+  (mux/subscribe! "tok-b" "mux-any" (fn [] nil))
+  (mux/detach! "tok-a")
+  (is (true? (mux/watching? "mux-any")) "the other socket is still reading")
+  (mux/detach! "tok-b")
+  (is (false? (mux/watching? "mux-any"))))
+
+(deftest a-doorbell-owned-by-the-subscription-dies-with-it
+  ;; This is the trajectory stream's shape, asserted where the release happens: the bell is owned
+  ;; by 'somebody is subscribed to this conversation', so a detach takes it THERE rather than at
+  ;; the next sweep -- the ticket's 'no need to wait for the idle limit'.
+  (sessions/touch! "mux-owned")
+  (mux/attach! "tok-o" (fake-channel (atom [])))
+  (mux/subscribe! "tok-o" "mux-owned" (fn [] nil))
+  (sessions/watch! "mux-owned" (fn [_ _] nil) (fn [] (mux/watching? "mux-owned")))
+  (is (= 2 (count (bells "mux-owned"))) "the stream's bell rides beside the subscription's")
+  (mux/detach! "tok-o")
+  (is (= 0 (count (bells "mux-owned"))) "both went: one by `unwatch!`, one by the prune"))
 
 (deftest a-stale-generation-is-told-the-window-is-over
   (sessions/touch! "mux-f")

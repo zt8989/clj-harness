@@ -130,3 +130,33 @@ export async function switchBranch(threadId: string, branch: string, t: Translat
   if (!res.ok) throw new Error(await reasonFrom(res, t));
   return res.json();
 }
+
+/// WHAT A DIRECTORY IS AS A WORKING TREE -- `GET /api/git?dir=..`.
+///
+/// THE SAME QUESTION `gitStateFor` ASKS, ABOUT A DIRECTORY INSTEAD OF A SESSION, and the one
+/// caller that needs it is a session this page MINTED AND HAS NOT BOUND: its directory lives in
+/// this page's memory (the composer's picker and the sidebar's "New session" both remember one
+/// and write nothing), no row names it, and `?threadId=` answers `{dir: nil}` -- correctly, for
+/// an id this home has never heard of. So the branch strip could not draw at all before the
+/// first send, however real the repository in front of it. The server answers this form only
+/// for a directory it lists as a project, which is exactly the menu the picker offers.
+export async function gitStateIn(dir: string, t: Translate): Promise<GitState> {
+  const res = await fetch(`${API_BASE}git?dir=${encodeURIComponent(dir)}`);
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  return res.json();
+}
+
+/// MOVE A DIRECTORY ONTO BRANCH -- `POST /api/git {dir, branch}`: the same verb as
+/// `switchBranch`, for a directory whose session does not exist yet. A branch belongs to the
+/// WORKING TREE rather than to the conversation, so this is a real checkout now, and it is the
+/// same `git checkout` (no --force, git's own refusal sentence) picking a branch always was.
+/// It writes no audit line: there is no session log to put one in yet.
+export async function switchBranchIn(dir: string, branch: string, t: Translate): Promise<GitState> {
+  const res = await fetch(`${API_BASE}git`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir, branch }),
+  });
+  if (!res.ok) throw new Error(await reasonFrom(res, t));
+  return res.json();
+}

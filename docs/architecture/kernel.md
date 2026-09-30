@@ -185,7 +185,8 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 ```clojure
 {:description string :parameters JSON-Schema :required [kw..] :run (fn [args] string)}
-;; 另有可选标记：:fence-paths（受围栏约束的文件工具）、:requires-approval（调用即 park）
+;; 另有可选标记：:requires-approval（调用即 park）、:park-reason（工具自己声明的 park 规则，围栏走这条）
+;; 与 :park-question（工具自己声明的「我要问一句」：题面是参数的函数，所以重启后还能再问一遍）
 ```
 
 **表与读表的缝住在一起**，因为它们是同一件事的两半：缝决定一次调用意味着什么，表说有什么可调。
@@ -197,8 +198,8 @@ provider 的前缀缓存——它是 provider 的约束，放在 provider 层。
 
 | 模式 | 文件工具 | 两种模式都服务 | 其余 |
 |---|---|---|---|
-| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:fence-paths`） | `glob` `todo_write` `todo_read` `web_fetch` `web_search` | `ask` `bash` `eval` `job` `job_output` `job_kill` `job_list` `skill` `write` |
-| `:str-replace` | `read` `write` `edit`（都带 `:fence-paths`） | 同上 | 同上（`job_list` 也在那一列） |
+| `:hashline`（**默认**） | `read` `replace` `insert` `grep` `undo_last_replace`（都带 `:park-reason`） | `glob` `todo_write` `todo_read` `web_fetch` `web_search` | `ask` `bash` `eval` `job` `job_output` `job_kill` `job_list` `skill` `write` |
+| `:str-replace` | `read` `write` `edit`（都带 `:park-reason`） | 同上 | 同上（`job_list` 也在那一列） |
 
 **中间一列是「与编辑无关」的五个**：`glob` 列的是**路径**，而路径没有锚点可言（所以它在
 `harness.cap.glob`，不在 `harness.cap.hashline.*` 底下）；`todo_write` 碰的是**本会话的清单**，不是文件系统
@@ -316,6 +317,17 @@ thread-id → {:added {name tool}   ; presence：本会话贡献的定义
 
 审批状态全在进程内存（`parked-registry`：interrupt-id → 记录），重启即失；
 拿一个本进程没 park 过的 interruptId 来 resume 会被**明确拒绝**，不猜。
+
+**但丢掉 park 不等于丢掉问题。** 一次 run 起手读一遍历史里**没人回答**的调用（`unanswered-tool-calls`），
+三种下场：本进程还 park 着它 ⇒ 把同一个问题再问一遍（同一条 interrupt）；本进程没有、而这条调用的 park
+是它**参数的函数** ⇒ `tools/repark!` 不执行任何东西就把 park 重新造出来、换个新 interrupt id 再问一遍
+（两条声明能这么重建：围栏/审批的 `:park-reason`、`ask` 的 `:park-question`——题面就在调用的参数里）；
+两条都不成立（服务器的 elicitation、这场会话已经不服务的工具）⇒ **按名字拒绝整条 run**，绝不猜一个答案。
+2026-09-29 那次会话 `9fbc5c8c` 就是这么锁死的：`ask` 停在卡上，进程换了，人来答时那个 id 早已无人认领。
+**另一条路是读**：换进程之后人是**打开那场会话**（没有 run 会起来，而 `parked` 的会话 composer 是关着
+的），所以窗口把对话交出去之前也走一遍同样的重建（`harness.edge.sessions/revive-parks!`），而且用
+**对话自己写下的那个 id**——那张卡于是还答得上，见 [edge](edge.md) 的「一张卡的名字要能在新进程里
+兑现」。
 
 **不做超时，也不做跨进程持久化**：人一直不响应，这个 thread 就一直待决——这是可接受的语义，
 不是缺陷（interrupt 也不填 `expiresAt`，延续本仓「不写 sleep、不重试」的纪律）。

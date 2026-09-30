@@ -59,6 +59,8 @@ import { threadMessagesSuite } from "./suites/thread-messages";
 import { timeoutSuite } from "./suites/llm-timeout";
 import { normalizationSuite } from "./suites/normalization";
 import { composerTodosSuite } from "./suites/composer-todos";
+import { composerStateSuite } from "./suites/composer-state";
+import { composerContextBarSuite } from "./suites/composer-context-bar";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -76,7 +78,7 @@ import { composerTodosSuite } from "./suites/composer-todos";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -468,7 +470,10 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// unnecessary: `events.host` carries a run's start and its end now, so a `running` that
 /// is still true is a run in flight, not a stale snapshot. One case replaced them
 /// (`an-unlisted-row-with-no-minted-title-is-asked-about-too`, the listed-row half of the
-/// candidates), which is why the count lands one lower rather than two.
+/// candidates), which is why the count lands one lower rather than two. THAT LISTED-ROW HALF
+/// WAS WRONG, and 2026-09-29 replaced it one-for-one: a row the listing names with no send
+/// time, that this page never minted, is not this page's write to wait for -- chasing it made
+/// the rule a poll (`a-listed-row-this-page-did-not-mint-is-never-asked-about`).
 ///
 /// ...164 -> 166: the `stats` suite's two cases for `.scratch/session-numbers-in-the-store`
 /// -- the BUG (a payload that had only ever been pushed drew the raw key `stats.turns`) and
@@ -502,7 +507,23 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// cases pin the folded line's words in both languages, the three shapes of the detail, and
 /// (as source, since this run has no DOM) the fold, the two facts it re-asks on, and the fact
 /// that nothing on a timer asks it.
-const EXPECTED_CASES = 183;
+/// ...183 -> 185: the `composer-state` suite -- WHICH OF THE COMPOSER'S TWO STATES A SCREEN IS
+/// IN (`.scratch/composer-loading-state`). One case is the decision table itself, every row a
+/// literal state; the row that mattered -- an empty thread whose history is being read is NOT a
+/// new chat -- is the one the frame used to get wrong by counting messages. The other case reads
+/// the two sources: the frame asks that one function, and the question is defined once. The 24px
+/// strip under the docked composer and the bar that must not be over it are the browser
+/// walkthrough's (one is CSS, the other a live runtime, and this run has neither).
+/// ...185 -> 187: the `composer-context-bar` suite -- the strip above the composer while the
+/// session it belongs to DOES NOT EXIST YET (`.scratch/composer-new-session-bar`). One case
+/// pins that the branch is asked about the DIRECTORY the page is holding rather than about a
+/// minted id the server has no row for (which is why no branch was drawn at all before the
+/// first send), and that picking one is addressed the same way. The other pins the two class
+/// strings that stop the centred composer being shoved by a late answer: the row holds its
+/// height, and the empty suggestions row is display:none instead of eating a `gap-4`. Both are
+/// source reads -- the bar is not exported and fetches on mount -- and the 8px of jump each one
+/// removes was measured in a real browser.
+const EXPECTED_CASES = 188;
 
 let total = 0;
 for (const suite of SUITES) {

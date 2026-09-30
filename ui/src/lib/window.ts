@@ -284,6 +284,29 @@ export function prepended(window: Window, frame: WindowFrame): Window {
   };
 }
 
+/// WHETHER A WINDOW'S NUMBERS RUN FORWARD -- the property every copy this side BUILT has, and the
+/// one a DAMAGED copy does not. Every path that puts entries in (`windowFrom`, `merged`,
+/// `prepended`) keeps them in the order the server minted, so a copy whose numbers go BACKWARDS
+/// can only have been built by a rule that trusted a frame it should not have: on 2026-09-30 a
+/// server whose entries had no numbers answered `since` with the WHOLE conversation, the older
+/// entries were appended at the end (`merged`'s "an id this copy has never seen goes at the end"),
+/// and the newest turn ended up in the MIDDLE while the bottom of the page was an old turn.
+///
+/// A NULL NUMBER IS NOT OUT OF ORDER: an entry the server has not numbered yet (`seq: null` =
+/// "still in the writer's queue") has nothing to be compared WITH, and a copy built by an older
+/// server or by a `rebuild` read has no numbers at all -- those are left to the rules that built
+/// them.
+const inOrder = (entries: readonly WindowEntry[]): boolean => {
+  let highest: number | null = null;
+  for (const entry of entries) {
+    const seq = entry.seq;
+    if (typeof seq !== "number") continue;
+    if (highest !== null && seq < highest) return false;
+    highest = seq;
+  }
+  return true;
+};
+
 /// ALIGN WITH A TAIL PAGE, keeping the reader's place.
 ///
 /// THE TWO ANSWERS ARE TWO CASES, and the difference is whether the page reaches back to
@@ -298,6 +321,18 @@ export function prepended(window: Window, frame: WindowFrame): Window {
 ///               outside it are REPORTED (`rebuilt`), not dropped in silence.
 export function aligned(window: Window, frame: WindowFrame): { window: Window; effect: Effect } {
   const page = windowFrom(frame);
+  if (!inOrder(window.entries) && page.entries.length > 0) {
+    // A COPY WHOSE NUMBERS GO BACKWARDS IS NOT A WINDOW (`inOrder`), and merging the page into it
+    // would keep the wrong order for as long as the copy lives. So it is REBUILT from the page --
+    // the same answer, and the same notice, as the case below: what was on screen is dropped and
+    // the count says how much. THIS IS THE ONLY WAY SUCH A COPY IS EVER REPAIRED, which is why
+    // the rule lives here: the page re-reads a window it holds when it is shown again
+    // (`app.tsx`), a reload opens a new one, and both go through this function.
+    //
+    // AN EMPTY PAGE IS NOT AN ANSWER: a conversation with nothing to show must not wipe what the
+    // reader has, so the rebuild waits for a page that has entries.
+    return { window: page, effect: { kind: "rebuilt", dropped: window.entries.length } };
+  }
   if (window.cursor === null || page.baseSeq === null || page.baseSeq <= window.cursor) {
     // CONTIGUOUS: keep what we hold, add what the page adds. `baseSeq` stays ours --
     // this copy still holds entries in front of the page's first one.

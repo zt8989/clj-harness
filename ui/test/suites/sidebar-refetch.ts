@@ -98,15 +98,21 @@ const cases: Case[] = [
     },
   },
   {
-    name: "an-unlisted-row-with-no-minted-title-is-asked-about-too",
+    name: "a-listed-row-this-page-did-not-mint-is-never-asked-about",
     run: async () => {
-      // THE LISTED HALF OF THE CANDIDATES, stated on its own: by the time the listing
-      // names a row the page has stopped minting a name for it (`forgetListedTitles`,
-      // because the store's own title is the authority from then on), so a rule whose only
-      // candidates were the minted ids could never ask about a listed row at all.
-      const ask = nextAsk(titles(), listedUnsent("s1"), noAttempts);
-      expect(ask).toEqual({ id: "s1", attempt: 1, after: 0 });
-      // AND A SETTLED ROW THE PAGE DID NOT MINT IS NOTHING TO ASK ABOUT.
+      // THE OTHER HALF OF THE CANDIDATES, and the one that turned this rule into a POLL: a
+      // row the listing names with no send time, that THIS page never minted, is not a write
+      // this page is waiting for. It is another window's row, a fork's, a subagent's, a
+      // conversation nobody ever sent to -- `last_sent_at` is NULL for 126 of the owner's 243
+      // rows -- and whatever happens to it arrives by PUSH (`events.host`).
+      expect(nextAsk(titles(), listedUnsent("s1"), noAttempts)).toBeUndefined();
+      // AND ASKING AGAIN CHANGES NOTHING, which is what makes this a stop rather than a
+      // delay: the attempts map is not what was holding the ask back. Each ask that DID go
+      // out landed a fresh listing, which re-armed the effect that made it -- so with seven
+      // such rows the sidebar read `/api/projects` 36 times in eleven seconds, every 400ms
+      // by measurement (2026-09-29).
+      expect(nextAsk(titles(), listedUnsent("s1"), new Map([["s1", 4]]))).toBeUndefined();
+      // AND A SETTLED ROW THE PAGE DID NOT MINT IS NOTHING TO ASK ABOUT EITHER.
       expect(nextAsk(titles(), listed("s1"), noAttempts)).toBeUndefined();
     },
   },

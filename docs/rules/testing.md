@@ -61,8 +61,12 @@ developer's real home"）指向一个根本不存在的代码路径。两半一�
 
 几个刻意的地方：
 
-- **数字是余量，不是目标**：健康的全量约 110s、最慢的命名空间约 16s（2026-09-20 在这台机器上量的），
-  300s 是它的十九倍。机器慢就放宽——限制一旦变成 flaky 的来源，就会被调到形同虚设。
+- **数字是余量，不是目标，而余量会被时间吃掉**：这里以前写的是「健康的全量约 110s、最慢的命名空间约
+  16s」（2026-09-20 量的）。2026-09-30 在同一台机器（4 核）上重新量：**全量约 960s、最慢的命名空间
+  `harness.edge.http-test` 约 210s**——整轮那一档还剩 1.9 倍，命名空间那一档只剩 1.4 倍。
+  **所以别信写在这里的数字，看一轮跑里那些 `[16.3s] 名字` 行。** 命名空间那一档的余量已经薄到
+  「机器再慢一点它就会响」，而按下面的规矩，那时候唯一诚实的做法是**把它调大并写清为什么**，
+  不是让它一直响——限制一旦变成 flaky 的来源，就会被调到形同虚设。
 - **已经在跑的命名空间不会被整轮预算打断**：能点名它的是它自己那个预算。所以一轮的最坏墙钟是
   「整轮预算 + 一个命名空间的预算」。
 - **超时报告走 stderr**：有一种卡住就是 stdout 没人读了（管道那头走了，写的人停在写里），
@@ -94,6 +98,16 @@ developer's real home"）指向一个根本不存在的代码路径。两半一�
 
 ## 写新用例时要自己守的（runner 管「怎么跑」，这几条它管不到）
 
+- **自己写 drain helper 的，每个事件都要兑现排水屏障**：`harness.kernel.loop/run-chan` 交出来的
+  每个事件都要过一遍 `harness.kernel.loop/answer-drain!`——内核要写自己那行记录前会问消费者
+  「前面的事件处理完没有」，而**没人回答就等满 5 秒**（那是给卡死的消费者兜底的期限，不是给
+  「懒得说」的消费者的停顿）。**这个坑一次都不小**：2026-09-30 之前 `harness.approval-test`、
+  `harness.session-tools-test`、`harness.edge.ag-ui-test`、`harness.cap.skills-test` 各有一个
+  helper 漏了它，一条无工具的脚本化 run 从 151ms 变成 5,182ms（`dev/scratch_drain_barrier.clj`
+  两种消费者对照量出来的），于是全量 22 分钟、`approval-test` 224s、`session-tools-test` 122s——
+  而这三个命名空间**不碰 shell、不碰服务、不碰网络**。`harness.kernel.loop-test` 的
+  `drain-chan` 从屏障存在那天起就是这么做的，抄它。`harness.edge.replay/resume!` 也漏过
+  （那条是真人会按到的路径），一并补上了。
 - 要 home / 项目目录 / 配置目录的用例**自己造**：`harness.test-support/with-temp-env` 给它一对临时
   root + OS home（跑完连目录一起删掉），项目目录用 `temp-dir`；临时 root 里它会种一份最小
   `config.edn`，否则 run 会被「没有 `:default` provider」拒掉。**不要往 `isolate!` 那对里写**——

@@ -551,11 +551,14 @@
 ;; lives there because the http suite needs to meet the same refusal.
 
 (defn- drain-chan [ch]
+  ;; THE CONSUMER'S ONE OBLIGATION BESIDES READING: answer the kernel's drain barrier
+  ;; (`loop/answer-drain!`). A consumer that never does costs the barrier's whole deadline,
+  ;; every time -- see that var.
   (loop [acc []]
     (if-let [ev (async/<!! ch)]
       (if (= :run/done (:type ev))
         {:history (:history ev) :seen acc}
-        (recur (conj acc ev)))
+        (do (loop/answer-drain! ev) (recur (conj acc ev))))
       {:history nil :seen acc})))
 
 (deftest a-skill-loaded-beside-another-call-does-not-break-the-next-request

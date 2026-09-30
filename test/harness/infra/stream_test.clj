@@ -485,10 +485,12 @@
         (str "and another conversation keeps its OWN numbering from zero -- one queue, one number"
              " PER conversation"))))
 
-(deftest an-item-carries-the-row-and-who-wrote-it
-  ;; TICKET 04 of `.scratch/record-stream`: the two ways to read one queue hand out the LINE and the
-  ;; ROW it came from, so a reader inside this process never has to parse back what the writer was
-  ;; just given -- and `:producer` says whose line it is (ticket 03).
+(deftest an-item-carries-the-row-and-who-wrote-it-and-no-bytes
+  ;; TICKET 04 of `.scratch/record-stream` gave an in-process reader the ROW the writer already had,
+  ;; so it never has to parse back what was just handed over -- and `:producer` says whose line it
+  ;; is (ticket 03). TICKET 03 OF `.scratch/memory-hygiene` took the OTHER shape back out: the item
+  ;; used to carry the line's own bytes beside the row, so every conversation this process had
+  ;; touched held its recent lines twice -- for a copy no production reader ever read.
   (let [heard (atom [])
         row   {:type "message" :payload {:role "assistant" :content "ok"}}]
     (stream/listen! "readers-shapes" (fn [item] (swap! heard conj item)))
@@ -497,10 +499,14 @@
                   (line row)
                   nil
                   {:producer :kernel-message :row row})
-    (testing "the listener is handed both shapes, in one item"
+    (testing "the listener is handed the row and whose line it is -- and not the bytes"
       (is (= row (:row (first @heard))) "the map it was written from")
-      (is (= (line row) (:line (first @heard))) "and the bytes that reached the file")
-      (is (= :kernel-message (:producer (first @heard))) "and whose line it is"))
+      (is (= :kernel-message (:producer (first @heard))) "and whose line it is")
+      (is (not (contains? (first @heard) :line))
+          (str "no second copy of the bytes: `row` re-serialized is a different string anyway"
+               " (key order, whitespace), so the one honest source for them is the FILE")))
+    (testing "and the ring keeps the same shape the listener was handed"
+      (is (empty? (filter #(contains? % :line) (stream/after "readers-shapes" nil)))))
     (testing "and a consumer from an old cursor is handed the same thing"
       (is (= [0] (mapv :seq (stream/after "readers-shapes" nil))))
       (is (= row (:row (first (stream/after "readers-shapes" nil))))))))

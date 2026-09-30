@@ -446,20 +446,35 @@ export const Sidebar: FC<SidebarProps> = ({
   // because a fallback that does not work is worse than no fallback: a socket that
   // cannot connect at all (a proxy that refuses upgrades) must still yield a
   // sidebar, and the button is how a person asks for one without a reload.
+  //
+  // THE PAGE'S CALLBACK IS READ THROUGH A REF, WHICH IS WHAT MAKES THIS STABLE -- and
+  // the mount effect below leans on that: a `refresh` whose identity moved is an effect
+  // that re-reads. `onListed` is NOT stable: its identity moves when the page's restore
+  // finishes (`app.tsx`'s `pending` goes from an id to null) and whenever a history
+  // fails to load (`show` depends on `openErrors`). Depending on it was a SECOND
+  // `GET /api/projects` at every page load, one more the moment a refusal was drawn, and
+  // a closed-and-reopened host socket on both (measured 2026-09-29). The ref is written
+  // by an effect declared FIRST, so it is the current render's callback before either
+  // reader below runs.
+  const reportListing = useRef(onListed);
+  useEffect(() => {
+    reportListing.current = onListed;
+  }, [onListed]);
+
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const listed = await listSidebar(tErrors);
-      setListing(listed);
+      const answer = await listSidebar(tErrors);
+      setListing(answer);
       setListError(null);
-      onListed(listed);
+      reportListing.current(answer);
     } catch (failure: unknown) {
       setListError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setLoaded(true);
       setRefreshing(false);
     }
-  }, [onListed]);
+  }, [tErrors]);
 
   // THE FIRST READ, ON MOUNT, over HTTP -- the one `listSidebar` call of this
   // component's life (ticket 02: 首次拉取走 HTTP). The socket then takes over:
@@ -467,12 +482,14 @@ export const Sidebar: FC<SidebarProps> = ({
   // If the socket is already delivering by the time this lands, the read is a
   // harmless re-read of the same snapshot; if it never connects, this is the
   // sidebar's only source -- which is exactly what the fallback is for.
+  //
+  // AND IT IS MOUNT-ONLY BY CONSTRUCTION NOW: `refresh` moves only when the LANGUAGE
+  // does (the page's callback comes through the ref above), and a fold does not unmount
+  // this -- see the `folded` prop's own note -- so neither a fold/unfold cycle nor a
+  // push re-reads the listing. What reads it again is the retry rule below, the button,
+  // and a socket that never connected:
   useEffect(() => {
     void refresh();
-    // `refresh` is stable (`onListed` is a `useCallback`), so this is mount-only.
-  // `refresh` is stable (`onListed` is a `useCallback`), so this is mount-only
-  // (mounted once per component; `folded` does not unmount this -- see the prop's
-  // own note above -- so a fold/unfold cycle does not re-read either).
   }, [refresh]);
 
   // AND THE LISTING IS PUSHED (ADR 0004, `events.host`): every change after the
@@ -490,13 +507,17 @@ export const Sidebar: FC<SidebarProps> = ({
   // (`selected`, the current row) and that is a render of the listing already held.
   useEffect(
     () =>
-      subscribeHost((listed) => {
-        setListing(listed);
+      subscribeHost((listing) => {
+        setListing(listing);
         setListError(null);
         setLoaded(true);
-        onListed(listed);
+        reportListing.current(listing);
       }),
-    [onListed],
+    // NO DEPENDENCIES ON PURPOSE, and it is the same rule the mount read keeps: the
+    // socket is opened once per mount, and the page's callback reaches it through the
+    // ref. Naming `onListed` here would close and REOPEN the host connection every time
+    // its identity moved -- and a reopen buys a whole frame nobody asked for.
+    [],
   );
 
   // WHICH PROJECT ROW IS LIT, derived so it cannot point at something that is gone.
@@ -881,14 +902,12 @@ export const Sidebar: FC<SidebarProps> = ({
   ///     this page started. A session opened from this list never appears here: what its
   ///     host holds is a WINDOW, whose first user message is from the middle of the
   ///     conversation, and the page refuses to name a row with that;
-  ///   * AND THE LISTING DOES NOT HAVE IT SETTLED -- which is THREE answers rather than one,
-  ///     and all three are the same answer here (ask again): an id the listing does not name
-  ///     at all (the store has not caught up with the registration); an id it names with NO
-  ///     SEND TIME yet, which is a row that exists and is still empty (its name and time are
-  ///     the run's own write, and they land a moment after the row does); and an id whose
-  ///     row still says a run is in flight while THIS page's registry says one is not -- a
-  ///     snapshot taken mid-run, which would leave the row wearing a spinner for ever.
-  ///     See `lib/sidebar-refetch.ts`, where the three are stated.
+  ///   * AND THE LISTING DOES NOT HAVE IT SETTLED -- which is TWO answers rather than one,
+  ///     and both are an id THIS page minted (`titles` is the whole candidate list, and
+  ///     `lib/sidebar-refetch.ts` says why): an id the listing does not name at all (the
+  ///     store has not caught up with the registration), and an id it names with NO SEND
+  ///     TIME yet (a row that exists and is still empty -- its name and time are the run's
+  ///     own write, and they land a moment after the row does).
   ///
   /// THE WHOLE RULE, and the two mistakes it is written around, live in
   /// `lib/sidebar-refetch.ts`: ask MORE THAN ONCE (a single read can be served before the

@@ -383,6 +383,27 @@
             (catch Throwable _ nil)))))
     @moved))
 
+(defn listed-dir
+  "DIR canonicalized, when this home lists it as a project -- nil for anything else.
+
+  THE GATE ON A ROUTE THAT MAY BE HANDED A PATH. `/api/git` can be asked about a session,
+  and a session's directory is whatever it was bound to; the OTHER form asks about a
+  DIRECTORY, because a session this page has minted and not sent to has no row to look up
+  (`.scratch/composer-new-session-bar/`). Left open, that form would answer 'is this path a
+  repository, and what branch is it on' for any path on the machine. The projects list is
+  exactly the set of directories the page already holds (`GET /api/projects` hands it over
+  on every listing), so this gate widens nothing: it is the menu the composer's picker
+  draws, and nothing else.
+
+  CANONICAL ON THE WAY IN, because the two spellings of one directory are one project here
+  -- the same deduplication `add-project!` does."
+  [dir]
+  (when-not (str/blank? (str dir))
+    (let [canonical (try (.getCanonicalPath (io/file (str dir)))
+                         (catch Exception _ nil))]
+      (when (some #(= canonical (:canonical-path %)) (projects))
+        canonical))))
+
 (defn- as-session
   "One `sessions` row as this namespace hands it out: {:id :project-id :path
   :archived? :created-at :parent-id :subagent}.

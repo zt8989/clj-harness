@@ -813,6 +813,43 @@
              (mapv :seq (replay/entries (replay/lines->records
                                               (one-run-lines)))))))))
 
+(deftest one-runs-own-rows-answer-the-numbers-a-window-hands-out
+  ;; THE PREMISE `replay/entries-of-rows` RESTS ON, and the reason it exists at all
+  ;; (`.scratch/entry-numbering/` ticket 01): WHERE a `message` row falls is what cuts the frame
+  ;; groups, so the numbers a run's entries wear are decided by the rows THAT RUN wrote -- and the fold
+  ;; of those rows alone answers the same entries with the same numbers as the fold of the whole
+  ;; record. A writer that has exactly those rows (it wrote them: `harness.edge.http`) can therefore
+  ;; hand the live session the READER's numbers instead of one number for the whole run.
+  (let [run-id  "r1"
+        ;; THE RUN'S OWN ROW, WHERE A REAL RECORD PUTS IT: the model's row lands between the frames of
+        ;; its own call and the terminal (measured 2026-09-29 on two parked sessions -- see
+        ;; `.scratch/park-revival/`), which is exactly what splits one run's entries.
+        model   {:ts 3 :runId run-id :kind "message" :source "model"
+                 :payload {:role "assistant" :content answer-text
+                           :tool_calls [{:id "c1" :type "function"
+                                         :function {:name "read" :arguments "{\"path\":\"deps.edn\"}"}}]}}
+        lines   (concat (action-lines run-id [seed])
+                        (event-lines run-id [(ev/run-start)
+                                             (ev/reasoning-delta reasoning-text)
+                                             (ev/tool-call "c1" "read" "{\"path\":\"deps.edn\"}")])
+                        [(log-line model)]
+                        (event-lines run-id [(ev/tool-result "c1" tool-text false)
+                                             (ev/text-delta answer-text)
+                                             (ev/run-end)]))
+        records (replay/lines->records lines)
+        whole   (replay/entries records)
+        pairs   (mapv vector (range (count records)) records)
+        alone   (replay/entries-of-rows
+                 (vec (filter (fn [[_ r]] (= run-id (str (:runId r)))) pairs)))
+        mine    (fn [es] (filterv #(str/starts-with? (str (get-in % [:message :id])) run-id) es))
+        worn    (fn [es] (mapv (juxt (comp :id :message) :seq) (mine es)))]
+    (testing "the run's entries, read whole or read from its own rows, are the same list with the same numbers"
+      (is (seq (mine whole)))
+      (is (= (worn whole) (worn alone))))
+    (testing "and they are NOT all one number: the run's own row cut the frame group in two"
+      ;; WHICH IS THE POINT: one number for the whole run is the coarser reading the live session
+      ;; used (`settle!`'s fourth argument), and it is a DIFFERENT answer about the same record.
+      (is (< 1 (count (distinct (map :seq (mine alone)))))))))
 (deftest a-second-run-is-numbered-by-its-own-line-not-by-the-first-runs
   (let [q2  {:id "u2" :role "user" :content "second question"}
         raw (vec (concat (one-run-lines)
