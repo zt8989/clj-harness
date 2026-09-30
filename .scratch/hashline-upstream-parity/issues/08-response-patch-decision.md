@@ -1,11 +1,17 @@
-# 08 — 响应补 `patch` / `diffLineNumbers`？（决策票）
+# 08 — 响应不补 `patch` / `diffLineNumbers`（`wontfix`）
 
 **What to build:** 一个决定。上游 `replace`/`undo` 的成功响应里，除了模型看到的那份带锚点 diff，
 `details` 还带一份 **unified patch** 与一个**行号数组**；本仓没有。要不要补？
 
 **Blocked by:** 人的决定（本票 `needs-triage`）
 
-**Status:** needs-triage
+**Status:** wontfix
+
+## 拍板结果（2026-09-30）
+
+**不补。** 本仓没有任何一方读工具 `details`（UI 把结果当文本渲染），补 `patch`/`diffLineNumbers` 就是
+死字段——还要连带引入 1 MB 上限与截断话术。等真有外部消费者（脚本、导出、另一个前端）时再补，那时
+也知道它要什么形状；届时应**另立一张票**，不要改这张。
 
 ## 现场
 

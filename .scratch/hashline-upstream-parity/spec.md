@@ -63,7 +63,7 @@
 | 05 | read 页脚起始行 | ready-for-agent | 页脚印真实起始行号 |
 | 06 | boundary dedup | 已落地（整体移除，2026-09-30） | 跟上游 4.4.0：`replace`/`insert` 一律按字面应用 |
 | 07 | auto-read-all | wontfix（2026-09-30 拍板） | 明确不做；将来要翻案另开 spec |
-| 08 | `patch`/`diffLineNumbers` | needs-triage | 响应是否补 unified patch 与行号数组 |
+| 08 | `patch`/`diffLineNumbers` | wontfix（2026-09-30 拍板） | 不补：本仓无消费者 |
 | 09 | 刻意不跟的上游实现 | wontfix | 记录，不施工 |
 
 ## 状态
@@ -78,7 +78,7 @@
 
 ## 落地结果
 
-**票 01–06 落地**（2026-09-30）；票 07 `wontfix`（明确不做，见票面拍板结果）；票 08 仍 `needs-triage`；
+**票 01–06 落地**（2026-09-30）；票 07/08 `wontfix`（明确不做，见各自票面的拍板结果）；
 票 09 `wontfix` 不动。票 06 单列在下面的「票 06 落地」。
 
 改动（按票）：
