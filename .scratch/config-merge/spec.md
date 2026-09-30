@@ -113,9 +113,20 @@ instructions/skills 归 `ctx.systemPrompt` 那一带）。**config-merge 先落�
 `bind!` 的 sqlite commit）、`harness.cap.mcp-wired-test`（8 条 run 用例，基线上同样 8 条）、
 `cd ui && npm test`（`SQLITE_BUSY` + 120s 超时，基线同样红）。
 
-**前端**：`npm run typecheck`、`npm run build` 绿。默认起服务那一步的浏览器走查见
-`.scratch/security-sensitive-paths/spec.md`（敏感路径那一轮做过；本轮改的是设置面板的文案与
-subagents 的写入路径，`npm run build` + 面板文案的人工核对已做，**没有**再走一遍完整走查）。
+**前端**：`npm run typecheck`、`npm run build` 绿。
+
+**合并之后补的两件走查（2026-09-30）**：
+
+1. **迁移在真开机上跑过**：造一个老的家（`config.edn` 里已有 `:session {:llm ..}`，加 `harness.edn`
+   与 `mcp.edn`），`CLJ_HARNESS_HOME=<那个家> clojure -M:run --port 0` 开机只打一行
+   （`this home's harness.edn + mcp.edn moved into config.edn (the old files are beside them as
+   mcp.edn.bak, harness.edn.bak); config.edn already had {"harness.edn" [:llm]} …`），
+   `config.edn` 里重叠的 `:llm` 保持 config.edn 那份、`:editing`/`:approval`/`:mcp` 都搬了过来；
+   **第二次开机一个字都不打、文件一个字节没动**。
+2. **浏览器走查**（`node scripts/dev.mjs --scripted`，隔离家）：设置面板 General 页的
+   **Sensitive paths** 区照旧渲染；Subagents 页新建一条 ⇒ 表单自己那行说
+   「Written to …/config.edn」，落盘的是 **`config.edn` 的 `:session :subagents`** 并留了
+   `config.edn.bak`，那个家里**没有**任何 `harness.edn`；列表里新条目带「yours」，两个内置项没动。
 
 ## 实现进度（2026-09-29 的那一版，已被上面那节取代）
 
