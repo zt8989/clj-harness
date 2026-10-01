@@ -199,3 +199,12 @@ git 事实在不该答的树上**答错过**（thread `a0621fce-…`），`Alrea
 `auto` 开关、`modelPolicies`、独立的 `summarizationProvider/Model`、默认阈值 0.8）；**取消**
 （`AbortSignal` 一路到摘要调用，我们现在一个 abort 都没有）；lifecycle 行的 `:turn` 归属；
 不变式伴随插件；`/compact` 报告省下多少 token 与「跑的时候发来的话排队」；pruner 三个数可配。
+
+2026-10-01（夜，再续） — **轮中触发点换了判据：只在「这次请求塞不下」时折**（主人指出：Turn End 不该
+触发压缩，该等下一个用户轮）。记录里的证据是主人自己的会话 `3c85b20e-…`：`compaction/start` 夹在
+`step/end` 与**最后一**步的 `step/start` 之间，压力只有窗口的 ~75%，而且那一轮随即结束——等于花了
+一次摘要调用去做「下一个用户轮本来也会做、而且做得更温和」的事。run 开头的触发点（阈值，默认 0.7）
+一个字不动；轮中那个改成 `压力 ≥ 窗口`，被拒的那条路（`recover-overflow!`）照旧兜底。
+决策与理由：[ADR 0014](../../docs/adr/0014-the-mid-run-trigger-folds-only-when-the-request-would-not-fit.md)；
+回归：`relieve-pressure-test/a-request-that-would-not-fit-is-relieved-before-the-call`（抬到窗口之上）、
+`a-crossing-of-the-threshold-alone-is-not-relieved`（新）、`the-fold-takes-the-array-the-trigger-measured`（夹具抬到窗口之上）。
