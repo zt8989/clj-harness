@@ -368,6 +368,35 @@
    :run-ms       (limit-ms (System/getenv "CLJ_HARNESS_TEST_RUN_TIMEOUT_SECS")
                            default-run-limit-ms)})
 
+(defn- timing-flag
+  "RAW as this switch's answer: `1`/`true`/`yes` (any case) ON, blank or nil OFF, and
+  anything else REFUSED by name -- see `var-timing?` for why silence is not an option.
+
+  PURE IN THE STRING IT IS HANDED, the same split `limit-ms` makes, so the three answers
+  can be driven without a run and without an environment to set."
+  [raw]
+  (cond
+    (str/blank? (str raw)) false
+    (contains? #{"1" "true" "yes"} (str/lower-case (str/trim (str raw)))) true
+    :else (throw (ex-info (str "CLJ_HARNESS_TEST_TIMING must be 1/true/yes, or unset, got "
+                               (pr-str raw))
+                          {:value raw}))))
+
+(defn- var-timing?
+  "Is PER-DEFTEXT TIMING on for this run? OFF unless `CLJ_HARNESS_TEST_TIMING` says so.
+
+  IT IS OFF BY DEFAULT BECAUSE THE SUITE'S OUTPUT IS SOMETHING MANY PEOPLE READ: a switch
+  nobody set must not change a byte of it. Turned on, each deftest prints its own line
+  under its namespace -- which is the only way to see WHICH case a slow namespace is
+  spending its seconds in (the per-case numbers for tickets 01 and 03 were both measured
+  with a hand-written fixture before this existed).
+
+  THE SAME DISCIPLINE AS `limit-ms`: a value that is neither an on-word nor blank is
+  REFUSED rather than read as off. Somebody who turned timing on and silently got none
+  has been told something false about their run."
+  []
+  (timing-flag (System/getenv "CLJ_HARNESS_TEST_TIMING")))
+
 (defn run-with-deadline
   "Run F on a thread of its own and answer what became of it, instead of throwing
   or waiting forever:
@@ -415,6 +444,41 @@
   (if (zero? (mod ms 1000))
     (str (quot ms 1000) "s")
     (str (quot ms 1000) "." (quot (mod ms 1000) 100) "s")))
+
+(defn- var-timing
+  "One clojure.test report event folded into the per-deftest clock, as `[state line]` --
+  LINE being what to print for this event, or nil.
+
+  STATE is `{var started-at-ms}`. A deftest that BEGAN AND NEVER ENDED -- the shape a
+  namespace limit leaves behind -- keeps its entry and prints nothing, which is the honest
+  answer: there is no time to report for a case that never returned.
+
+  PURE, so `test_runner_test` can drive all three states (began, ended, and the one that
+  began and never came back) without a run to hang."
+  [state m now]
+  (case (:type m)
+    :begin-test-var [(assoc state (:var m) now) nil]
+    :end-test-var   (if-let [t0 (get state (:var m))]
+                      [(dissoc state (:var m))
+                       (str "      [" (seconds-text (- now t0)) "] " (:name (meta (:var m))))]
+                      [state nil])
+    [state nil]))
+
+(defn- run-timed-ns
+  "Run NS the way the runner always does, plus one line per deftest as it ends.
+
+  A WRAPPER AROUND `t/report` RATHER THAN A SECOND `test-ns`: the timing is read off the
+  events clojure.test already emits, so nothing about a case changes -- and the real
+  report still runs, so failures print exactly where they always did."
+  [ns]
+  (let [real  t/report
+        state (atom {})]
+    (binding [t/report (fn [m]
+                         (let [[next line] (var-timing @state m (System/currentTimeMillis))]
+                           (reset! state next)
+                           (when line (println line))
+                           (real m)))]
+      (t/test-ns ns))))
 
 (defn limit-report
   "The lines to print when a run hits one of its limits. Three kinds, because the
@@ -506,7 +570,7 @@
   `run-tests` (it prints the same `Testing` line and no summary), which is why the
   summary at the end of the run is printed by this runner instead of by
   clojure.test -- see `run-suite!`."
-  [namespaces started run-ms namespace-ms]
+  [namespaces started run-ms namespace-ms timing?]
   (loop [todo     (seq namespaces)
          counters {:test 0, :pass 0, :fail 0, :error 0}
          ran      []]
@@ -515,7 +579,8 @@
         (if (>= elapsed run-ms)
           {:status :timeout, :kind :run, :budget-ms run-ms, :ms elapsed,
            :counters counters, :ran ran, :not-run (vec todo)}
-          (let [result (run-with-deadline namespace-ms #(t/test-ns ns))]
+          (let [result (run-with-deadline namespace-ms
+                                          #(if timing? (run-timed-ns ns) (t/test-ns ns)))]
             (case (:status result)
               :threw   {:status :threw, :threw (:threw result), :subject ns}
 
@@ -590,6 +655,9 @@
         ;; BEFORE `isolate!`, so a limit that cannot be parsed fails without leaving
         ;; a temp pair behind on its way out.
         {:keys [namespace-ms run-ms]} (limits)
+        ;; READ BEFORE `isolate!` TOO, and for the same reason the limits are: a switch that
+        ;; cannot be parsed must fail without leaving a temp pair behind on its way out.
+        timing? (var-timing?)
         started (System/currentTimeMillis)
         dir     (isolate!)]
     ;; FROM HERE ON, ANYTHING THAT OPENS THE DEVELOPER'S STORE IS THIS RUN'S FAULT, and
@@ -604,6 +672,8 @@
       (println "time limits:" (str (quot namespace-ms 1000) "s per namespace, "
                                    (quot run-ms 1000) "s for the run")
                "(CLJ_HARNESS_TEST_NAMESPACE_TIMEOUT_SECS / CLJ_HARNESS_TEST_RUN_TIMEOUT_SECS)")
+      (when timing?
+        (println "per-deftest timing: on (CLJ_HARNESS_TEST_TIMING) -- one line per deftest, under its namespace"))
       ;; LOADING IS FINGERPRINTED TOO, and by the same budget: it is one `require`
       ;; call for the whole list, so it cannot name a namespace if it hangs -- the
       ;; stack in the report names the FILE, which is the next best thing.
@@ -614,7 +684,7 @@
                        {:status :timeout, :kind :loading, :budget-ms namespace-ms,
                         :ms (:ms loaded), :state (:state loaded), :stack (:stack loaded),
                         :ran [], :not-run (vec namespaces)}
-                       :else (run-namespaces! namespaces started run-ms namespace-ms))
+                       :else (run-namespaces! namespaces started run-ms namespace-ms timing?))
             counters (:counters outcome)
             ;; THE VERDICT IS CHECKED IN EVERY BRANCH, including the two that end
             ;; early: "did this run touch the developer's home" is a question about

@@ -288,3 +288,42 @@
                               :counters {:test 9, :pass 8, :fail 1, :error 0}} false))
       "and it stays 2 when the namespaces that DID run had failures: the run never finished"))
 
+(deftest the-switch-that-turns-per-deftest-timing-on-is-off-unless-it-says-so
+  ;; OFF BY DEFAULT IS THE WHOLE CONTRACT: the suite's output is what people read, and a
+  ;; switch nobody set must not change a byte of it. The answer is pure in the string it is
+  ;; handed, so all three are driven here rather than by setting an environment variable.
+  (let [flag (var-get #'runner/timing-flag)]
+    (is (false? (flag nil)))
+    (is (false? (flag "")))
+    (is (false? (flag "  ")) "blank is unset, not a typo")
+    (doseq [on ["1" "true" "yes" "TRUE" " Yes "]]
+      (is (true? (flag on)) (str "should be on: " (pr-str on))))
+    (testing "and a value that is neither is refused by name, not read as off"
+      (doseq [bad ["0" "on" "no" "maybe"]]
+        (is (thrown-with-msg? Exception #"must be 1/true/yes" (flag bad))
+            (str "should be refused: " (pr-str bad)))))))
+
+(deftest the-per-deftest-clock-reads-two-events-and-leaves-the-third-alone
+  ;; The half of the switch that can be got wrong without a run to hang: which event starts
+  ;; the clock, which one prints, and what a case that BEGAN AND NEVER ENDED leaves behind.
+  (let [timing  (var-get #'runner/var-timing)
+        v       #'the-per-deftest-clock-reads-two-events-and-leaves-the-third-alone
+        nm      (:name (meta v))
+        [s0 l0] (timing {} {:type :begin-test-var :var v} 1000)]
+    (is (nil? l0) "the beginning says nothing")
+    (is (= {v 1000} s0) "it only starts the clock")
+    (testing "the end prints the elapsed time and takes the entry out"
+      (let [[s1 l1] (timing s0 {:type :end-test-var :var v} 2450)]
+        (is (nil? (get s1 v)) "one event per case, so the entry goes")
+        (is (= (str "      [1.4s] " nm) l1))))
+    (testing "an end with no beginning prints nothing -- there was no clock to read"
+      (let [[s2 l2] (timing {} {:type :end-test-var :var v} 3200)]
+        (is (= {} s2))
+        (is (nil? l2))))
+    (testing "a case that began and NEVER ended keeps its entry, and prints nothing"
+      (let [[s3 l3] (timing s0 {:type :pass :var v} 3000)
+            [_  l4] (timing s3 {:type :fail :var v} 3100)]
+        (is (= {v 1000} s3) "the clock for it is still running")
+        (is (nil? l3))
+        (is (nil? l4) "and no later event prints one on its behalf")))))
+
