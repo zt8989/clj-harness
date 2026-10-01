@@ -126,6 +126,14 @@
     "statsUnknownModel": "Unnamed model",
     "statsTokensAbsent": "no usage",
     "statsModelCalls_one": "{{count}} call",
-    "statsModelCalls_other": "{{count}} calls"
+    "statsModelCalls_other": "{{count}} calls",
+    "statsClose": "Back to the conversation",
+    "statsRange": "Range",
+    "statsDays_one": "{{count}} day",
+    "statsDays_other": "{{count}} days",
+    "statsRebuild": "Rebuild",
+    "statsRebuildHint": "Make the projection again for this window: the counts above then cover rows this store had not copied yet.",
+    "statsModelsShow": "Show the token usage",
+    "statsModelsHide": "Hide the token usage"
   }
 }

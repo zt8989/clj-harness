@@ -213,7 +213,7 @@
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
                       "hashline_undo" "messages" "model_calls" "projection_offsets"
-                      "projection_repairs" "projects" "schema_steps" "session_claims"
+                      "projects" "schema_steps" "session_claims"
                       "sessions" "todos" "tool_calls"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
@@ -368,7 +368,7 @@
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
                       "hashline_undo" "messages" "model_calls" "projection_offsets"
-                      "projection_repairs" "projects" "schema_steps" "session_claims"
+                      "projects" "schema_steps" "session_claims"
                       "sessions" "todos" "tool_calls"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
@@ -1003,11 +1003,7 @@
                ;; three facts about the OWNER, the claim's own token, and when it
                ;; was taken -- which is why it is state rather than a record.
                "session_claims"     #{"thread_id" "instance" "token" "pid"
-                                      "started_at" "since"}
-               ;; AND THE REPAIR MARKER, which is STATE and not a record: one row names a thing a
-               ;; migration said the projection still has to do, and `start!` deletes it once the
-               ;; pass is over. There is nothing in a log it could ever be rebuilt from.
-               "projection_repairs" #{"name" "at"}}
+                                      "started_at" "since"}}
               ;; AND THE PROJECTION'S CONTENT (ADR 0008, 2026-09-25): the owner overruled the half of
               ;; this boundary that said 'jsonl 里的任何内容都不进库', so `messages` and `tool_calls`
               ;; are content BY DECISION and are listed here as exactly what they may hold. They are
@@ -1074,7 +1070,7 @@
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
                                       "hashline_sessions" "hashline_undo" "todos"
-                                      "session_claims" "projection_repairs"}
+                                      "session_claims"}
               ;; THE PROJECTION'S TABLES ARE TABLES TOO (ADR 0008) -- listed here so that 'the store's
               ;; tables are exactly the ones the home declared' keeps meaning something now that two of
               ;; them are content.

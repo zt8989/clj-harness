@@ -7584,20 +7584,30 @@
 ;; ------------------------------------------------------------- the statistics route
 
 (deftest the-statistics-route-is-a-question-of-its-own
-  ;; `GET /api/stats`: the three leaderboards over the whole home. A ROUTE OF ITS OWN (see
-  ;; `harness.edge.http/home-stats-get`) because the sidebar reads `/api/projects` on every
-  ;; host change and has no use for a count over every tool call this home has made.
+  ;; `GET /api/stats?days=N`: the three leaderboards over the whole home for a window. A ROUTE OF
+  ;; ITS OWN (see `harness.edge.http/home-stats-get`) because the sidebar reads `/api/projects` on
+  ;; every host change and has no use for a count over every tool call this home has made.
   ;;
   ;; NO THREAD AND NO SCRIPT ARE NEEDED -- this route counts what the store already holds --
   ;; but a server has to be listening, which is what the EMPTY THREAD LIST buys.
   (with-server [] script
     (fn []
-      (let [resp (api-call :get "/api/stats" nil)]
+      (let [resp (api-call :get "/api/stats?days=30" nil)]
         (is (= 200 (.statusCode resp)))
         (let [body (read-json resp)]
+          (testing "the window is the route's own, and it says so in the answer"
+            (is (= 30 (:days body)))
+            (is (number? (:since body))))
           (testing "all three leaderboards are present, each a list"
             (is (vector? (:tools body)))
             (is (vector? (:skills body)))
-            (is (vector? (:models body)))))
-        (testing "and a method the route does not serve is a 405 rather than a 500"
-          (is (= 405 (.statusCode (api-call-as :post "/api/stats")))))))))
+            (is (vector? (:models body))))))
+      (testing "a method the route does not serve is a 405 rather than a 500"
+        (is (= 405 (.statusCode (api-call-as :post "/api/stats")))))
+      (testing "and MAKING THE COPY AGAIN is a verb, because it is one"
+        (let [resp (api-call :post "/api/stats/rebuild" (json/write-str {:days 90}))]
+          (is (= 200 (.statusCode resp)))
+          (is (= 90 (:days (read-json resp))))
+          ;; SCHEDULED RATHER THAN WAITED ON: the trigger is running in this server, so the
+          ;; request answers at once and the downlink carries the new numbers when they land.
+          (is (true? (:scheduled (read-json resp)))))))))

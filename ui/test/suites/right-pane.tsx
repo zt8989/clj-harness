@@ -50,7 +50,7 @@ import panelSource from "../../src/components/subagent-view.tsx?raw";
 import contextSource from "../../src/components/subagent-view-context.ts?raw";
 import appSource from "../../src/app.tsx?raw";
 import type { Language } from "../../src/lib/language";
-import { RightPaneStatsButton } from "../../src/components/right-pane-toggle";
+import { STATS_VIEW_ID, StatsCloseButton, StatsOpenButton } from "../../src/components/right-pane-toggle";
 import { StatsView } from "../../src/components/stats-view";
 import statsViewSource from "../../src/components/stats-view.tsx?raw";
 import homeStatsSource from "../../src/lib/home-stats.ts?raw";
@@ -125,7 +125,17 @@ function taskPane(language: Language): string {
 function statsControl(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <RightPaneStatsButton onOpen={() => {}} />
+      <StatsOpenButton onOpen={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
+/// THE STATISTICS PAGE'S OWN WAY OUT, rendered for the same reason: its meaning is a glyph and a
+/// name, and the name it points at is a region of its own (`STATS_VIEW_ID`).
+function statsCloseControl(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <StatsCloseButton onClose={() => {}} />
     </I18nextProvider>,
   );
 }
@@ -134,10 +144,10 @@ function statsControl(language: Language): string {
 /// reaches at module scope touches one: the hook's effects (the snapshot read, the socket, the
 /// observation) never run in `renderToStaticMarkup`, so what is drawn here is the view with no
 /// answer yet -- which is exactly the state its empty sentences exist for.
-function statsView(language: Language): string {
+function statsView(language: Language, sidebarFolded = false): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <StatsView onCollapse={() => {}} onBack={() => {}} />
+      <StatsView onClose={() => {}} sidebarFolded={sidebarFolded} />
     </I18nextProvider>,
   );
 }
@@ -676,10 +686,16 @@ const cases: Case[] = [
       // THE TRAILING CONTROL OF THE TASK VIEW'S HEADER (owner, 2026-10-01: 「增加...」). Its
       // whole meaning is a glyph, so what is asserted is what a reader cannot see: the name it
       // says, the region it names, and the glyph itself.
-      expect(attrOf(statsControl("en"), "right-pane-stats", "aria-controls")).toBe(RIGHT_PANE_ID);
+      expect(attrOf(statsControl("en"), "right-pane-stats", "aria-controls")).toBe(STATS_VIEW_ID);
       expect(textOf(statsControl("en"), "right-pane-stats")).toBe("Statistics");
       expect(textOf(statsControl("zh"), "right-pane-stats")).toBe("统计");
       expect(toggleSource).toContain("<EllipsisIcon");
+      // THE WAY OUT OF THE PAGE IS ITS OWN CONTROL, and it names the SAME region the `…` names --
+      // a full-area page introduced by one control and closed by a control pointing elsewhere
+      // would be two claims about one box.
+      expect(attrOf(statsCloseControl("en"), "stats-close", "aria-controls")).toBe(STATS_VIEW_ID);
+      expect(textOf(statsCloseControl("en"), "stats-close")).toBe("Back to the conversation");
+      expect(textOf(statsCloseControl("zh"), "stats-close")).toBe("回到对话");
       // IT IS A NAVIGATION, NOT A DISCLOSURE: it steps to another state of a region that
       // stays open, so it makes no `aria-expanded` claim (the mirror's back control argues the
       // same line).
@@ -687,7 +703,7 @@ const cases: Case[] = [
       expect(control, "no statistics control in the render").not.toBeNull();
       expect(control![0]).not.toContain("aria-expanded=");
       // AND THE TASK VIEW IS WHERE IT IS DRAWN.
-      expect(taskPaneSource).toContain("<RightPaneStatsButton onOpen={onStats} />");
+      expect(taskPaneSource).toContain("<StatsOpenButton onOpen={onStats} />");
 
       // THE PAGE OWNS THE THIRD SHAPE, and it opens through the same writer as the other two
       // (`openPane`), so the drawer rule below `md` covers this state too.
@@ -711,13 +727,25 @@ const cases: Case[] = [
   {
     name: "the-statistics-view-draws-two-rankings-and-folds-the-token-one-away",
     run: async () => {
-      // THE COLUMN IS THE SAME ELEMENT as the task pane and the mirror, and it is asserted the
-      // way the task pane's own copy is: the class string is the mirror's, to the character --
-      // one column in several states, not a third panel that could drift apart.
-      const mirrorColumn = /data-slot="subagent-view"[\s\S]*?className="([^"]*)"/.exec(panelSource);
-      expect(mirrorColumn, "no column classes in subagent-view.tsx").not.toBeNull();
-      expect(statsViewSource).toContain(`className="${mirrorColumn![1]!}"`);
-      expect(statsViewSource).toContain("id={RIGHT_PANE_ID}");
+      // IT IS NOT A COLUMN BESIDE THE CONVERSATION (owner, 2026-10-01): the page takes the room
+      // the conversation and the right-hand column had, and `app.tsx` HIDES the middle one while
+      // it is open. Read as SOURCE, because that is where the layout lives.
+      expect(statsViewSource).toContain("id={STATS_VIEW_ID}");
+      expect(statsViewSource).toContain("min-h-0 min-w-0 flex-1");
+      expect(statsViewSource).not.toContain("w-[26rem]");
+      const app = appSource.replace(/\r\n/g, "\n");
+      expect(app).toContain('rightPane?.kind === "stats" ? " hidden" : ""');
+      // AND IT IS NOT A DRAWER EITHER: the backdrop belongs to the column, and a page that IS
+      // the room needs no tap-beside-it way out.
+      expect(app).toContain('rightPane.kind !== "stats" && (');
+      // AND ONE NEIGHBOUR FACT IS HANDED DOWN: while the sidebar is FOLDED its floating "open the
+      // sidebar" control sits exactly on this page's leading button (both boxes at 8,8 -- found by
+      // walking the page). The header clears it with the session bar's own `ps-12 lg:ps-3`, and
+      // the inset goes away where there is no floating control.
+      expect(app).toContain("sidebarFolded={folded}");
+      expect(statsViewSource).toContain("ps-12 lg:ps-3");
+      expect(attrOf(statsView("en", true), "stats-view-header", "class")).toContain("ps-12");
+      expect(attrOf(statsView("en"), "stats-view-header", "class")).not.toContain("ps-12");
 
       // WHAT IT SAYS, IN BOTH LANGUAGES: the words are the whole of what tells these three
       // rankings apart, and a heading swapped between them would be a green tree and a wrong
@@ -726,12 +754,34 @@ const cases: Case[] = [
       expect(textOf(en, "stats-view-name")).toBe("Statistics");
       expect(textOf(en, "stats-tools-title")).toBe("Tool calls");
       expect(textOf(en, "stats-skills-title")).toBe("Skill calls");
-      expect(textOf(en, "stats-models-toggle")).toBe("Tokens by model");
+      expect(textOf(en, "stats-models-title")).toBe("Tokens by model");
+      expect(textOf(en, "stats-models-toggle")).toBe("Show the token usage");
       const zh = statsView("zh");
       expect(textOf(zh, "stats-view-name")).toBe("统计");
       expect(textOf(zh, "stats-tools-title")).toBe("工具调用排行");
       expect(textOf(zh, "stats-skills-title")).toBe("Skill 调用排行");
-      expect(textOf(zh, "stats-models-toggle")).toBe("各模型 token 用量");
+      expect(textOf(zh, "stats-models-title")).toBe("各模型 token 用量");
+      expect(textOf(zh, "stats-models-toggle")).toBe("展开 token 用量");
+
+      // THE WINDOW: three buttons, and 7 is the one that is on -- `aria-pressed` is how a reader
+      // is told which question is being asked, and the words are the catalog's in both languages.
+      expect(attrOf(en, "stats-range-7", "aria-pressed")).toBe("true");
+      expect(attrOf(en, "stats-range-30", "aria-pressed")).toBe("false");
+      expect(attrOf(en, "stats-range-90", "aria-pressed")).toBe("false");
+      expect(textOf(en, "stats-range-7")).toBe("7 days");
+      expect(textOf(en, "stats-range-90")).toBe("90 days");
+      expect(textOf(zh, "stats-range-30")).toBe("30 天");
+
+      // AND THE ONE VERB ON THE PAGE (`重算`): making the projection again for the window on
+      // screen. The word is rendered; the call and the window it carries are source reads.
+      expect(textOf(en, "stats-rebuild")).toBe("Rebuild");
+      expect(textOf(zh, "stats-rebuild")).toBe("重算");
+      expect(statsViewSource).toContain("rebuildStatsWindow(days)");
+      expect(homeStatsSource).toContain("stats/rebuild");
+      // AND BOTH HALVES ARE ABOUT THE SAME WINDOW: the snapshot read and the socket's URL carry
+      // `days`, so a heading and the numbers under it cannot disagree about the range.
+      expect(homeStatsSource).toContain("days=${encodeURIComponent(String(days))}");
+      expect(homeStatsSource).toContain("openDays !== days");
 
       // THE TWO RANKINGS ON SIGHT, EACH WITH ITS OWN EMPTY SENTENCE: an empty home draws a
       // sentence per section, and the same sentence in both means one of them lost its own.

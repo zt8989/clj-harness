@@ -106,6 +106,8 @@
     (testing "the opening frame is the leaderboards, tagged as this category"
       (let [frame (first (frames sent))]
         (is (= "stats" (:type frame)))
+        ;; THE WINDOW IS THE CONNECTION'S, and a request that names none gets the default (7).
+        (is (= 7 (:days frame)))
         (is (contains? frame :tools))
         (is (contains? frame :skills))
         (is (contains? frame :models))))

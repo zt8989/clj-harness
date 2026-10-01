@@ -1010,7 +1010,7 @@
 
 (defn- model-calls
   "Version n -> n+1: the MODEL CALLS the record holds, one row per `model/start` … `model/end`
-  pair, and the marker that says an older copy of this content has to be made again.
+  pair.
 
   A FOURTH CONTENT TABLE, and it is here for a question the three above cannot answer: the
   token usage of ONE MODEL across every session -- the leaderboard `harness.edge.projection`
@@ -1028,12 +1028,16 @@
   A TABLE OF ITS OWN RATHER THAN COLUMNS ON `messages`: a model call is not a message, it has its
   own line numbers, and one message row is one line while a completed call is two.
 
-  AND THE OFFSETS DO NOT SPEAK FOR IT (`.scratch/global-stats-panel/`). `projection_offsets` says
-  'everything before this was projected' about the tables that existed when it was written, so
-  adding a table makes that claim FALSE for the new one. This step says so where the projection
-  can see it -- one row in `projection_repairs` -- and `harness.edge.projection/start!` settles it
-  by making the copy again. A store that never projected anything has no offsets to betray and
-  needs no repair."
+  AND IT IS FILLED BY THE SAME INCREMENTAL PASS AS THE OTHER THREE, never by a scan of its own:
+  the listener hands the projection the lines a run just wrote, and a `model/start` / `model/end`
+  pair is read from that stream byte by byte like every message row (`.scratch/global-stats-panel/`).
+
+  THE OFFSETS DO NOT SPEAK FOR IT, though, and that is worth saying out loud: `projection_offsets`
+  says 'everything before this was projected' about the tables that existed when it was written, so
+  on a store that had already copied content this table starts EMPTY while the rest is full. Nothing
+  here repairs that on its own -- a process that re-read every log at startup is exactly the
+  full read this layer refuses -- so the copy is made again ON REQUEST, scoped to a time window,
+  through `harness.edge.projection/rebuild-window!` (the statistics view's own button)."
   [^Connection c]
   (ddl! c "CREATE TABLE model_calls (
               session_id        TEXT NOT NULL,
@@ -1048,18 +1052,8 @@
               at                INTEGER,
               ms                INTEGER,
               PRIMARY KEY (session_id, seq))")
-  (ddl! c "CREATE INDEX model_calls_by_model ON model_calls (model)")
-  ;; THE REPAIR MARKER: one row names a thing the projection still has to do, and `start!`
-  ;; deletes it when the pass is over. State rather than a record -- there is nothing in a log
-  ;; it could ever be rebuilt from.
-  (ddl! c "CREATE TABLE projection_repairs (
-              name TEXT PRIMARY KEY NOT NULL,
-              at   INTEGER NOT NULL)")
-  ;; AN EXISTING COPY IS THE ONLY ONE THAT NEEDS SAYING SO: a fresh store has no offsets to be
-  ;; wrong about, and the first line it ever projects goes through the new branch above.
-  (when (pos? (long (or (:n (first (query c "SELECT COUNT(*) AS n FROM projection_offsets"))) 0)))
-    (execute! c "INSERT OR IGNORE INTO projection_repairs (name, at) VALUES (?, ?)"
-              "model-calls" (System/currentTimeMillis))))
+  ;; NOTHING ELSE IS CREATED HERE: the table and its index are the whole step.
+  (ddl! c "CREATE INDEX model_calls_by_model ON model_calls (model)"))
 
 
 (def migrations

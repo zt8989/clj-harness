@@ -482,15 +482,23 @@
 ;; answer each of them, only not without reading every log this home holds.
 
 (defn tool-leaderboard
-  "Every tool this home has called, most calls first: [{:name .. :calls n} ..].
+  "Every tool this home has called SINCE the cutoff (epoch ms), most calls first:
+  [{:name .. :calls n} ..].
 
   A RANKING, AND A STABLE ONE: ties break by name, so two reads of an unchanged store answer the
-  same order rather than whatever SQLite happened to reach first."
-  []
-  (let [rows (db/select "SELECT name AS name, COUNT(*) AS calls
-                           FROM tool_calls
-                          WHERE name IS NOT NULL
-                          GROUP BY name")]
+  same order rather than whatever SQLite happened to reach first.
+
+  THE TIME IS THE MESSAGE'S, NOT A COLUMN OF `tool_calls`: a call has no timestamp of its own --
+  it rides the assistant message that declared it, on the same record line, so the join is on the
+  key the two tables already share (`session_id` + `seq`). Nothing about already-projected rows has
+  to be redone to ask this, which is the whole reason it is a join rather than a fifth column."
+  [since]
+  (let [rows (db/select "SELECT t.name AS name, COUNT(*) AS calls
+                           FROM tool_calls t
+                           JOIN messages m ON m.session_id = t.session_id AND m.seq = t.seq
+                          WHERE t.name IS NOT NULL AND m.at >= ?
+                          GROUP BY t.name",
+                        since)]
     (vec (sort-by (fn [{:keys [name calls]}] [(- (long calls)) (str name)]) rows))))
 
 (defn- skill-name
@@ -500,34 +508,41 @@
        (catch Throwable _ nil)))
 
 (defn skill-leaderboard
-  "The SKILLS this home has loaded, most loads first: [{:name .. :calls n} ..].
+  "The SKILLS this home has loaded SINCE the cutoff, most loads first: [{:name .. :calls n} ..].
 
   A SKILL IS LOADED BY THE `skill` TOOL, and WHICH one is the call's own `name` argument -- so
   this asks `tool_calls` for those rows and counts the name inside the arguments, rather than
-  adding a column the projection would have to keep in step with the tool's own schema."
-  []
+  adding a column the projection would have to keep in step with the tool's own schema. The window
+  is the declaring message's, the same join `tool-leaderboard` makes."
+  [since]
   (let [counts (frequencies (keep (comp skill-name :arguments)
-                                  (db/select "SELECT arguments AS arguments
-                                                FROM tool_calls
-                                               WHERE name = 'skill'")))]
+                                  (db/select "SELECT t.arguments AS arguments
+                                                FROM tool_calls t
+                                                JOIN messages m ON m.session_id = t.session_id
+                                                                   AND m.seq = t.seq
+                                               WHERE t.name = 'skill' AND m.at >= ?"
+                                             since)))]
     (vec (->> counts
               (map (fn [[name calls]] {:name name :calls (long calls)}))
               (sort-by (fn [{:keys [name calls]}] [(- (long calls)) (str name)]))))))
 
 (defn model-leaderboard
-  "Token usage per model, most tokens first: [{:model .. :calls n :promptTokens ..} ..].
+  "Token usage per model SINCE the cutoff, most tokens first: [{:model .. :calls n ..} ..].
 
   A KEY NO CALL REPORTED IS ABSENT FROM THE ROW (`harness.edge.stats/usage-fields` keeps 'not
   reported' apart from zero), and the order puts a model whose usage nobody reported after the
-  ones with numbers: a count of calls is not a count of tokens."
-  []
+  ones with numbers: a count of calls is not a count of tokens. `model_calls` carries its own
+  timestamp (the START line's), so this window needs no join."
+  [since]
   (let [rows (db/select "SELECT model AS model, COUNT(*) AS calls,
                                 SUM(prompt_tokens) AS prompt_tokens,
                                 SUM(completion_tokens) AS completion_tokens,
                                 SUM(total_tokens) AS total_tokens,
                                 SUM(cached_tokens) AS cached_tokens
                            FROM model_calls
-                          GROUP BY model")]
+                          WHERE at >= ?
+                          GROUP BY model",
+                        since)]
     (vec (sort-by (fn [r] [(- (long (or (:total-tokens r) 0)))
                            (- (long (:calls r)))
                            (str (:model r))])
@@ -540,49 +555,70 @@
                         rows)))))
 
 (defn stats-answer
-  "The three leaderboards as one answer -- the whole of what the statistics view draws, and the
-  payload both `GET /api/stats` and the statistics downlink hand over."
-  []
-  {:tools  (tool-leaderboard)
-   :skills (skill-leaderboard)
-   :models (model-leaderboard)})
+  "The three leaderboards over the last DAYS days, as one answer -- the whole of what the
+  statistics view draws, and the payload `GET /api/stats` and the statistics downlink both hand
+  over.
 
-;; ------------------------------------------------ a schema change's repair
+  THE WINDOW IS THE QUESTION, not a filter laid over a whole-home number: each ranking is asked
+  with a cutoff, so the store reads the rows in the window and nothing else. `:since` rides along
+  so a reader can say what the numbers cover rather than guess."
+  [days]
+  (let [days  (max 1 (min 3650 (long days)))
+        since (- (System/currentTimeMillis) (* days 24 60 60 1000))]
+    {:days   days
+     :since  since
+     :tools  (tool-leaderboard since)
+     :skills (skill-leaderboard since)
+     :models (model-leaderboard since)}))
 
-(defn- repair-pending?
-  "Is there something a migration said the copy no longer covers?"
-  []
-  (boolean (seq (db/select "SELECT name FROM projection_repairs LIMIT 1"))))
+;; ------------------------------------------------ making the copy again, for a window
+;;
+;; THE ONE THING IN THIS NAMESPACE THAT IS NOT INCREMENTAL, and it is A PERSON'S ACTION rather than
+;; a process's (`.scratch/global-stats-panel/`): everything above reads bytes it has not read yet;
+;; this re-reads a BOUNDED set of logs on request. It exists because a table added to the
+;; projection cannot be filled by offsets written before it existed (`harness.infra.db`'s
+;; `model-calls` step), and the answer is the statistics view's own button -- NOT a scan at startup,
+;; which would be exactly the full read this layer refuses.
 
-(defn- clear-repairs!
-  []
-  (db/with-transaction (fn [c] (db/execute! c "DELETE FROM projection_repairs"))))
+;; The trigger's thread, declared here because the scheduling below needs it and its own section is
+;; further down (`declare` is the idiom the trigger section uses for `run-round!`).
+(declare ^:private clock)
 
-(defn- repair!
-  "SETTLE WHAT A SCHEMA CHANGE SAID THE COPY NO LONGER COVERS (`.scratch/global-stats-panel/`).
+(defn- sessions-in-window
+  "The conversations with a projected row at or after SINCE."
+  [since]
+  (vec (distinct (map :session-id
+                      (db/select "SELECT session_id AS session_id FROM messages WHERE at >= ?
+                                  UNION
+                                  SELECT session_id AS session_id FROM model_calls WHERE at >= ?"
+                                 since since)))))
 
-  A newly added content table cannot be filled by the offsets -- they say 'everything before this
-  was projected' about the tables that existed when they were written. So a migration that adds
-  one leaves a row in `projection_repairs` (`harness.infra.db`), and this makes the whole copy
-  again ONCE -- ADR 0008 decision 6's own action -- on the projection's own thread. A process
-  whose store never had a repair calls none of this, which is the promise `start!` keeps."
-  []
-  (when (repair-pending?)
-    (try
-      (rebuild!)
-      (clear-repairs!)
-      (catch Throwable t
-        ;; THE MARKER STAYS: a repair that threw settled nothing, and the next start tries again
-        ;; rather than leaving a table nothing ever fills.
-        (log/warn! :projection/repair-failed {:reason (ex-message t)})))))
+(defn rebuild-window!
+  "Make the copy again for the conversations with anything in the last DAYS days, and answer
+  {:days n :since ms :sessions n :rows n ...} (the rest of the totals is `project-round!`'s).
 
-(defn- schedule-repair!
-  "Ask the store whether a repair is pending, and schedule `repair!` if it is."
-  [^ScheduledExecutorService s]
-  (try
-    (when (repair-pending?)
-      (.schedule s ^Runnable (fn [] (repair!)) 0 TimeUnit/MILLISECONDS))
-    (catch Throwable _ nil)))
+  SCOPED ON PURPOSE. `rebuild!` with an argument does one conversation and with no argument does
+  the whole store; this does the ones a reader is actually looking at, so the cost is proportional
+  to the window rather than to the home.
+
+  IT CHANGES NO RECORD. It deletes projected rows and projects them again from the same logs --
+  ADR 0008 decision 6's action, the claim that makes a second copy of the content acceptable."
+  [days]
+  (let [days  (max 1 (min 3650 (long days)))
+        since (- (System/currentTimeMillis) (* days 24 60 60 1000))
+        ids   (sessions-in-window since)]
+    (db/with-transaction (fn [c] (doseq [id ids] (forget! c (str id)))))
+    (assoc (project-round! ids) :days days :since since)))
+
+(defn schedule-rebuild-window!
+  "Run `rebuild-window!` on the projection's own thread, so a request does not wait for logs to be
+  read. Answers whether it was scheduled: with no trigger running (`start!` was never called -- a
+  REPL, a suite) there is no thread of ours to lend, and the caller runs it itself."
+  [days]
+  (if-some [^ScheduledExecutorService s @clock]
+    (do (.schedule s ^Runnable (fn [] (rebuild-window! days)) 0 TimeUnit/MILLISECONDS)
+        true)
+    false))
 
 ;; ------------------------------------------------ the trigger is the write stream, not a clock
 
@@ -714,9 +750,9 @@
   limit (measured: three namespaces never got to run). An idle server now pays for one listener
   that is never called -- and an idle process runs no round at all.
 
-  IT DOES ASK ONE QUESTION, and it is a store read rather than a pass: whether a migration left
-  a repair behind (`schedule-repair!`). A store that never had one answers no and is left alone;
-  one that did gets the whole copy made again, once, on this thread.
+  IT ASKS THE STORE NOTHING AND READS NO LOG (`schedule-rebuild-window!` is where the one action
+  that does is scheduled, and it is a person's). Everything here is a doorbell: the pass itself
+  is the listener's, and it starts nothing.
 
   WHAT IT GIVES UP, SAID OUT LOUD: a line a PREVIOUS process wrote and never copied before it stopped
   has nobody left to ring the bell, so it waits for that conversation's next line -- the narrow window
@@ -748,9 +784,6 @@
         ;; A MARK THAT WAS ALREADY IN `dirty` (a trigger replaced while a line was in flight) WOULD
         ;; OTHERWISE SIT UNTIL THE NEXT LINE, so the window is closed by trying once here.
         (schedule-round! s)
-        ;; AND ONE REPAIR, IF A MIGRATION LEFT ONE (`schedule-repair!` asks the store, so a store
-        ;; that never had one pays a single question and an idle process still runs no round).
-        (schedule-repair! s)
         (fn []
           (unlisten)
           (when (identical? unlisten @listening) (compare-and-set! listening unlisten nil))

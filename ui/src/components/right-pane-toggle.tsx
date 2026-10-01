@@ -45,6 +45,12 @@ import { Button } from "@/components/ui/button";
 /// repo could see (there is no DOM to resolve it against), and the suites compare the strings.
 export const RIGHT_PANE_ID = "app-right-pane";
 
+/// THE STATISTICS PAGE'S ID, and the second region two of these controls name. IT IS NOT THE
+/// COLUMN'S: the statistics replace the conversation AND the right-hand column (owner,
+/// 2026-10-01), so the `…` that opens them and the button that closes them both point HERE -- a
+/// control naming `RIGHT_PANE_ID` would be pointing at a box it neither opens nor closes.
+export const STATS_VIEW_ID = "app-stats";
+
 /// THE WIDTH AT WHICH THIS COLUMN IS NO LONGER A DRAWER, spelled the way the CSS spells it:
 /// `md` in Tailwind v4 is `48rem`, so this query and the `md:` classes in
 /// `components/task-pane.tsx` / `components/subagent-view.tsx` (and the backdrop's `md:hidden`
@@ -104,10 +110,11 @@ export const RightPaneOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
 /// accessible name is its `title` and its `sr-only` span, the pattern every icon button in this
 /// shell follows.
 ///
-/// IT NAMES THE SAME REGION, like its three siblings: the statistics are another STATE of one
-/// column rather than a second panel. No `aria-expanded` -- this is a navigation, not a
-/// disclosure (the mirror's back control argues the same line).
-export const RightPaneStatsButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
+/// AND IT NAMES A REGION OF ITS OWN (`STATS_VIEW_ID`), not the right-hand column: the statistics
+/// are a PAGE that replaces the conversation and that column both (owner, 2026-10-01), so a
+/// control pointing at the column would be naming a box it does not open. No `aria-expanded` --
+/// this is a navigation, not a disclosure (the mirror's back control argues the same line).
+export const StatsOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
   const { t } = useTranslation();
   return (
     <Button
@@ -115,13 +122,40 @@ export const RightPaneStatsButton: FC<{ onOpen: () => void }> = ({ onOpen }) => 
       variant="ghost"
       size="icon"
       data-slot="right-pane-stats"
-      aria-controls={RIGHT_PANE_ID}
+      aria-controls={STATS_VIEW_ID}
       onClick={onOpen}
       title={t("rightPane.stats")}
       className="text-muted-foreground hover:text-foreground size-8 shrink-0 p-0"
     >
       <EllipsisIcon data-slot="right-pane-stats-icon" className="size-4" />
       <span className="sr-only">{t("rightPane.stats")}</span>
+    </Button>
+  );
+};
+
+/// THE STATISTICS PAGE'S OWN WAY OUT, at the LEADING edge of its header -- the rule the sidebar's
+/// brand row and the right column's header both follow: the row that says what the page IS is the
+/// row an exit belongs in.
+///
+/// IT NAMES THE PAGE IT CLOSES and reports it as the open one (`aria-expanded` is the REGION's
+/// state, not the button's intention -- see `RightPaneOpenButton` above for the long form of that
+/// rule).
+export const StatsCloseButton: FC<{ onClose: () => void }> = ({ onClose }) => {
+  const { t } = useTranslation();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      data-slot="stats-close"
+      aria-controls={STATS_VIEW_ID}
+      aria-expanded={true}
+      onClick={onClose}
+      title={t("rightPane.statsClose")}
+      className="text-muted-foreground hover:text-foreground size-8 shrink-0 p-0"
+    >
+      <ArrowLeftIcon data-slot="stats-close-icon" className="size-4" />
+      <span className="sr-only">{t("rightPane.statsClose")}</span>
     </Button>
   );
 };

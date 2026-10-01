@@ -19,7 +19,7 @@ import { useRef, type FC } from "react";
 import {
   RIGHT_PANE_ID,
   RightPaneCollapseButton,
-  RightPaneStatsButton,
+  StatsOpenButton,
 } from "@/components/right-pane-toggle";
 import { type SubagentView } from "@/components/subagent-view-context";
 import { JobRows } from "@/components/task-pane-jobs";
@@ -70,7 +70,7 @@ export const TaskPane: FC<{
         </span>
         {/* THE HOME'S STATISTICS, at the trailing end: the column's second door, and the only
             thing that end is for (see `components/right-pane-toggle.tsx`). */}
-        <RightPaneStatsButton onOpen={onStats} />
+        <StatsOpenButton onOpen={onStats} />
       </header>
 
       {/* EACH SECTION KEEPS ITS OWN HALF AND SCROLLS INSIDE IT: a section's rows are a list,

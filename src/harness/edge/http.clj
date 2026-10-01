@@ -2345,11 +2345,11 @@
   409, not 400: the conversation exists and is perfectly readable -- what it cannot be is WRITTEN
   to, because this record's rows and frames do not say the same thing yet, and every further run
   would append to a history whose reading is a guess.
-  
+
   THE DOOR OUT IS THE FORK, and the sentence names it and says what to do with it, because a
   refusal that only says no is a wall. `verdict`'s reasons say WHAT is missing -- one sentence
   each, for the client to draw beside the button (they are the same sentences `sofar` answers).
-  
+
   TEMPORARY (owner, 2026-09-28): 'every message must be wrapped by its start/end envelope' is the
   rule this gate makes real, and forking is how a record that breaks it is normalized."
   [thread-id verdict]
@@ -4645,7 +4645,7 @@
   further (`harness.edge.normalized`, ticket 01 of `.scratch/record-normalization`). The client
   disables its composer on `false`, shows `:normalizationReasons` and offers the fork. It rides
   disables its composer on `false`, shows `:normalizationReasons` and offers the fork.
-  
+
   TWO SOURCES, ONE QUESTION, and neither re-reads the bytes on a poll: the RECORD path folds them
   on the walk that already folded the conversation (so the verdict and the messages cannot come from
   two states of the file), and the LIVE branch reads the session's OWN FOLD -- the criterion is
@@ -5299,7 +5299,7 @@
 (defn- mux-replay-run!
   "Hand TOKEN's downlink the run frames of THREAD-ID it is missing: everything remembered
   after RUN-SINCE, oldest first.
-  
+
   A NIL CURSOR REPLAYS NOTHING, and that is deliberate rather than a shortcut: `nil` is 'I
   hold nothing of this run', which is what a connection about to START one declares -- and the
   buffer may still hold the PREVIOUS run's frames, terminal and all, which would finish the
@@ -5535,36 +5535,55 @@
 ;; the snapshot half, this is the push, and both hand over the payload
 ;; `harness.edge.projection/stats-answer` builds.
 
+(defn- stats-days
+  "DAYS off a request's query string, or 7 when it names none.
+
+  THE VIEW OFFERS 7/30/90 AND ANY POSITIVE NUMBER IS TAKEN: that list is the screen's, and a route
+  that refused everything else would be a second place it lives. `harness.edge.projection/stats-answer`
+  clamps what it is given; this only refuses what is not a number at all, by falling back."
+  [req]
+  (let [raw (get (query-params (:query-string req)) "days")]
+    (if-some [n (try (Long/parseLong (str raw)) (catch Throwable _ nil))]
+      n
+      7)))
+
 (defn- stats-frame
-  "The host-level statistics as one downlink frame: `GET /api/stats`' payload plus the type tag
-  that tells this category from every other."
-  [] (assoc (projection/stats-answer) :type "stats"))
+  "The host-level statistics over DAYS as one downlink frame: `GET /api/stats?days=`' payload plus
+  the type tag that tells this category from every other."
+  [days] (assoc (projection/stats-answer days) :type "stats"))
 
 (defn- home-stats-get
   ;; NAMED APART FROM `stats-get` ABOVE, which is the PER-SESSION numbers route under
   ;; /api/threads/<stem>/: two `defn`s of one name would leave the second meaning everything,
   ;; and the session route calling a one-arity fn with two arguments (a 500 nobody would
   ;; connect to a statistics view).
-  "GET /api/stats -- the statistics as one JSON answer: the tool, skill and per-model token
-  leaderboards over every session this home has projected.
+  "GET /api/stats?days=7 -- the statistics as one JSON answer: the tool, skill and per-model
+  token leaderboards over every session this home has projected, for the last DAYS days.
 
   A ROUTE OF ITS OWN rather than a key on GET /api/projects: the sidebar reads that payload on
   every host change and has no use for a count over every tool call, so folding the two
-  together would make every listing pay for a question only one view asks."
-  [_req]
-  (api-response 200 (projection/stats-answer)))
+  together would make every listing pay for a question only one view asks.
+
+  READ-ONLY, like every other GET here: it counts rows and writes nothing. Making the copy again
+  is POST /api/stats/rebuild, and it is a verb because it IS one."
+  [req]
+  (api-response 200 (projection/stats-answer (stats-days req))))
 
 (defn- stats-stream-get
-  "GET /api/events.stats -- the statistics downlink. A WebSocket handed the leaderboards at
-  once and then once per projection round that wrote rows; nothing is sent over it and there is
-  no set to subscribe. THE FRAME IS THE WHOLE ANSWER, like `events.host`: every connection
-  wants the same leaderboards, so there is no cursor to keep and the last frame wins."
+  "GET /api/events.stats?days=7 -- the statistics downlink. A WebSocket handed the leaderboards
+  at once and then once per projection round that wrote rows; nothing is sent over it and there
+  is no set to subscribe. THE FRAME IS THE WHOLE ANSWER, like `events.host`: every connection
+  wants the same leaderboards, so there is no cursor to keep and the last frame wins.
+
+  THE WINDOW IS THE CONNECTION'S OWN (`?days=`), captured in the push below: a page looking at 30
+  days must not be handed 7, and the ring has no opinion about which window a watcher wants."
   [req]
-  (let [registered (atom nil)]
+  (let [days       (stats-days req)
+        registered (atom nil)]
     (hk/as-channel req
                    {:on-open  (fn [ch]
                                 (try
-                                  (let [push (fn [] (mux-send! ch (stats-frame)))]
+                                  (let [push (fn [] (mux-send! ch (stats-frame days)))]
                                     (reset! registered push)
                                     (host/watch-stats! push)
                                     ;; THE FIRST ANSWER AT ONCE: a page that opens this view
@@ -5575,6 +5594,28 @@
                     :on-close (fn [_ch _status]
                                 (when-some [push @registered]
                                   (host/unwatch-stats! push)))})))
+
+(defn- stats-rebuild-post
+  "POST /api/stats/rebuild {days: 7} -- MAKE THE COPY AGAIN for the conversations with anything
+  in that window, and answer {:days n :scheduled bool}.
+
+  THE ONE FULL READ IN THIS FEATURE, and it is a person's (`.scratch/global-stats-panel/`): a
+  table added to the projection cannot be filled by offsets written before it existed, and the
+  answer is a button rather than something a process does to itself at startup.
+
+  IT WRITES NO RECORD -- it deletes projected rows and projects the same logs again (ADR 0008
+  decision 6). AND IT RUNS ON THE PROJECTION'S OWN THREAD when there is one: re-reading a
+  window's logs is not something a request should sit and wait for, and the statistics downlink
+  pushes the new numbers when it lands. With no trigger running (`start!` never called -- a suite,
+  a REPL) the caller does it inline rather than pretending it was scheduled."
+  [req]
+  (let [body (try (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)
+                  (catch Throwable _ {}))
+        days (let [n (:days body)]
+               (if (number? n) (long n) 7))]
+    (if (projection/schedule-rebuild-window! days)
+      (api-response 200 {:days days :scheduled true})
+      (api-response 200 (assoc (projection/rebuild-window! days) :scheduled false)))))
 
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
@@ -6685,8 +6726,9 @@
       :get  (host-get req)
       (api-response 405 {:error "method not allowed"}))
 
-    ;; THE STATISTICS' OWN PAIR, beside the host listing and separate from it: the snapshot a
-    ;; view reads when it opens, and the downlink it then follows.
+    ;; THE STATISTICS' THREE, beside the host listing and separate from it: the snapshot a view
+    ;; reads when it opens, the downlink it then follows, and the ONE verb in the family -- making
+    ;; the copy again for a window, which a person asks for and nothing does on its own.
     (= "/api/stats" (:uri req))
     (case (:request-method req)
       :get  (home-stats-get req)
@@ -6695,6 +6737,11 @@
     (= "/api/events.stats" (:uri req))
     (case (:request-method req)
       :get  (stats-stream-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/stats/rebuild" (:uri req))
+    (case (:request-method req)
+      :post (stats-rebuild-post req)
       (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)

@@ -1970,7 +1970,10 @@ export function App() {
             drawn by the page for the reason the sidebar's is -- the backdrop is the page's box,
             not the panel's -- and `aria-hidden` for the same reason again: it is the second way
             to press the column's own collapse control, and that one is the one with a name. */}
-        {rightPane !== null && (
+        {/* AND NOT FOR THE STATISTICS PAGE (`rightPane.kind === "stats"`): it is not a drawer over the
+            conversation, it IS the room (owner, 2026-10-01) -- there is nothing beside it to tap,
+            and a backdrop would be a second way to do what its own leading button does. */}
+        {rightPane !== null && rightPane.kind !== "stats" && (
           <div
             data-slot="right-pane-backdrop"
             aria-hidden={true}
@@ -2025,7 +2028,12 @@ export function App() {
             refuses to be narrower than the longest argument list, and the page
             scrolls sideways with every preview running off the edge. The chat never
             needed it because its text wraps. */}
-        <div className="min-h-0 min-w-0 flex-1">
+        {/* `hidden` RATHER THAN UNMOUNTED WHEN THE STATISTICS PAGE IS OPEN (owner, 2026-10-01):
+            the conversation keeps its runtime, its run and its scroll position while somebody
+            reads the numbers -- the same choice the sidebar makes when it folds. */}
+        <div
+          className={`min-h-0 min-w-0 flex-1${rightPane?.kind === "stats" ? " hidden" : ""}`}
+        >
           {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ON ITS ROW, not
               here: `registerPending`'s failure goes into `openErrors`, which the sidebar
               draws under the session it belongs to. There is no "no session" box any more
@@ -2107,13 +2115,15 @@ export function App() {
           />
         )}
         {rightPane !== null && rightPane.kind === "stats" && (
-          // THE THIRD STATE OF THE SAME COLUMN: the home's counts, opened from the task view's
-          // trailing `…` and stepped back to the task view from its own header. `openPane` is
-          // the writer for both, so the drawer rule below `md` applies to this state too.
-          <StatsView
-            onCollapse={() => setRightPane(null)}
-            onBack={() => openPane({ kind: "tasks" })}
-          />
+          // THE STATISTICS PAGE, AND IT IS NOT THIS COLUMN'S THIRD STATE (owner, 2026-10-01): it
+          // REPLACES the conversation and this column both -- the middle column below is `hidden`
+          // while this is open -- and leaves the left sidebar alone. `openPane` is still the
+          // writer, so the drawer rule below `md` applies to it.
+          // `sidebarFolded` IS HANDED DOWN BECAUSE THE FLOATING "open the sidebar" CONTROL SITS ON
+          // THIS PAGE'S OWN LEADING BUTTON while the sidebar is folded (the walkthrough found the
+          // two boxes at the same 8,8). The session bar is told the same fact for the same reason
+          // -- see `components/stats-view.tsx` and the `ps-12 lg:ps-3` there.
+          <StatsView onClose={() => setRightPane(null)} sidebarFolded={folded} />
         )}
       </div>
       </SubagentViewContext.Provider>

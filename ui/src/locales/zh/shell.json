@@ -117,6 +117,13 @@
     "statsModelsEmpty": "还没有模型调用报告过用量。",
     "statsUnknownModel": "未命名的模型",
     "statsTokensAbsent": "无用量",
-    "statsModelCalls_other": "{{count}} 次调用"
+    "statsModelCalls_other": "{{count}} 次调用",
+    "statsClose": "回到对话",
+    "statsRange": "统计范围",
+    "statsDays_other": "{{count}} 天",
+    "statsRebuild": "重算",
+    "statsRebuildHint": "把这段时间的投影整份重算一遍：上头的计数就会包含这份拷贝还没拷过的行。",
+    "statsModelsShow": "展开 token 用量",
+    "statsModelsHide": "收起 token 用量"
   }
 }
