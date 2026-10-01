@@ -233,6 +233,32 @@
             out (:content (insert! {:anchor a :direction "after" :lines "P\nQ"}))]
         (is (str/includes? out "Split the whole") (pr-str out))))))
 
+(deftest a-line-that-looks-like-a-json-array-is-inserted-as-it-is
+  ;; Same two bounds as replace's, same reason: `[]` is a line somebody is asking
+  ;; to insert (an empty Clojure arglist), and zero lines is not an insert.
+  (use-mode!)
+  (testing "the only element is `[]`: the line lands, it does not vanish"
+    (put! "one\ntwo\n")
+    (let [out (:content (insert! {:anchor (anchor-of "one") :direction "after"
+                                  :lines ["[]"]}))]
+      (is (= "one\n[]\ntwo\n" (contents)) (pr-str out))
+      (is (str/includes? out "literal") (pr-str out))))
+  (testing "a JSON array in one of SEVERAL elements is left alone"
+    (put! "one\ntwo\n")
+    (let [out (:content (insert! {:anchor (anchor-of "one") :direction "after"
+                                  :lines ["keep" "[\"a\",\"b\"]"]}))]
+      (is (= "one\nkeep\n[\"a\",\"b\"]\ntwo\n" (contents)) (pr-str out))))
+  (testing "the empty array as the whole FIELD is text, not a no-op"
+    (put! "one\ntwo\n")
+    (let [out (:content (insert! {:anchor (anchor-of "one") :direction "after"
+                                  :lines "[]"}))]
+      (is (= "one\n[]\ntwo\n" (contents)) (pr-str out))))
+  (testing "and the slip this leniency is FOR still unpacks: the field's only element"
+    (put! "one\ntwo\n")
+    (let [out (:content (insert! {:anchor (anchor-of "one") :direction "after"
+                                  :lines ["[\"X\",\"Y\"]"]}))]
+      (is (= "one\nX\nY\ntwo\n" (contents)) (pr-str out)))))
+
 (deftest a-nul-byte-is-refused-in-the-lines-too
   (use-mode!)
   (put! "one\ntwo\n")

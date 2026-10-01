@@ -379,6 +379,45 @@
             {:keys [error]} (replace! {:remove_from a :replacement_lines "X"})]
         (is (not error) (pr-str error))))))
 
+(deftest a-line-that-looks-like-a-json-array-is-written-as-it-is
+  ;; The leniency that unpacks a JSON array pasted into an element must not eat a
+  ;; line whose CONTENT is one: `[]` is an empty Clojure arglist, `["a","b"]` is a
+  ;; line of JSON. Two bounds on it, and both are upstream's: unpack only when the
+  ;; array IS the whole field or its only element, and never to zero lines
+  ;; (`pi-hashline-edit-pro/src/utils.ts:319,333`).
+  (use-mode!)
+  (testing "the only element is `[]`: the line is written, not swallowed"
+    (write! "one\ntwo\n")
+    (let [[a _] (read!)
+          out (:content (replace! {:remove_from a :replacement_lines ["[]"]}))]
+      (is (= "[]\ntwo\n" (slurp file :encoding "UTF-8")) (pr-str out))
+      (is (str/includes? out "literal") "and the answer says what it did")))
+  (testing "a JSON array in one of SEVERAL elements is left alone"
+    (write! "one\ntwo\n")
+    (let [[a _] (read!)
+          out (:content (replace! {:remove_from a
+                                   :replacement_lines ["keep" "[\"a\",\"b\"]"]}))]
+      (is (= "keep\n[\"a\",\"b\"]\ntwo\n" (slurp file :encoding "UTF-8")) (pr-str out))
+      (is (str/includes? out "literal") (pr-str out))))
+  (testing "the empty array as the whole FIELD is text, not a deletion"
+    (write! "one\ntwo\n")
+    (let [[a _] (read!)
+          out (:content (replace! {:remove_from a :replacement_lines "[]"}))]
+      (is (= "[]\ntwo\n" (slurp file :encoding "UTF-8")) (pr-str out))
+      (is (str/includes? out "literal") (pr-str out))))
+  (testing "the ARRAY `[]` still deletes the range"
+    (write! "one\ntwo\n")
+    (let [[a _] (read!)]
+      (replace! {:remove_from a :replacement_lines []})
+      (is (= "two\n" (slurp file :encoding "UTF-8")))))
+  (testing "and the slip this leniency is FOR still unpacks: the field's only element"
+    (write! "one\ntwo\n")
+    (let [[a _] (read!)
+          out (:content (replace! {:remove_from a
+                                   :replacement_lines ["[\"X\",\"Y\"]"]}))]
+      (is (= "X\nY\ntwo\n" (slurp file :encoding "UTF-8")) (pr-str out))
+      (is (str/includes? out "Unwrapped a JSON array") (pr-str out)))))
+
 (deftest an-anchor-from-another-file-is-refused
   (use-mode!)
   (write! "one\ntwo\n")
