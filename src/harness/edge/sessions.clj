@@ -13,6 +13,8 @@
                      registered folds, all from one streaming walk.
     :model-messages  what a provider may be handed (`replay/compacted-messages` of
                      `replay/model-view`): the cards off, the compactions and prunes on.
+    :model-nodes     the same array with one stable id per message (`replay/model-nodes`), which is
+                     what the meter's band sizes each node by -- once -- for the ring.
     :read / :fold    the record's rows -- located (`replay/locate`), parsed
                      (`replay/read-records`) and, for a fold, streamed (`replay/fold-records`).
     :claim           `harness.cap.claims`, which is why the session's lifetime is a claim on
@@ -148,6 +150,9 @@
   :model-messages
   (fn [entries compactions prunes]
     (replay/model-view (replay/compacted-messages entries compactions prunes)))
+
+  :model-nodes
+  replay/model-nodes
 
   :read
   (fn [thread-id]

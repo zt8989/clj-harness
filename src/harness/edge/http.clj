@@ -3900,15 +3900,15 @@
       (let [records (:ok read)
             folded  (try (let [records (vec records)
                                ;; THE BAND IS FOLDED ONCE AND BOTH READERS TAKE FROM THAT WALK:
-                               ;; the ring's split is the array the chosen call was handed
-                               ;; (`pressure/anchor-face`) and the meter is the surface it prices.
+                               ;; the ring's split is the sizes the band kept for that call
+                               ;; (`pressure/anchor-sizes`) and the meter is the surface it prices.
                                ;; `meter-of-records` + `state->pressure` + `messages-in` is
                                ;; `pressure/records->pressure` spelled out, which is the price of
                                ;; not walking the whole record twice for one answer.
                                band    (pressure/meter-of-records records)]
                            {:ok (assoc (stats/records->stats records)
                                        :context  (context/records->context records
-                                                                           (pressure/anchor-face band))
+                                                                           (pressure/anchor-sizes band))
                                        :pressure (pressure/state->pressure band
                                                                            (pressure/messages-in records)
                                                                            pressure/default-ratios))})
@@ -3928,8 +3928,9 @@
   one -- which is the failure `stats-get` has always refused.
 
   THE RING'S SPLIT DEPENDS ON THE THIRD FOLD, and that is worth naming where it is spent: the
-  context section's three buckets are the array the CHOSEN CALL was handed, and `pressure` is
-  the fold that keeps one array per call (`anchor-face`). A section asked for without the band
+  context section's three buckets are the sizes the band kept for the array the CHOSEN CALL was
+  handed, and `pressure` is the fold that keeps both (`anchor-sizes`). A section asked for
+  without the band
   is the vendor's number with no split beside it -- a single arc in the fallback colour on the
   page, which is what sent somebody looking (2026-09-30) -- so the band is read here beside
   the other two, and a session whose band is missing answers a thinner section rather than a
@@ -3939,7 +3940,7 @@
     (when-some [ctx (sessions/fold-value stem :context)]
       (let [band (sessions/fold-value stem :pressure)]
         (assoc (stats/stats-answer st)
-               :context (context/state->context ctx (pressure/anchor-face band))
+               :context (context/state->context ctx (pressure/anchor-sizes band))
                ;; THE BAND IS THE THIRD FOLD, and the surface it is asked about is the REQUEST the
                ;; next call would carry -- the conversation PLUS the system message in force
                ;; (`harness.edge.pressure/live-surface`; `sessions/messages` alone is the smaller

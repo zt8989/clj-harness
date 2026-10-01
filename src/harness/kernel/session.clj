@@ -150,6 +150,9 @@
 ;;
 ;;   :build           (fn [thread-id folds] -> the entry a new session is born with)
 ;;   :model-messages  (fn [entries compactions prunes] -> what a provider may be handed)
+;;   :model-nodes     (fn [entries compactions prunes] -> the SAME array, one stable id per
+;;                    message. `sizes` in the meter's band remembers what each node cost, so the
+;;                    ring's numbers are not re-measured over the whole conversation on every call)
 ;;   :read            (fn [thread-id] -> {:ok rows} | {:missing sentence} | {:error sentence})
 ;;   :fold            (fn [thread-id init rf] -> the same three shapes, folded as a stream)
 ;;   :claim           {:take! :release! :hand-over!}
@@ -177,6 +180,7 @@
                     {:entries [] :compactions [] :prunes [] :context [] :state nil
                      :folds {}})
    :model-messages (fn [entries _compactions _prunes] (vec entries))
+   :model-nodes    (fn [entries _compactions _prunes] (vec entries))
    :read           (fn [thread-id]
                     {:missing (str "no record reader is installed for " (pr-str thread-id))})
    :fold           (fn [thread-id _init _rf]
@@ -317,7 +321,14 @@
                                               {:messages (fn [] ((:model-messages @seams)
                                                                   (:entries e)
                                                                   (:compactions e)
-                                                                  (:prunes e)))}
+                                                                  (:prunes e)))
+                                               ;; THE SAME ARRAY WITH AN ID PER NODE, for the one
+                                               ;; reader that must not re-measure it: the meter's
+                                               ;; band remembers each node's size by that id.
+                                               :nodes    (fn [] ((:model-nodes @seams)
+                                                                 (:entries e)
+                                                                 (:compactions e)
+                                                                 (:prunes e)))}
 
                                               [i row]))
                                     (or fs {})

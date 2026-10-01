@@ -1617,7 +1617,8 @@
 
 (defn- session-reducer
   "The reducer of a session's ONE walk: the conversation's own fold (`:sofar`), and every
-  consumer fold fed the same row with `{:messages (fn [] ..)}` -- the conversation as it
+  consumer fold fed the same row with `{:messages (fn [] ..) :nodes (fn [] ..)}` -- the conversation
+  as it stands, and the same array with an id per node -- as ctx.
   stands -- as ctx."
   [folds]
   (fn [acc item]
@@ -1634,7 +1635,12 @@
                   ;; from the folded side) read the same session at 54% while it was really 79%.
                   {:messages (fn [] (compacted-messages (:entries (:own sofar))
                                                         (:compactions sofar)
-                                                        (:prunes sofar)))}
+                                                        (:prunes sofar)))
+                   ;; THE SAME ARRAY WITH AN ID PER NODE, for the reader that must not re-measure
+                   ;; it: the meter's band remembers each node's size by that id (`pressure/sized`).
+                   :nodes    (fn [] (model-nodes (:entries (:own sofar))
+                                                 (:compactions sofar)
+                                                 (:prunes sofar)))}
                   item)))))
 
 (defn- session-init [folds]

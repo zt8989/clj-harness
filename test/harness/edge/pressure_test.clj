@@ -15,6 +15,7 @@
             [clojure.test :refer [deftest is testing]]
             [harness.cap.providers :as providers]
             [harness.edge.http :as http]
+            [harness.edge.context :as context]
             [harness.edge.pressure :as pressure]
             [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
@@ -374,6 +375,72 @@
               "TICKET 03: the band is the session's own fold, so a run start opens no record")
           (is (= "usage" (:baseline from-band))
               "and it anchored on the vendor's own number"))))))
+
+(deftest the-rings-sizes-are-the-array-measured-once
+  ;; WHAT THE BAND REMEMBERS is the price of the ring (`pressure/sized`): each node is measured
+  ;; once and its size kept by id, so the second call's array -- the first one plus a few
+  ;; messages -- is not re-encoded message by message. WHAT IS REMEMBERED MUST STILL BE WHAT THE
+  ;; ARRAY MEASURES, and that is what this checks: a real live session whose run makes TWO
+  ;; calls, against `anchor-face`, the array itself.
+  (let [thread-id "pressure-sizes"]
+    (with-server thread-id
+      ;; TWO CALLS, not one: an answer that asks for a tool keeps the run going, and only then
+      ;; has the second snapshot an array to be incremental about.
+      [{:content "" :tool-calls [{:id "c1" :name "no-such-tool" :arguments {}}]
+        :usage {:prompt_tokens 50000 :completion_tokens 40 :total_tokens 50040}}
+       {:content "done" :usage {:prompt_tokens 60000 :completion_tokens 8 :total_tokens 60008}}]
+      (fn [port]
+        (send-run! port thread-id)
+        (stats-until-pressure port thread-id)
+        (let [band  (sessions/fold-value thread-id :pressure)
+              sizes (pressure/anchor-sizes band)
+              array (pressure/anchor-face band)]
+          (is (some? sizes) "the band kept them for the call that reported")
+          (is (= (:system sizes)
+                 (reduce + 0 (map context/size-of (filter #(= "system" (:role %)) array))))
+              "the system message's characters are the array's own")
+          (is (= (:conversation sizes)
+                 (reduce + 0 (map context/size-of (remove #(= "system" (:role %)) array))))
+              "and the conversation's -- injections and all")
+          (is (pos? (:conversation sizes)) "the array is not empty"))))))
+
+(deftest two-nodes-under-one-id-are-still-two-sizes
+  ;; THE KEY `sized` REMEMBERS BY IS `[node-id message-id]`, AND THIS IS WHY THE NODE ID ALONE IS
+  ;; NOT ENOUGH: a reasoning node is INSERTED in front of the answer it belongs to and takes that
+  ;; answer's own record seq, so one array can hold two messages under one node id. Keyed on the id
+  ;; alone, each lent the other its size -- measured on a real record, 2,855,045 characters kept
+  ;; against 2,276,023 measured, a quarter too many.
+  (let [run-id  "r1"
+        records [(entry 0 "u1" "hi")
+                 (sys 1 "s")
+                 ;; THE MODEL'S OWN ROW CARRIES THE THINKING since the per-token frames were
+                 ;; dropped, and the fold inserts a `reasoning` node in front of it.
+                 (record 2 "event" {:type "RUN_STARTED" :threadId "t" :runId run-id})
+                 (record 3 "event" {:type "TEXT_MESSAGE_START" :messageId "r1-m0"
+                                    :role "assistant"})
+                 (record 4 "event" {:type "TEXT_MESSAGE_CONTENT" :messageId "r1-m0"
+                                    :delta "the answer"})
+                 (assoc (record 5 run-id "message"
+                              {:role "assistant" :content "the answer"
+                               :reasoning_content (apply str (repeat 300 "t"))})
+                        :source "model")
+                 (start 10 1000 nil)
+                 (end 20 (usage 500 5))
+                 (record 30 "event" {:type "RUN_FINISHED" :threadId "t" :runId run-id})]
+        nodes   (replay/model-nodes (replay/entries records) [] [])]
+    (is (some #(> (val %) 1) (frequencies (map :id nodes)))
+        "the fixture really has two nodes under one id, or this case proves nothing")
+    (let [band  (pressure/meter-of-records records)
+          sizes (pressure/anchor-sizes band)
+          array (pressure/anchor-face band)]
+      (is (some? sizes))
+      (is (= (:system sizes)
+             (reduce + 0 (map context/size-of (filter #(= "system" (:role %)) array)))))
+      (is (= (:conversation sizes)
+             (reduce + 0 (map context/size-of (remove #(= "system" (:role %)) array))))
+          "and the kept sizes are what that array measures, message for message"))))
+
+
 
 (deftest the-band-ignores-a-call-the-harness-wrote-for-itself
   ;; The band-level half of ticket 02: a compaction's own `model/start` carries no run id,

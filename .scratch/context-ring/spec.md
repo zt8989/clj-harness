@@ -64,18 +64,29 @@ run 自己的注入。这条例由 `harness.edge.pressure/messages-of` 拼，`co
 `harness.edge.http`（`live-numbers` 与 stats 的折路把 face 传进去，折路只折一次 band）。前端**一个字节
 没动**。
 
-**代价（量过，不是估的）**：三桶按数组量字符，一次约 **64ms** —— 那份 2 MB / 1354 条的活会话上量的，
-（推送里带着环的四样东西）。同一量级的两项本来就在付：`band-pressure` 要把同一段对话估两遍，
-`live-surface` 还要把它拼出来。所以它不是零，只是与邻居同量级：`dev/scratch_ctx_face.clj` 把「纯量
-字符」和「折 + 量」两个数一起印出来，将来要省，先省这里（比如把三桶的字符数在折子里增量维护，而不是
-每次重算）。
+**代价，量过两轮（这一节是两个问题，别混成一个）**：
 
-**但整份答案一回调用里原来算三遍（2026-09-30 收掉了一遍）**：`model/start` 一遍（那是要用的 —— 它答的
-是**上一发**，见上），`model/end` **两遍** —— 推送（`live-numbers-slice`）与落库（`numbers-snapshot`）
-各自向 fold 要了同一瞬间的同一份答案。现在那个回调只装配一次，两个读者拿同一个值（`slice-of` /
-`snapshot-of` 是拆出来的两半算术）。`stats-test/the-numbers-are-assembled-once-per-model-fact` 数着钉住
-它：两发调用的 run，改前 7 次、改后 5 次（2 个 start + 2 个 end + run 收尾那一次）。
-上面那句「每个 `model/start` 和每个 `model/end` 各付一次」的账，也就此结清。
+**一、一回调用里整份答案装配了几遍。** 原来三遍：`model/start` 一遍（那是要用的 —— 它答的是**上一
+发**，见上），`model/end` **两遍** —— 推送（`live-numbers-slice`）与落库（`numbers-snapshot`）各自向
+fold 要了同一瞬间的同一份答案。现在那个回调只装配一次，两个读者拿同一个值（`slice-of` / `snapshot-of`
+是拆出来的两半算术）。`stats-test/the-numbers-are-assembled-once-per-model-fact` 数着钉住它：两发调用的
+run，改前 7 次、改后 5 次（2 个 start + 2 个 end + run 收尾那一次）。
+
+**二、量那一段对话要多少钱。** 第一版是**每次读**把整段逐条 JSON 编码一遍（`size-of`）：真会话上
+**~65–100ms / 2 MB**（1500 条），而推送里每回调用要读两三次。第二版把这一步挪进 `pressure` 的 band
+（`sized`）：**每条消息只量一次**，按 `[节点号 消息号]` 记住（节点号 = 记录行号；光用它不够 —— reasoning
+节点是**插在**它所答的那条消息**前面**、共用同一个行号，实测这样记账会把 285 万画成 227 万再反过来：多算
+四分之一，`pressure-test/two-nodes-under-one-id-are-still-two-sizes` 钉住这一条）。同一条真会话上：
+
+    逐条量一遍（改之前每次读付的）   65–102 ms
+    现在一次读（数已在手上）          1.2–1.4 ms
+
+**它不是零，只是搬了家**：冷读整份记录（band 一边走一边记账，含折行本身）仍是 ~1.3s / 9177 行，而那份
+记录里每条消息到现在只被编码过一次。两个数由 `dev/scratch_ctx_face.clj` 并排印出来，并且先对一次账：
+**记账的数和「从零量一遍」的数必须一模一样**（真记录上是 `{:system 5311, :conversation 2283091}`，逐位相等）。
+
+顺带结清的一条：`harness.edge.context` 从此**不碰数组**，只把 band 给的两个数按厂商的总数摊开；环读的地方
+再也没有一次 JSON 编码。
 
 ## 读数留档（2026-09-30，修之前，真会话 `62f30024-…`）
 
