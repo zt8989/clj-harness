@@ -48,6 +48,14 @@
 (defn- conversation [records]
   (mapv (comp :content :message) (replay/entries (vec records))))
 
+
+(defn- folded
+  "SUMMARY -> the content the model reads in its place: the checkpoint's preamble, a blank line,
+  and the summary inside its tags (`replay/compaction-summary`). Spelled once here so the cases
+  below pin the SHAPE -- a reader can find the tag, and a model is told that what follows is the
+  newer half -- instead of re-typing the sentence."
+  [summary]
+  (:content (replay/compaction-summary summary)))
 ;; -------------------------------------------------------------- the projection
 
 (deftest a-compaction-hides-its-range-from-the-model-and-leaves-the-record-alone
@@ -59,7 +67,7 @@
                  (entry 5 "u5" "five")]]
     (is (= ["one" "two" "three" "four" "five"] (conversation records))
         "the conversation keeps every original -- the client reads the source")
-    (is (= ["<compacted-summary>S1</compacted-summary>" "three" "four" "five"]
+    (is (= [(folded "S1") "three" "four" "five"]
            (mapv :content (model-view records)))
         "the model reads the summary where the range stood, and the tail in order")
     (is (= 6 (count records)) "the record keeps every row, the fact included")))
@@ -75,7 +83,7 @@
         facts   (replay/compaction-facts (vec records))]
     (is (= [4 2] (:shadowed (second facts)))
         "the second range names the first summary (seq 4) and an OLDER node (seq 2): start > end")
-    (is (= ["<compacted-summary>S2</compacted-summary>" "four" "five"]
+    (is (= [(folded "S2") "four" "five"]
            (mapv :content (model-view records)))
         "the first summary is gone, the second stands at the range's head, the tail survives")))
 
@@ -87,7 +95,7 @@
                  (entry 1 "u2" "two")
                  (entry 2 "u3" "three")
                  (compacted 3 [1] "S")]]
-    (is (= ["one" "<compacted-summary>S</compacted-summary>" "three"]
+    (is (= ["one" (folded "S") "three"]
            (mapv :content (model-view records))))))
 
 (deftest two-non-overlapping-compactions-both-stand-in-order
@@ -99,8 +107,8 @@
                  (entry 5 "u6" "six")
                  (compacted 6 [0] "HEAD")
                  (compacted 7 [4 5] "TAIL")]]
-    (is (= ["<compacted-summary>HEAD</compacted-summary>" "two" "three" "four"
-            "<compacted-summary>TAIL</compacted-summary>"]
+    (is (= [(folded "HEAD") "two" "three" "four"
+            (folded "TAIL")]
            (mapv :content (model-view records)))
         "each summary stands where its own range stood, and the untouched middle survives")))
 
@@ -330,6 +338,66 @@
           "no git here is a fact worth reporting as nothing, never as a failure")
       (finally (io/delete-file dir true)))))
 
+(deftest the-trees-with-uncommitted-work-are-listed-not-assumed
+  ;; OWNER'S INCIDENT, 2026-10-01 (thread `a0621fce-...`): the session was bound to the main
+  ;; checkout while its work was in `.worktrees/shell-03-07`, and the block told the summary
+  ;; that "the work is happening" in the main checkout -- transcribing somebody else's dirty
+  ;; files (`M .gitignore` / `?? .claude/`) while the session's OWN two edited test files sat
+  ;; in the worktree. What is read now is every working tree that has uncommitted changes.
+  (let [root (io/file (System/getProperty "java.io.tmpdir")
+                      (str "harness-trees-" (java.util.UUID/randomUUID)))
+        wt   (io/file root ".worktrees" "feat")]
+    (.mkdirs root)
+    (try
+      (let [d (.getAbsolutePath root)
+            g (fn [dir cmd] (shell/run {:command cmd :dir dir :timeout-ms 60000}))]
+        (g d "git init -q")
+        (spit (io/file root "a.txt") "hi\n")
+        (g d "git add a.txt")
+        (g d "git -c user.email=t@example.com -c user.name=t commit -q -m x")
+        (spit (io/file root "bound.txt") "bound\n")
+        (g d "git worktree add -q .worktrees/feat -b feat")
+        (spit (io/file wt "in-the-worktree.clj") "(ns x)\n")
+        (let [others (compaction/other-trees d)
+              block  (compaction/repository-block (compaction/repository d))]
+          (is (= 1 (count others)) "only the tree with uncommitted work is listed")
+          (is (str/includes? (str (:worktree (first others))) ".worktrees"))
+          (is (some #(str/includes? % "in-the-worktree.clj") (:uncommitted (first others)))
+              "and its OWN dirty paths are read in that tree")
+          (is (str/includes? block "this session's bound directory:")
+              "the bound checkout is named AS the bound checkout -- not as where the work is")
+          (is (str/includes? block "in-the-worktree.clj")
+              "the worktree's own dirty file is in the block, under its own path")))
+      (finally
+        (doseq [f (reverse (file-seq root))] (io/delete-file f true))))))
+
+(deftest the-summary-skeleton-ends-at-the-seam
+  ;; COPIED FROM THE REFERENCE (`dsh-compaction-basic`'s `COMPACTION_INSTRUCTION`): the sections
+  ;; are fixed and the last two are Current Work / Next Step, an empty section is still a
+  ;; section, and the rules forbid editorialising about provenance. A free-form instruction is
+  ;; what produced the summary of the owner's incident (thread `a0621fce-...`, 2026-10-01): a
+  ;; `# State` block naming an OLD commit and tickets 'not yet done', plus 'not created by me'
+  ;; -- which the model then read as the present.
+  (let [instruction compaction/summary-instruction
+        sections    ["## Primary Request and Intent" "## Key Technical Concepts"
+                     "## Files and Code" "## Errors and Fixes" "## Pending Jobs"
+                     "## Current Work" "## Next Step" "## Critical Context"]
+        positions   (mapv #(.indexOf ^String instruction %) sections)]
+    (is (every? #(>= (long %) 0) positions) "every section is asked for")
+    (is (= (sort positions) positions) "in the reference's own order")
+    (is (< (.indexOf ^String instruction "## Current Work")
+           (.indexOf ^String instruction "## Next Step"))
+        "and the last two are where the work stands now and what comes next")
+    (is (str/includes? instruction "Write \"(none)\" for an empty section")
+        "an empty section is written, never dropped")
+    (is (str/includes? instruction
+                       "Do NOT mention this summarization request or that the context was compacted.")
+        "no editorialising about provenance -- the rule the incident's summary broke")
+    (is (str/includes? instruction "Do not copy it forward verbatim")
+        "a second fold merges the first checkpoint instead of copying it forward")
+    (is (str/includes? instruction "Already produced")
+        "and our own facts list is still asked for: this skeleton does not replace it")))
+
 (deftest the-summary-request-carries-every-part-and-only-the-ones-that-exist
   ;; The shape of what the summarizer is told (owner, 2026-09-27): the instruction always,
   ;; and each other part only when there is something to say.
@@ -342,10 +410,10 @@
                                            :blocks ["read AGENTS.md first"]})]
     (is (str/includes? full "Already produced"))
     (is (str/includes? full "src/a.clj"))
-    (is (str/includes? full "Where this work is happening"))
+    (is (str/includes? full "The working trees of this repository"))
     (is (str/includes? full "branch:   main"))
     (is (str/includes? full "read AGENTS.md first"))
-    (is (< (.indexOf full "Already produced") (.indexOf full "Where this work"))
+    (is (< (.indexOf full "Already produced") (.indexOf full "The working trees"))
         "facts, then the environment, then the hook's words -- one order")))
 
 (deftest the-summary-request-puts-a-late-answer-behind-its-call

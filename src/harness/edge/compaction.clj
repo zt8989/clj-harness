@@ -31,16 +31,72 @@
             [harness.kernel.llm :as llm]))
 
 (def summary-instruction
-  "What the summarizer is told. It asks for the facts a continuing model needs and for
-  nothing invented -- exact paths, commands, error strings, identifiers, numbers, and what
-  was already decided (including what was tried and failed)."
-  "Summarize the conversation above so another model can continue the work from it. Keep
-exact file paths, commands, error strings, identifiers, numbers, function signatures and
-decisions already made, including anything that was tried and failed. Then, under a heading
-`Already produced`, list the concrete things this range has produced -- branches and
-worktrees created, files written or edited, anything left uncommitted -- verbatim, because a
-model that cannot see what it already made mistakes its own work for somebody else's. Do
-not invent anything. Be concise.")
+  "What the summarizer is told.
+
+  THE SECTION LIST, THE RULES AND THEIR WORDING ARE COPIED FROM THE REFERENCE
+  (`@deepseek-ai/dsh@0.1.5-rc.2`, `packages/compaction/compaction-basic/src/summarizer.ts`,
+  `COMPACTION_INSTRUCTION`). Two things in it are the whole reason for copying rather than
+  paraphrasing, and both are about the SEAM the summary has to be read against:
+
+    - the last two sections are `## Current Work` and `## Next Step`: a summary written under
+      this skeleton cannot be a 'state of the world' that stops at an old commit -- it has to
+      say where the work stood AT THE CHECKPOINT and what the single next action is;
+    - `Do NOT mention this summarization request or that the context was compacted` -- the
+      model is told not to editorialise about provenance. The summary of the owner's incident
+      (thread `a0621fce-...`, 2026-10-01) said 'not created by me -- reported by git now',
+      which is exactly the kind of sentence that made it read its own work as a stranger's.
+
+  OUR ONE ADDITION is the `Already produced` list, which `summary-content` appends to this
+  message from `product-facts` -- the artifacts read off the tool calls. It is kept because its
+  own docstring names the failure it guards ('a model that cannot see what it already made
+  mistakes its own work for somebody else's'), and the reference has no equivalent."
+  (str/join
+   "\n"
+   ["You are now acting as a compaction engine for this AI coding assistant. Condense the"
+    "conversation ABOVE into a structured checkpoint that lets another model resume the work"
+    "with no loss of essential context."
+    ""
+    "Output EXACTLY the Markdown structure below: keep every section, in order. Use terse"
+    "bullets, not prose paragraphs. Write \"(none)\" for an empty section -- never drop a"
+    "section."
+    ""
+    "## Primary Request and Intent"
+    "- [the user's original and evolving goals; quote verbatim where the exact wording matters]"
+    ""
+    "## Key Technical Concepts"
+    "- [technologies, frameworks, patterns, and conventions in play]"
+    ""
+    "## Files and Code"
+    "- [exact path: why it matters, key changes or snippets]"
+    ""
+    "## Errors and Fixes"
+    "- [error: how it was resolved, plus any related user feedback]"
+    ""
+    "## Pending Jobs"
+    "- [explicitly requested work not yet completed]"
+    ""
+    "## Current Work"
+    "- [precisely what was in progress at this checkpoint]"
+    ""
+    "## Next Step"
+    "- [the single next action, directly in line with the most recent request, or \"(none)\"]"
+    ""
+    "## Critical Context"
+    "- [decisions and their rationale, constraints, user preferences, open questions, data"
+    "needed to continue]"
+    ""
+    "Rules:"
+    "- Write concise English engineering prose. Preserve exact file paths, commands, error"
+    "strings, identifiers, numeric values, function signatures, and syntax fragments."
+    "- Capture user feedback and explicit instructions faithfully, especially corrections."
+    "- Do NOT mention this summarization request or that the context was compacted."
+    "- Output only the checkpoint text: do not call any tool or take any other action."
+    "- If the conversation already contains a <compacted-summary> block, it is a PRIOR"
+    "checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones,"
+    "and merge newer information into a single consolidated summary under the same structure."
+    "- The artifacts this range has produced are listed for you at the end of this message"
+    "under `Already produced`, read off the tool calls; do not invent entries and do not drop"
+    "the list."]))
 
 (def ^:private shell-productions
   "The shell shapes that CREATE an artifact a later model must not re-create, as patterns
@@ -70,12 +126,24 @@ not invent anything. Be concise.")
   caller appends it to the summary request so the two agree on the facts that matter most.
 
   A `/tmp/...` path is still reported: it is what the call said, and dropping it would be
-  this function deciding what mattered."
+  this function deciding what mattered.
+
+  IT FOLDS ITS INPUT FIRST, and that is not tidiness -- it is the whole of a bug found on a
+  real session (thread `a0621fce-...`, 2026-10-01). A plan's surface is the record's own
+  fold, whose messages are in the KERNEL (AG-UI) shape -- a tool call lives under
+  `:toolCalls` / `:toolCallId` -- while this function read the PROVIDER shape
+  (`[:function :name]`). So it answered the EMPTY list on every real compaction, the
+  `Already produced` section of the instruction was never written, and the half whose own
+  docstring says it is what stops a model mistaking its own work for somebody else's was
+  dead in production (measured on that session: 0 facts read the kernel shape, 31 through
+  this fold). A caller that hands provider-shaped messages in is unaffected: the fold is the
+  run path's own `ag/provider-messages`, and it is idempotent."
   [messages]
-  (let [calls (for [m    messages
-                    :when (= "assistant" (:role m))
-                    call (:tool_calls m)]
-                call)]
+  (let [messages (ag/provider-messages messages)
+        calls    (for [m    messages
+                      :when (= "assistant" (:role m))
+                      call (:tool_calls m)]
+                  call)]
     (->> calls
          (mapcat (fn [call]
                    (let [name (get-in call [:function :name])
@@ -151,11 +219,103 @@ not invent anything. Be concise.")
            (remove nil?)
            (str/join "\n")))))
 
+(def ^:private trees-limit
+  "How many OTHER working trees of one repository the block may name. The bound directory
+  always comes; the others come when they have uncommitted changes. A repository with twenty
+  worktrees must not turn `compaction/start` into a directory listing."
+  4)
+
+(defn- worktree-listing
+  "`git worktree list --porcelain`'s TEXT -> [{:path .. :branch ..} ..], in git's own order."
+  [text]
+  (loop [lines (str/split-lines (str text)) trees [] current nil]
+    (if-some [line (first lines)]
+      (cond
+        (str/starts-with? line "worktree ")
+        (recur (rest lines) (cond-> trees (some? current) (conj current)) {:path (subs line 9)})
+
+        (str/starts-with? line "branch ")
+        (recur (rest lines) trees
+               (assoc current :branch (str/replace (subs line 7) #"^refs/heads/" "")))
+
+        (= line "detached")
+        (recur (rest lines) trees (assoc current :branch "detached"))
+
+        :else (recur (rest lines) trees current))
+      (cond-> trees (some? current) (conj current)))))
+
+(defn- dirty-tree
+  "One worktree from the listing -> `environment`'s shape, or nil when that tree has nothing
+  uncommitted. ONE `git status` in that tree; the path and the branch are the listing's own."
+  [{:keys [path branch]}]
+  (let [dirty (some-> (git path "status --porcelain") str/split-lines)]
+    (when (seq dirty)
+      {:worktree    path
+       :branch      branch
+       :uncommitted (vec (take uncommitted-limit dirty))
+       :dirty-total (count dirty)})))
+
+(defn other-trees
+  "DIR -> this repository's OTHER working trees that have uncommitted changes, each in
+  `environment`'s shape, or nil when there is nothing to say (not a repository, no other
+  tree, every other tree clean).
+
+  WHY A LIST OF TREES AND NOT JUST DIR. A session's binding is the PROJECT directory and an
+  agent that works in a worktree (`git worktree add .worktrees/x`) never moves it -- so a block
+  that answers DIR alone tells a session working elsewhere that 'the work is happening' in the
+  main checkout, and then transcribes THAT tree's uncommitted paths (the owner's own incident,
+  thread `a0621fce-...`, 2026-10-01: the summary said `M .gitignore` / `?? .claude/` -- not
+  the session's files -- while the session's two edited test files sat in
+  `.worktrees/shell-03-07`, and the model went on to take its OWN uncommitted work for
+  another session's). The trees are read off git at the moment of the compaction; which one
+  the work is in is then a fact the reader can see, not this function's guess."
+  [dir]
+  (when (and dir (not (str/blank? (str dir))))
+    (let [bound (git dir "rev-parse --show-toplevel")]
+      (->> (worktree-listing (git dir "worktree list --porcelain"))
+           (remove #(= (:path %) bound))
+           (keep dirty-tree)
+           (take trees-limit)
+           vec))))
+
+(defn repository
+  "DIR -> `{:bound <environment for DIR> :others <other-trees>}`, or nil when neither has
+  anything to say. `:bound` is nil for an unbound session or a directory git does not know."
+  [dir]
+  (let [bound  (environment dir)
+        others (other-trees dir)]
+    (when (or bound (seq others))
+      {:bound bound :others (vec others)})))
+
+(defn repository-block
+  "REPOSITORY (`repository`'s answer) -> the text the summary request carries about WHERE
+  this work is happening, or nil when there is nothing to say. PURE, so the shape is a test's
+  rather than git's.
+
+  THE BOUND DIRECTORY IS NAMED AS THE BOUND DIRECTORY. It is the one tree the harness knows the
+  session is rooted in, and it is not the same claim as 'the work is here' -- the trees with
+  uncommitted changes are listed under it, each with its own branch and paths, so a session
+  working in a worktree reads its own tree's name back instead of the main checkout's."
+  [{:keys [bound others]}]
+  (let [parts (cond-> []
+                bound
+                (conj (str "this session's bound directory: " (:worktree bound) "\n"
+                           (environment-block (dissoc bound :worktree))))
+
+                (seq others)
+                (conj (str "other working trees of this repository with uncommitted changes:\n"
+                           (str/join "\n\n"
+                                     (map (fn [t]
+                                            (str (:worktree t) "\n"
+                                                 (environment-block (dissoc t :worktree))))
+                                          others)))))]
+    (when (seq parts) (str/join "\n\n" parts))))
 (defn summary-content
   "THE ONE USER MESSAGE THE SUMMARIZER IS HANDED, assembled from what the caller knows:
 
     :facts       the artifacts read off the tool calls (`product-facts`)
-    :environment the working tree, read off git (`environment-block`)
+    :environment the repository's working trees and their uncommitted paths, read off git
+                 (`repository-block`)
     :blocks      what a `:pre-compact` hook printed, verbatim and in declaration order
 
   EACH PART IS OPTIONAL AND AN EMPTY ONE IS SIMPLY ABSENT -- no heading for nothing to say.
@@ -166,7 +326,7 @@ not invent anything. Be concise.")
        (when (seq facts)
          (str "\n\nAlready produced (read off the tool calls above):\n" (str/join "\n" facts)))
        (when (seq environment)
-         (str "\n\nWhere this work is happening (read from git just now):\n" environment))
+         (str "\n\nThe working trees of this repository (read from git just now):\n" environment))
        (when (seq blocks)
          (str "\n\n" (str/join "\n\n" blocks)))))
 
@@ -249,6 +409,28 @@ not invent anything. Be concise.")
                            " retries (0 disables the recovery), but it is " (pr-str n))
                       {:key :overflow-retries :value n :reason :bad-overflow-retries})))
     n))
+
+(def default-max-tokens
+  "How many OUTPUT tokens one summary call may spend when `config.edn` says nothing: 8192 --
+  the reference's own default (`@deepseek-ai/dsh@0.1.5-rc.2`, compaction-basic's `maxTokens`).
+  A checkpoint that runs into this cap is TRUNCATED, and half a state block is worse than none:
+  the caller refuses it rather than landing it (`harness.edge.http`'s summary call checks the
+  endpoint's own finish reason)."
+  8192)
+
+(defn check-max-tokens!
+  "Validate one configured output cap, or throw naming what is wrong. Split out for the same reason `check-ratios!` is: the refusal can be asserted without a file."
+  [n]
+  (when-not (and (integer? n) (pos? n))
+    (throw (ex-info (str "config.edn's :session :compaction max-tokens must be a positive"
+                         " whole number of output tokens, but it is " (pr-str n))
+                    {:key :max-tokens :value n :reason :bad-compaction-value})))
+  n)
+
+(defn max-tokens
+  "The output cap one summary call carries for this session: `config.edn`'s \":compaction :max-tokens\", defaulting to `default-max-tokens`."
+  [thread-id]
+  (check-max-tokens! (get (block thread-id) :max-tokens default-max-tokens)))
 
 ;; ------------------------------------------------------------------------ the lock
 
@@ -507,7 +689,24 @@ not invent anything. Be concise.")
                                           :blocks      blocks})]
         (append "compaction/start" {:compactionId id :instruction instruction})
         (try
-          (let [summary (summarize (:messages head) instruction)]
+          (let [summary (summarize (:messages head) instruction)
+                ;; THE SUMMARY HAS TO COME OUT SMALLER THAN WHAT IT REPLACES -- the check the
+                ;; reference makes (`dsh-compaction-basic`'s `summarizeCompaction`: a framed
+                ;; checkpoint that does not price below the shadowed range is refused). We had
+                ;; only the ENTRY guard (`min-head-tokens`: the head must be worth folding); this
+                ;; is the EXIT one. A summary that is not smaller would leave the pressure exactly
+                ;; where it was and burn a model call doing it, and `.scratch/compaction-shape`
+                ;; has the incident that class of failure caused (four folds in two and a half
+                ;; minutes, every one folding a summary into another). The MESSAGE is priced, not
+                ;; the text: the preamble and the tags are part of what the next request carries.
+                framed  (pressure/estimate-message (replay/compaction-summary summary))]
+            (when (>= framed (:head-tokens head))
+              (throw (ex-info (str "the summary is not smaller than the range it replaces ("
+                                   framed " estimated tokens framed >= " (:head-tokens head)
+                                   " shadowed)")
+                              {:reason :summary-not-smaller
+                               :framed framed
+                               :shadowed (:head-tokens head)})))
             (append "context/compacted"
                     {:compactionId id
                      :summary      summary

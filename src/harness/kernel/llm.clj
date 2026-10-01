@@ -569,7 +569,7 @@
     {:lines (line-seq reader) :stop! (fn [] nil)}))
 
 (defmethod stream! :openai-completions
-  [{:keys [model reasoning-effort tools] :as provider} messages on-event thread-id]
+  [{:keys [model reasoning-effort tools max-tokens] :as provider} messages on-event thread-id]
   (let [body (json/write-str (cond-> {:model model
                                       :messages messages
                                       :stream true}
@@ -581,7 +581,14 @@
                                ;; calls (which do carry tools) went through every time. No tools
                                ;; declared is not 'tools: none', it is the field's absence.
                                (seq tools) (assoc :tools tools)
-                               reasoning-effort (assoc :reasoning_effort reasoning-effort)))
+                               reasoning-effort (assoc :reasoning_effort reasoning-effort)
+                               ;; A CAP ON THE ANSWER, when the caller named one: a compaction's
+                               ;; summary is the caller that does (`compaction/max-tokens`, copied
+                               ;; from the reference's 8192), and a summary that hits the cap is
+                               ;; TRUNCATED -- which the caller refuses rather than lands. A vendor
+                               ;; that is not sent the field is not being told anything about length,
+                               ;; so it stays absent when nobody named a number.
+                               max-tokens (assoc :max_tokens max-tokens)))
         ;; THE REQUEST LANDS BEFORE IT GOES OUT, so a call that never comes back is
         ;; still on the record -- a hang is exactly when somebody wants to read what
         ;; was sent. Best-effort, and off unless CLJ_HARNESS_LLM_DEBUG is set:
