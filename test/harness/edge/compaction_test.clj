@@ -330,6 +330,39 @@
           "no git here is a fact worth reporting as nothing, never as a failure")
       (finally (io/delete-file dir true)))))
 
+(deftest the-trees-with-uncommitted-work-are-listed-not-assumed
+  ;; OWNER'S INCIDENT, 2026-10-01 (thread `a0621fce-...`): the session was bound to the main
+  ;; checkout while its work was in `.worktrees/shell-03-07`, and the block told the summary
+  ;; that "the work is happening" in the main checkout -- transcribing somebody else's dirty
+  ;; files (`M .gitignore` / `?? .claude/`) while the session's OWN two edited test files sat
+  ;; in the worktree. What is read now is every working tree that has uncommitted changes.
+  (let [root (io/file (System/getProperty "java.io.tmpdir")
+                      (str "harness-trees-" (java.util.UUID/randomUUID)))
+        wt   (io/file root ".worktrees" "feat")]
+    (.mkdirs root)
+    (try
+      (let [d (.getAbsolutePath root)
+            g (fn [dir cmd] (shell/run {:command cmd :dir dir :timeout-ms 60000}))]
+        (g d "git init -q")
+        (spit (io/file root "a.txt") "hi\n")
+        (g d "git add a.txt")
+        (g d "git -c user.email=t@example.com -c user.name=t commit -q -m x")
+        (spit (io/file root "bound.txt") "bound\n")
+        (g d "git worktree add -q .worktrees/feat -b feat")
+        (spit (io/file wt "in-the-worktree.clj") "(ns x)\n")
+        (let [others (compaction/other-trees d)
+              block  (compaction/repository-block (compaction/repository d))]
+          (is (= 1 (count others)) "only the tree with uncommitted work is listed")
+          (is (str/includes? (str (:worktree (first others))) ".worktrees"))
+          (is (some #(str/includes? % "in-the-worktree.clj") (:uncommitted (first others)))
+              "and its OWN dirty paths are read in that tree")
+          (is (str/includes? block "this session's bound directory:")
+              "the bound checkout is named AS the bound checkout -- not as where the work is")
+          (is (str/includes? block "in-the-worktree.clj")
+              "the worktree's own dirty file is in the block, under its own path")))
+      (finally
+        (doseq [f (reverse (file-seq root))] (io/delete-file f true))))))
+
 (deftest the-summary-request-carries-every-part-and-only-the-ones-that-exist
   ;; The shape of what the summarizer is told (owner, 2026-09-27): the instruction always,
   ;; and each other part only when there is something to say.
@@ -342,10 +375,10 @@
                                            :blocks ["read AGENTS.md first"]})]
     (is (str/includes? full "Already produced"))
     (is (str/includes? full "src/a.clj"))
-    (is (str/includes? full "Where this work is happening"))
+    (is (str/includes? full "The working trees of this repository"))
     (is (str/includes? full "branch:   main"))
     (is (str/includes? full "read AGENTS.md first"))
-    (is (< (.indexOf full "Already produced") (.indexOf full "Where this work"))
+    (is (< (.indexOf full "Already produced") (.indexOf full "The working trees"))
         "facts, then the environment, then the hook's words -- one order")))
 
 (deftest the-summary-request-puts-a-late-answer-behind-its-call

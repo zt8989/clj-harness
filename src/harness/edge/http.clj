@@ -6324,12 +6324,14 @@
                                        :append       put
                                        :plan-fn      (when (:aggressive? opts) compaction/overflow-plan)
                                        :summarize    summarize
-                                       ;; THE TWO PIECES OF THE PROMPT THE EDGE OWNS: where the
-                                       ;; work is happening (git, read on the session's own
-                                       ;; directory) and what a `:pre-compact` hook printed.
-                                       ;; `compaction/start` records the assembled prompt.
-                                       :environment  (compaction/environment-block
-                                                      (compaction/environment
+                                       ;; THE TWO PIECES OF THE PROMPT THE EDGE OWNS: the repository's
+                                       ;; working trees -- the bound one named AS the bound one, and the
+                                       ;; others when they have uncommitted changes (git, read just now;
+                                       ;; the trees matter because a session working in a worktree is
+                                       ;; bound to the project directory) -- and what a `:pre-compact`
+                                       ;; hook printed. `compaction/start` records the assembled prompt.
+                                       :environment  (compaction/repository-block
+                                                      (compaction/repository
                                                        (project/binding-for stem)))
                                        ;; AND THE SURFACE THE PLAN PLANS OVER: the array the MODEL is
                                        ;; handed, when this process holds the session -- which is the
