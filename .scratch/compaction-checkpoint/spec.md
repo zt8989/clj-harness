@@ -166,3 +166,11 @@ uncommitted (23 path(s)):
 2026-10-01 — 01/02 与 03/04/05/07 都已落地（分支 `compaction-checkpoint`），票按仓库规矩从
 `issues/` 删掉：造过什么记在这里与 git 里。**只剩 06**（live 面比记录折叠大出来的那 1/3）——它是
 调查，不是照抄；在那之前别再拿估价器给压缩记账。
+
+2026-10-01（同日晚些） — **主人拍定：完全参照 DSH 的策略，注入的 git 事实不要了。** 于是 01 与 02
+整体撤销（`environment` 一族、`repository`/`other-trees`、`product-facts`、`summary-content`、
+`:environment`/`:blocks` 两个入参、以及「hook 的话随摘要请求走」这一路；hook 点本身留着）。
+决策与理由写进 **[ADR 0013](../../docs/adr/0013-the-compaction-prompt-carries-nothing-of-ours.md)**：
+git 事实在不该答的树上**答错过**（thread `a0621fce-…`），`Already produced` 只覆盖被折掉的那段、
+**从不覆盖尾巴**（a0621 被认错的那笔活就在尾巴里），而且它当时在生产上还是空的；hook 的话参考实现
+根本不带。上面 01/02 两节记的是**当时**落地过的东西，按 `docs/agents/domain.md` 的规矩不改旧文。

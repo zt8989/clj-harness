@@ -409,7 +409,11 @@ token，只有一个 4 字符 ≈ 1 token 的估算器，而且只作用在**增
 顺序**列出的被遮蔽节点的记录 seq，`:summary` 是那段摘要文本；`replay/compacted-messages` 把它折进模型视图，
 摘要落在**被遮蔽段原来的位置**上（旧内容在前，逐字保留的尾部在后）。一个被遮蔽的节点既是一条**条目**，也可以
 是**更早一次压缩的摘要**（用那次事实自己的 seq 命名）——所以 `start` 可以大于 `end`，一切按**位置**走，绝不
-拿两个数比大小。
+拿两个数比大小。喂给**摘要模型**的那条 user 消息里，**只有**参考实现（DSH）放的东西：会话自己的 system 消息、
+工具表、被折区间的消息，加上 `summary-instruction`（固定八节 + 规则，末两节是 `## Current Work` /
+`## Next Step`）——**我们自己注入的事实一条都没有**（git 环境、产出清单、hook 的话都不在了）。模型面上那条替换
+消息 = 检查点的 preamble + `<compacted-summary>…</compacted-summary>`。见
+[ADR 0013](docs/adr/0013-the-compaction-prompt-carries-nothing-of-ours.md)。
 *别叫成* 摘要（摘要是一次压缩的产物，压缩是那件事）、剪枝（剪枝动的是单条工具结果里的文本，不是一个段）。
 **压缩在会话栏里也有一张卡**（`.scratch/compaction-frames`）：一次**跑在 run 里**的压缩会以一条 `CUSTOM` 帧
 （`name` 是 `compacted-context`）把摘要、被折那段估算的 token、折进去几个节点说给客户端，画成与注入卡同一套壳的

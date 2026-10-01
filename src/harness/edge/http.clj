@@ -6378,10 +6378,11 @@
         put       (fn [kind payload]
                     (swap! written conj [kind payload])
                     (log! stem nil kind payload))
-        ;; FIRED BEFORE THE SUMMARY REQUEST IS BUILT, so that what a declaration prints can
-        ;; ride on it (`.scratch`: the place a project says which worktree this is). The
-        ;; post one below is still just an observer.
-        pre       (hook/emit :pre-compact {:thread-id stem})
+        ;; THE `:pre-compact` POINT FIRES BEFORE THE SUMMARY REQUEST IS BUILT -- an observer (the
+        ;; table declares it `:gate? false`), and its printed words no longer ride on that request:
+        ;; the request says exactly what the reference's does (`compaction/summary-instruction`),
+        ;; and a hook is not part of it. The post point below brackets the same compaction.
+        _         (hook/emit :pre-compact {:thread-id stem})
         summarize (fn [messages instruction]
                     (let [specs  (vec (:tools opts))
                           prefix (vec (:prefix opts))
@@ -6456,15 +6457,9 @@
                                        :append       put
                                        :plan-fn      (when (:aggressive? opts) compaction/overflow-plan)
                                        :summarize    summarize
-                                       ;; THE TWO PIECES OF THE PROMPT THE EDGE OWNS: the repository's
-                                       ;; working trees -- the bound one named AS the bound one, and the
-                                       ;; others when they have uncommitted changes (git, read just now;
-                                       ;; the trees matter because a session working in a worktree is
-                                       ;; bound to the project directory) -- and what a `:pre-compact`
-                                       ;; hook printed. `compaction/start` records the assembled prompt.
-                                       :environment  (compaction/repository-block
-                                                      (compaction/repository
-                                                       (project/binding-for stem)))
+                                       ;; WHAT THE SUMMARIZER IS TOLD IS THE INSTRUCTION ALONE now: no
+                                       ;; git facts, no produced-artifacts list, no hook output (owner,
+                                       ;; 2026-10-01 -- follow the reference's policy exactly).
                                        ;; AND THE SURFACE THE PLAN PLANS OVER: the array the MODEL is
                                        ;; handed, when this process holds the session -- which is the
                                        ;; array the triggers MEASURE (`pressure/live-surface`). The
@@ -6478,8 +6473,7 @@
                                        ;; AND THE RELIEF THE TRIGGER ASKED FOR, which rides the same
                                        ;; way: a caller that named a number hands it to the plan, or
                                        ;; the guard below is a comment (`plan`'s `:min-head-tokens`).
-                                       :min-head-tokens (:min-head-tokens opts)
-                                       :blocks       (:blocks pre)})]
+                                       :min-head-tokens (:min-head-tokens opts)})]
       (when (seq @written)
         (sessions/set-compactions!
          stem

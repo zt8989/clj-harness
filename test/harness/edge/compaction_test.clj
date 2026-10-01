@@ -16,8 +16,6 @@
             [harness.edge.ag-ui :as ag]
             [harness.edge.compaction :as compaction]
             [harness.kernel.frames :as frames]
-            [harness.infra.shell :as shell]
-            [clojure.java.io :as io]
             [clojure.string :as str]))
 
 ;; ------------------------------------------------------------------ the records
@@ -246,26 +244,6 @@
     (is (= (:compactionId result) (:compactionId fact))
         "the answer names the rows it wrote, not a second id")))
 
-(deftest the-produced-artifacts-are-read-off-the-tool-calls
-  ;; ticket 01 of `.scratch/compaction-by-step`: a model that cannot see what the folded
-  ;; range already made mistakes its own work for somebody else's (thread 068fd63f).
-  (let [msgs [{:role "assistant"
-               :tool_calls [{:id "c1" :type "function"
-                             :function {:name "bash"
-                                        :arguments "{\"command\":\"git worktree add .worktrees/x -b x main\"}"}}]}
-              {:role "assistant"
-               :tool_calls [{:id "c2" :type "function"
-                             :function {:name "write"
-                                        :arguments "{\"path\":\"src/a.clj\",\"content\":\"x\"}"}}]}
-              {:role "tool" :content "ok"}
-              {:role "assistant"
-               :tool_calls [{:id "c3" :type "function"
-                             :function {:name "read" :arguments "{\"path\":\"src/b.clj\"}"}}]}]
-        facts (compaction/product-facts msgs)]
-    (is (= [".worktrees/x" "src/a.clj"] facts)
-        "the worktree and the written file; a read produces nothing")
-    (is (= [] (compaction/product-facts [{:role "user" :content "hi"}]))
-        "a range that produced nothing says so by being empty")))
 
 (defn- step-row
   "A step boundary as the record holds it: a CUSTOM fact named `step/start` or `step/end`."
@@ -289,87 +267,6 @@
     (is (= 1 (#'compaction/tail-anchor nodes records 2))
         "a tail asked to start inside the second node backs off to the step it falls inside")
     (is (= 3 (#'compaction/tail-anchor nodes records 3)))))
-
-;; ------------------------------------------------- where the work is happening
-
-(deftest the-environment-block-reads-like-a-sentence
-  ;; What the summary request carries about the working tree (owner, 2026-09-27). PURE:
-  ;; the shape is a test's, not git's.
-  (is (nil? (compaction/environment-block nil)))
-  (is (nil? (compaction/environment-block {})) "nothing to say answers nothing")
-  (is (= (str "worktree: /w\nbranch:   main\nuncommitted (1 path(s)):\n   M a.clj")
-         (compaction/environment-block {:worktree "/w" :branch "main"
-                                        :uncommitted [" M a.clj"] :dirty-total 1})))
-  (is (str/includes?
-       (compaction/environment-block {:branch "main" :uncommitted (vec (repeat 20 " M a"))
-                                      :dirty-total 25})
-       "...and 5 more")
-      "a tree too big to transcribe says how many it left out"))
-
-(deftest the-environment-is-read-off-git
-  ;; The fact thread 068fd63f lost: which worktree, which branch, what is uncommitted. READ,
-  ;; not remembered -- so this test makes a real (throwaway) repository and moves a file in it.
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "harness-env-" (java.util.UUID/randomUUID)))]
-    (.mkdirs dir)
-    (try
-      (let [d (.getAbsolutePath dir)
-            g (fn [cmd] (shell/run {:command cmd :dir d :timeout-ms 60000}))]
-        (g "git init -q")
-        (spit (io/file dir "a.txt") "hi\n")
-        (g "git add a.txt")
-        (g "git -c user.email=t@example.com -c user.name=t commit -q -m x")
-        (spit (io/file dir "b.txt") "new\n")
-        (let [env (compaction/environment d)]
-          (is (some? env) "a repository answers")
-          (is (not (str/blank? (str (:branch env)))) "a branch was read")
-          (is (some #(str/includes? % "b.txt") (:uncommitted env))
-              "the uncommitted file is named")
-          (is (= 1 (:dirty-total env)))))
-      (finally
-        (doseq [f (reverse (file-seq dir))] (io/delete-file f true))))))
-
-(deftest a-directory-that-is-not-a-repository-answers-nothing
-  (let [dir (io/file (System/getProperty "java.io.tmpdir")
-                     (str "harness-no-git-" (java.util.UUID/randomUUID)))]
-    (.mkdirs dir)
-    (try
-      (is (nil? (compaction/environment (.getAbsolutePath dir)))
-          "no git here is a fact worth reporting as nothing, never as a failure")
-      (finally (io/delete-file dir true)))))
-
-(deftest the-trees-with-uncommitted-work-are-listed-not-assumed
-  ;; OWNER'S INCIDENT, 2026-10-01 (thread `a0621fce-...`): the session was bound to the main
-  ;; checkout while its work was in `.worktrees/shell-03-07`, and the block told the summary
-  ;; that "the work is happening" in the main checkout -- transcribing somebody else's dirty
-  ;; files (`M .gitignore` / `?? .claude/`) while the session's OWN two edited test files sat
-  ;; in the worktree. What is read now is every working tree that has uncommitted changes.
-  (let [root (io/file (System/getProperty "java.io.tmpdir")
-                      (str "harness-trees-" (java.util.UUID/randomUUID)))
-        wt   (io/file root ".worktrees" "feat")]
-    (.mkdirs root)
-    (try
-      (let [d (.getAbsolutePath root)
-            g (fn [dir cmd] (shell/run {:command cmd :dir dir :timeout-ms 60000}))]
-        (g d "git init -q")
-        (spit (io/file root "a.txt") "hi\n")
-        (g d "git add a.txt")
-        (g d "git -c user.email=t@example.com -c user.name=t commit -q -m x")
-        (spit (io/file root "bound.txt") "bound\n")
-        (g d "git worktree add -q .worktrees/feat -b feat")
-        (spit (io/file wt "in-the-worktree.clj") "(ns x)\n")
-        (let [others (compaction/other-trees d)
-              block  (compaction/repository-block (compaction/repository d))]
-          (is (= 1 (count others)) "only the tree with uncommitted work is listed")
-          (is (str/includes? (str (:worktree (first others))) ".worktrees"))
-          (is (some #(str/includes? % "in-the-worktree.clj") (:uncommitted (first others)))
-              "and its OWN dirty paths are read in that tree")
-          (is (str/includes? block "this session's bound directory:")
-              "the bound checkout is named AS the bound checkout -- not as where the work is")
-          (is (str/includes? block "in-the-worktree.clj")
-              "the worktree's own dirty file is in the block, under its own path")))
-      (finally
-        (doseq [f (reverse (file-seq root))] (io/delete-file f true))))))
 
 (deftest the-summary-skeleton-ends-at-the-seam
   ;; COPIED FROM THE REFERENCE (`dsh-compaction-basic`'s `COMPACTION_INSTRUCTION`): the sections
@@ -395,26 +292,10 @@
         "no editorialising about provenance -- the rule the incident's summary broke")
     (is (str/includes? instruction "Do not copy it forward verbatim")
         "a second fold merges the first checkpoint instead of copying it forward")
-    (is (str/includes? instruction "Already produced")
-        "and our own facts list is still asked for: this skeleton does not replace it")))
+    (is (not (str/includes? instruction "Already produced"))
+        (str "and NOTHING of ours rides on it: the summarizer gets the reference's message and",
+             " nothing else (owner, 2026-10-01)"))))
 
-(deftest the-summary-request-carries-every-part-and-only-the-ones-that-exist
-  ;; The shape of what the summarizer is told (owner, 2026-09-27): the instruction always,
-  ;; and each other part only when there is something to say.
-  (let [bare (compaction/summary-content {})]
-    (is (= compaction/summary-instruction bare) "nothing to add is nothing added")
-    (is (not (str/includes? bare "read off the tool calls above"))
-        "no section for a part that is not there -- the instruction alone is what goes"))
-  (let [full (compaction/summary-content {:facts ["src/a.clj"]
-                                           :environment "branch:   main"
-                                           :blocks ["read AGENTS.md first"]})]
-    (is (str/includes? full "Already produced"))
-    (is (str/includes? full "src/a.clj"))
-    (is (str/includes? full "The working trees of this repository"))
-    (is (str/includes? full "branch:   main"))
-    (is (str/includes? full "read AGENTS.md first"))
-    (is (< (.indexOf full "Already produced") (.indexOf full "The working trees"))
-        "facts, then the environment, then the hook's words -- one order")))
 
 (deftest the-summary-request-puts-a-late-answer-behind-its-call
   ;; THE BUG OF 2026-09-28, measured on a live session: 23 compactions, 23 refusals, every
