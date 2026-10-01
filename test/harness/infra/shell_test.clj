@@ -204,8 +204,11 @@
     (let [dir      (support/temp-dir "program-tree")
           pid-file (io/file dir "child.pid")
           started  (System/currentTimeMillis)
+          ;; 5s: the floor is the login profile plus the child's own start -- 716ms and 831ms
+          ;; measured on this machine (2026-09-30, `dev/scratch_shell_bounds.clj`). The case
+          ;; above argues why the number is 5s and not lower.
           res      (shell/run-program {:argv [(:command sh) "-c" (support/child-command pid-file)]
-                                       :timeout-ms 8000})
+                                       :timeout-ms 5000})
           elapsed  (- (System/currentTimeMillis) started)
           pid      (support/child-pid pid-file 5000)]
       (is (true? (:timeout res)))
@@ -262,13 +265,18 @@
         ;; test really is two processes.
         command (support/child-command pid-file)
         started (System/currentTimeMillis)
-        ;; THE BUDGET HAS TO CLEAR THE LOGIN PROFILE. `bash -lc` runs /etc/profile and the
-        ;; person's own profile before it runs the command at all, and on the machine this was
-        ;; measured on that costs 2.2s (`bash -lc true` 1.7s against `bash -c true` 0.22s, and
-        ;; 2.2s through `run`, timed 2026-09-23). A 4s limit therefore kills the shell BEFORE
-        ;; `node` has been started, and the case reports 'the shell never named a child' about
-        ;; a machine that was merely slow -- not about the tree-kill it means to be testing.
-        res (shell/run {:command command :timeout-ms 12000})
+        ;; THE BUDGET HAS TO CLEAR THE LOGIN PROFILE PLUS STARTING `node`, and the floor is
+        ;; RE-MEASURED RATHER THAN REMEMBERED (dev/scratch_shell_bounds.clj, n=5, 2026-09-30):
+        ;; `bash -lc true` 716ms, `bash -lc 'node --version'` 831ms on this machine -- and
+        ;; 2.2s recorded on the 2026-09-23 machine (that is the number this comment used to
+        ;; carry, and it stays as the OTHER end: a machine can be slower than this one).
+        ;;
+        ;; 5s IS THE NUMBER: six times today's floor and still better than twice the slowest
+        ;; profile this repo has recorded. The old 12s only ever bought waiting -- the command
+        ;; does not finish -- and a limit that fires because a machine is merely slow reports
+        ;; 'the shell never named a child' about the wrong thing, which is why this is argued
+        ;; rather than picked.
+        res (shell/run {:command command :timeout-ms 5000})
         elapsed (- (System/currentTimeMillis) started)
         pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
     (testing "the call gives up at the limit rather than waiting for the command"
@@ -341,12 +349,12 @@
   ;; and the output is thrown away. Found exactly that way on 2026-09-20, when `-c`
   ;; looked like a free 700ms off every spawn.
   (let [{:keys [out timeout]} (shell/run {:command "echo said-before-hanging; sleep 30"
-                                          ;; THE LIMIT HAS TO CLEAR THE LOGIN PROFILE (see the
-                                          ;; case above for the 2.2s measurement): at 2s the
-                                          ;; echo has not run yet, and an empty `out` reads as
-                                          ;; 'the output was thrown away' rather than 'the
-                                          ;; command never started'.
-                                          :timeout-ms 8000})]
+                                          ;; THE LIMIT HAS TO CLEAR THE LOGIN PROFILE (716ms on
+                                          ;; this machine; see the two cases above for the floor and
+                                          ;; for why 5s): at 2s the echo has not run yet, and an
+                                          ;; empty `out` reads as 'the output was thrown away' rather
+                                          ;; than 'the command never started'.
+                                          :timeout-ms 5000})]
     (is (true? timeout))
     (is (str/includes? (str out) "said-before-hanging"))))
 
@@ -551,31 +559,32 @@
         (str "and the shell reported no quote it never saw closed: " (pr-str err)))))
 
 (deftest the-shapes-a-command-is-built-out-of-still-mean-what-they-mean
-  ;; The escaping between the caller's bytes and the shell is one more thing that can
-  ;; be got wrong, so the four things a command is built out of besides a word -- a
-  ;; single-quoted word, a redirection, a pipe, and stdin -- are asserted beside it.
-  (let [dir (support/temp-dir "shell-command-shapes")]
+  ;; The escaping between the caller's bytes and the shell is one more thing that can be got
+  ;; wrong, so the four things a command is built out of besides a word -- a single-quoted
+  ;; word, a redirection, a pipe, and stdin -- are asserted beside it.
+  ;;
+  ;; ONE SPAWN, FOUR CLAIMS. A spawn is a login profile (~716ms on this machine,
+  ;; `dev/scratch_shell_bounds.clj`), the four shapes do not interact, and each one still owns
+  ;; an assertion that NAMES it -- the value has to be findable in the output, so a failure
+  ;; says which shape it was about rather than just 'the command line broke'. Four spawns
+  ;; became one; the four claims did not move.
+  (let [dir    (support/temp-dir "shell-command-shapes")
+        target (io/file dir "redirected.txt")
+        {:keys [exit out]} (shell/run
+                            {:command (str "printf '[%s]' ONE 'TWO THREE' FOUR; echo; "
+                                           "printf 'a\\nb\\nc\\n' | wc -l; "
+                                           "echo written > "
+                                           (shell/quote-arg (support/shell-path (.getAbsolutePath target)))
+                                           "; cat")
+                             :stdin "sent-through-stdin"
+                             :timeout-ms 20000})
+        lines  (str/split-lines (str out))]
+    (is (= 0 exit))
     (testing "a single-quoted word is still one word"
-      (let [{:keys [exit out]} (shell/run {:command "printf '[%s]' ONE 'TWO THREE' FOUR"
-                                           :timeout-ms 20000})]
-        (is (= 0 exit))
-        (is (str/includes? (str out) "[ONE][TWO THREE][FOUR]"))))
+      (is (str/includes? (first lines) "[ONE][TWO THREE][FOUR]")))
     (testing "a redirection still writes the file it names"
-      (let [target (io/file dir "redirected.txt")
-            {:keys [exit]} (shell/run
-                            {:command (str "echo written > "
-                                           (shell/quote-arg (support/shell-path (.getAbsolutePath target))))
-                             :timeout-ms 20000})]
-        (is (= 0 exit))
-        (is (= "written" (str/trim (slurp target :encoding "UTF-8"))))))
+      (is (= "written" (str/trim (slurp target :encoding "UTF-8")))))
     (testing "a pipe still feeds what follows it"
-      (let [{:keys [exit out]} (shell/run {:command "printf 'a\\nb\\nc\\n' | wc -l"
-                                           :timeout-ms 20000})]
-        (is (= 0 exit))
-        (is (str/includes? (str/trim (str out)) "3"))))
+      (is (str/includes? (str/trim (nth lines 1 "")) "3")))
     (testing "and stdin still reaches the command that reads it"
-      (let [{:keys [exit out]} (shell/run {:command "cat"
-                                           :stdin "sent-through-stdin"
-                                           :timeout-ms 20000})]
-        (is (= 0 exit))
-        (is (str/includes? (str out) "sent-through-stdin"))))))
+      (is (str/includes? (str out) "sent-through-stdin")))))

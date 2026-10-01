@@ -246,8 +246,50 @@ NPE）。现在它**答 DST**。
 
 **用例**：`cap.git-test` 与 `edge.http-test`（后者那两条走 `/api/git` 的用例）绿；整轮见下。
 
+## 票 07：runner 能一条一条报 deftest 的耗时（2026-09-30 完成，票已删）
+
+`CLJ_HARNESS_TEST_TIMING=1` 打开后，每条 deftest 在它自己的命名空间那行下面多打一行 `[1.4s] 名字`，
+并在头上多一行说明。**默认关。**
+
+- **关着时输出与以前逐字相同**（票面的硬要求）：量法是同一家跑两遍（开 / 关）逐行 diff——差异只有两次
+  跑各自的临时路径，和打开时多出来的那 18 行计时。
+- 时间读的是 clojure.test **自己**的两个 report 事件（`:begin-test-var` / `:end-test-var`），做法是包一层
+  `t/report` 并照旧转发给真的那个——所以失败还打在原来的位置，也没有第二条 `test-ns` 路径。
+- 值只认 `1`/`true`/`yes`（大小写随意），**别的一律按名拒绝**而不是当没设——与两个时限同一个纪律：
+  开了却悄悄没开，是对这一轮的错误陈述。
+- 纯逻辑由 `test_runner_test.clj` 直接驱动：`timing-flag` 的三态，与 `var-timing` 的「起了、没结束」
+  那一态（一个被命名空间上限打断的用例不该有一条假的耗时）。
+
+## 票 03：`shell-test` 的两笔钱（2026-09-30 完成，票已删）
+
+**先用票 07 的开关量逐条**（38.5s，24 条用例）：
+
+| 秒 | 用例 |
+|---|---|
+| 12.0 | `a-command-that-does-not-finish-is-stopped-together-with-what-it-started` |
+| 8.0 | `a-program-that-does-not-finish-is-stopped-with-what-it-started`（git-read-cost 那轮加的） |
+| 8.0 | `what-a-command-printed-before-the-limit-comes-back` |
+| 3.3 | `the-shapes-a-command-is-built-out-of-still-mean-what-they-mean` |
+| 2.4 | `a-quoted-word-reaches-every-shell-this-machine-has-whole` |
+| 1.5 | `a-login-shells-logout-does-not-clear-the-pipe` |
+
+**两笔分开处理**（票面就要求分开）：
+
+1. **四个形状合成一次 spawn**：`the-shapes-...` 的四次 spawn（单引号词 / 重定向 / 管道 / stdin）变成
+   一次能分辨各段输出的调用，**四条断言一条没少**，每条仍点名它是哪一段。3.3s → 1.5s。
+2. **三个「等满预算」的超时从 12s / 8s / 8s 收到 5s**（28s → 15s）。这三个数买到的只是等待——命令本来
+   就不结束。
+3. **登录 profile 一个字没动**：它修过一次真事故（`-c` 会让超时的子进程收不回来），票面也点明不许动。
+
+**下界是量的，不是记的**（`dev/scratch_shell_bounds.clj`，n=5，2026-09-30）：`bash -lc true`
+**716ms**；`bash -lc 'node --version'` **831ms**（profile + 起 node）。5s 是六倍今天的地板，也仍然
+>2× 仓库里记过的最坏 profile（2026-09-23 那次 2.2s）——那个数没有删掉，它作为**另一端**留在注释里。
+
+**结果**：`harness.infra.shell-test` **38.5s → 26.8s**，24 条用例 0 失败。剩下的 >1s 是：三个 5s 预算
+（命令不结束）、`a-quoted-word-...` 的 ~5s（**每个 shell 各起一次**——Git Bash / pwsh / cmd 各自就是那
+条断言的主体，合不了）、以及几条各一次 spawn 的。
+
 ## 还没做的（已量化，见 issues/）
 
-`shell-test` 的 ~20s 固定超时（票 03）；整轮 22% 的 CPU 占用指向跨命名空间并行（票 04）；前端 80.5s 的
-串行是设计使然（票 05）；runner 的逐条计时开关（票 07）。
+整轮 22% 的 CPU 占用指向跨命名空间并行（票 04）；前端 80.5s 的串行是设计使然（票 05）。
 **产品那一侧**：一次 `/api/git` 读已修到 ≈0.13s（见 `.scratch/git-read-cost/`）。
