@@ -96,8 +96,21 @@ start/end 之间——SQL 里就是「这个会话里 `end_seq IS NULL` 的最�
   **一次都没出去**；从第一个 `Shift+Tab` 绕到最后一个 `models-toggle`；Esc 关掉之后焦点不在任何残留里（落回 `body`，
   下一次 Tab 从 `sidebar-open` 开始）——这正是上面那条「原来那个控件已经不在」的边界。
 
-## 一个与这一票无关的既有 flake（记录，别当成回归）
+## 两处与这一票无关的既有 flake（记录，别当成回归）
+
+**一、`harness.edge.http-test/a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read`**
 
 `harness.edge.http-test/a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read`
 **在 main 上就会偶发失败**（实测：main 上单独跑三次，第三次红）。它赌的是「run 结束后 `http/running?` 为假」
-与 `reconcile-numbers!` 读会话时 `sessions/running?` 之间没有窗口。**不是这一票引入的**，也不该由这一票去修。
+**在 main 上就会偶发失败**（2026-10-01 实测：单独在改动前的 main 上跑三次，第三次红）。它赌的是「run 结束后
+`http/running?` 为假」与 `reconcile-numbers!` 读会话时 `sessions/running?` 之间没有窗口；改动后在同一棵树上
+又见过一次（`http_test.clj:6543`）。**不是这一票引入的**，也不该由这一票去修。
+
+**二、`harness.infra.db-test/a-damaged-store-of-ours-is-moved-aside-and-rebuilt-said-out-loud`**
+
+2026-10-01 在合并后的 main 上跑「http + projection + db + host」这一把时红过一次（`db_test.clj:348/358/359/361/365`），
+同一条命令紧接着再跑一次全绿，`harness.infra.db-test` 单跑两次也全绿。形状是**残留文件的数量**：这条用例断言
+「残骸只留下 1 个 `.corrupt-` 文件」，而隔离要把 `harness.db` 连同**当时存在的** `-wal`/`-shm` 一起搬走——那一跑
+搬了 3 个（`expected: 1, actual: 3`，尺寸也从 100 变成 32768）。也就是说它赌的是「隔离那一刻 WAL 在不在」，
+而**这条恢复路径这一票一个字没碰**（既不在 `model-calls` 迁移里，也不在投影里）。见到就重跑一次；真要修，
+是让那条断言对「WAL 在不在」两种形状都成立。
