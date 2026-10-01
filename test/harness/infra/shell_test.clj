@@ -278,7 +278,11 @@
         ;; rather than picked.
         res (shell/run {:command command :timeout-ms 5000})
         elapsed (- (System/currentTimeMillis) started)
-        pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
+        ;; POLLED (`support/child-pid`), because the child writes its pid only after BOOTING
+        ;; and the budget above is what decides whether it got the chance. A single read turns
+        ;; 'the budget was too small on this machine' into a NumberFormatException out of the
+        ;; fixture -- exactly the report this case's comment promises it will not make.
+        pid (support/child-pid pid-file 5000)]
     (testing "the call gives up at the limit rather than waiting for the command"
       (is (true? (:timeout res)))
       (is (nil? (:exit res)) "a process that never finished has no exit code")
