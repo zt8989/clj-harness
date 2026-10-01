@@ -50,6 +50,11 @@ import panelSource from "../../src/components/subagent-view.tsx?raw";
 import contextSource from "../../src/components/subagent-view-context.ts?raw";
 import appSource from "../../src/app.tsx?raw";
 import type { Language } from "../../src/lib/language";
+import { RightPaneStatsButton } from "../../src/components/right-pane-toggle";
+import { StatsView } from "../../src/components/stats-view";
+import statsViewSource from "../../src/components/stats-view.tsx?raw";
+import homeStatsSource from "../../src/lib/home-stats.ts?raw";
+import useHomeStatsSource from "../../src/hooks/use-home-stats.ts?raw";
 
 /// THE TEXT OF ONE SLOT, and ONE ATTRIBUTE OF ONE SLOT: the two readers `suites/sidebar.tsx`
 /// defines for its rendered controls and rows, restated here for the same reason it gives --
@@ -110,7 +115,29 @@ function backControl(language: Language): string {
 function taskPane(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <TaskPane threadId="t1" onCollapse={() => {}} onOpen={() => {}} />
+      <TaskPane threadId="t1" onCollapse={() => {}} onOpen={() => {}} onStats={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
+/// THE STATISTICS' TRAILING CONTROL, rendered on its own for the same reason the other three
+/// are: its whole meaning is a glyph and a name, and neither survives a source read.
+function statsControl(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <RightPaneStatsButton onOpen={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
+/// THE WHOLE COLUMN, rendered to a string. THIS WORKS WITHOUT A DOM because nothing it
+/// reaches at module scope touches one: the hook's effects (the snapshot read, the socket, the
+/// observation) never run in `renderToStaticMarkup`, so what is drawn here is the view with no
+/// answer yet -- which is exactly the state its empty sentences exist for.
+function statsView(language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <StatsView onCollapse={() => {}} onBack={() => {}} />
     </I18nextProvider>,
   );
 }
@@ -273,7 +300,7 @@ const cases: Case[] = [
       // named together (`components/subagent-view-context.ts`). An `open` bit beside a `which`
       // would let this page say "open and showing nothing", and the column would have to guess.
       expect(contextSource).toMatch(
-        /export type RightPane =\s*\| null\s*\| \{ kind: "tasks" \}\s*\| \(\{ kind: "mirror" \} & SubagentView\);/,
+        /export type RightPane =\s*\| null\s*\| \{ kind: "tasks" \}\s*\| \{ kind: "stats" \}\s*\| \(\{ kind: "mirror" \} & SubagentView\);/,
       );
       expect(appSource).toContain("const [rightPane, setRightPane] = useState<RightPane>(null)");
 
@@ -300,7 +327,7 @@ const cases: Case[] = [
       // run would be about the checkout rather than about the page.
       const app = appSource.replace(/\r\n/g, "\n");
       expect(app).toContain(
-        "<TaskPane\n            threadId={roster.shown}\n            onCollapse={() => setRightPane(null)}\n            onOpen={openMirror}\n          />",
+        "<TaskPane\n            threadId={roster.shown}\n            onCollapse={() => setRightPane(null)}\n            onOpen={openMirror}\n            // THE TRAILING `…`'s DOOR, through the same writer as the two above: the statistics\n            // are the third state of this column, not a panel stacked over it\n            // (`.scratch/global-stats-panel/`).\n            onStats={() => openPane({ kind: \"stats\" })}\n          />",
       );
 
       // THE OPEN CONTROL IS DRAWN ONLY WHILE THE COLUMN IS CLOSED, and it is drawn by the PAGE:
@@ -641,6 +668,88 @@ const cases: Case[] = [
       // WHICH GLYPH, read from the source because a rendered `lucide` svg carries no name:
       // a way back, not a fold.
       expect(toggleSource).toContain("<ArrowLeftIcon");
+    },
+  },
+  {
+    name: "the-statistics-are-the-columns-third-state-reached-from-the-trailing-ellipsis",
+    run: async () => {
+      // THE TRAILING CONTROL OF THE TASK VIEW'S HEADER (owner, 2026-10-01: 「增加...」). Its
+      // whole meaning is a glyph, so what is asserted is what a reader cannot see: the name it
+      // says, the region it names, and the glyph itself.
+      expect(attrOf(statsControl("en"), "right-pane-stats", "aria-controls")).toBe(RIGHT_PANE_ID);
+      expect(textOf(statsControl("en"), "right-pane-stats")).toBe("Statistics");
+      expect(textOf(statsControl("zh"), "right-pane-stats")).toBe("统计");
+      expect(toggleSource).toContain("<EllipsisIcon");
+      // IT IS A NAVIGATION, NOT A DISCLOSURE: it steps to another state of a region that
+      // stays open, so it makes no `aria-expanded` claim (the mirror's back control argues the
+      // same line).
+      const control = /<button[^>]*data-slot="right-pane-stats"[^>]*>/.exec(statsControl("en"));
+      expect(control, "no statistics control in the render").not.toBeNull();
+      expect(control![0]).not.toContain("aria-expanded=");
+      // AND THE TASK VIEW IS WHERE IT IS DRAWN.
+      expect(taskPaneSource).toContain("<RightPaneStatsButton onOpen={onStats} />");
+
+      // THE PAGE OWNS THE THIRD SHAPE, and it opens through the same writer as the other two
+      // (`openPane`), so the drawer rule below `md` covers this state too.
+      const app = appSource.replace(/\r\n/g, "\n");
+      expect(app).toContain('rightPane.kind === "stats"');
+      expect(app).toContain('onStats={() => openPane({ kind: "stats" })}');
+      expect(app).toContain("<StatsView");
+
+      // THE TWO HALVES OF THE DATA (`docs/rules/panel-data.md`): one snapshot read of
+      // `/api/stats`, and a downlink of its OWN -- not the sidebar's listing, because the
+      // leaderboards are a scan over every tool call this home has made and a page with no
+      // statistics open must not be made to pay for one. AND NOTHING POLLS: the hook owns no
+      // timer at all, which is what the rule asks of a panel whose every fact can be pushed.
+      expect(homeStatsSource).toContain("api/");
+      expect(homeStatsSource).toContain('downlinkUrl("events.stats"');
+      expect(homeStatsSource).toContain("subscribeHomeStats");
+      expect(useHomeStatsSource).toContain("IntersectionObserver");
+      expect(useHomeStatsSource).not.toContain("setInterval");
+    },
+  },
+  {
+    name: "the-statistics-view-draws-two-rankings-and-folds-the-token-one-away",
+    run: async () => {
+      // THE COLUMN IS THE SAME ELEMENT as the task pane and the mirror, and it is asserted the
+      // way the task pane's own copy is: the class string is the mirror's, to the character --
+      // one column in several states, not a third panel that could drift apart.
+      const mirrorColumn = /data-slot="subagent-view"[\s\S]*?className="([^"]*)"/.exec(panelSource);
+      expect(mirrorColumn, "no column classes in subagent-view.tsx").not.toBeNull();
+      expect(statsViewSource).toContain(`className="${mirrorColumn![1]!}"`);
+      expect(statsViewSource).toContain("id={RIGHT_PANE_ID}");
+
+      // WHAT IT SAYS, IN BOTH LANGUAGES: the words are the whole of what tells these three
+      // rankings apart, and a heading swapped between them would be a green tree and a wrong
+      // column (the lesson `suites/sidebar.tsx` was built for).
+      const en = statsView("en");
+      expect(textOf(en, "stats-view-name")).toBe("Statistics");
+      expect(textOf(en, "stats-tools-title")).toBe("Tool calls");
+      expect(textOf(en, "stats-skills-title")).toBe("Skill calls");
+      expect(textOf(en, "stats-models-toggle")).toBe("Tokens by model");
+      const zh = statsView("zh");
+      expect(textOf(zh, "stats-view-name")).toBe("统计");
+      expect(textOf(zh, "stats-tools-title")).toBe("工具调用排行");
+      expect(textOf(zh, "stats-skills-title")).toBe("Skill 调用排行");
+      expect(textOf(zh, "stats-models-toggle")).toBe("各模型 token 用量");
+
+      // THE TWO RANKINGS ON SIGHT, EACH WITH ITS OWN EMPTY SENTENCE: an empty home draws a
+      // sentence per section, and the same sentence in both means one of them lost its own.
+      expect(textOf(en, "stats-tools-empty")).not.toBe(textOf(en, "stats-skills-empty"));
+      for (const sentence of [
+        textOf(en, "stats-tools-empty"),
+        textOf(en, "stats-skills-empty"),
+        textOf(zh, "stats-tools-empty"),
+        textOf(zh, "stats-skills-empty"),
+      ]) {
+        expect(sentence.trim().length).toBeGreaterThan(0);
+      }
+
+      // AND THE TOKEN RANKING IS THE CLICK THE OWNER ASKED FOR: the disclosure starts closed,
+      // so its rows are not drawn at all -- and `aria-expanded` is how a reader is told.
+      expect(attrOf(en, "stats-models-toggle", "aria-expanded")).toBe("false");
+      expect(en).not.toContain('data-slot="stats-models-rows"');
+      expect(en).not.toContain('data-slot="stats-models-empty"');
     },
   },
 ];

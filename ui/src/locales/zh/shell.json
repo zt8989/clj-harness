@@ -107,6 +107,16 @@
     "subagentElapsed": "已跑 {{time}}",
     "subagentTook": "耗时 {{time}}",
     "jobElapsed": "已跑 {{time}}",
-    "jobStop": "停掉这条后台任务"
+    "jobStop": "停掉这条后台任务",
+    "stats": "统计",
+    "statsTools": "工具调用排行",
+    "statsToolsEmpty": "这个家里还没有调用过工具。",
+    "statsSkills": "Skill 调用排行",
+    "statsSkillsEmpty": "这个家里还没有加载过 skill。",
+    "statsModels": "各模型 token 用量",
+    "statsModelsEmpty": "还没有模型调用报告过用量。",
+    "statsUnknownModel": "未命名的模型",
+    "statsTokensAbsent": "无用量",
+    "statsModelCalls_other": "{{count}} 次调用"
   }
 }

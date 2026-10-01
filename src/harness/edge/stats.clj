@@ -117,6 +117,20 @@
             completion (number-at usage [:completion_tokens])]
         (when (and prompt completion) (+ prompt completion)))))
 
+(defn usage-fields
+  "One call's usage map -> the four numbers this repo counts, each NIL when the vendor did not
+  report it (the same distinction `number-at` keeps: not reported is not zero).
+
+  PUBLIC, AND IT IS THE ONE PLACE THE VENDOR'S KEY NAMES ARE READ. `harness.edge.projection`
+  writes these four into `model_calls` and `usage-of` below sums exactly them, so the global
+  leaderboard the store answers and the strip a session draws cannot disagree about what
+  `prompt_tokens` means -- the drift a second reading of the keys would be."
+  [usage]
+  {:promptTokens     (number-at usage [:prompt_tokens])
+   :completionTokens (number-at usage [:completion_tokens])
+   :totalTokens      (tokens-of usage)
+   :cachedTokens     (number-at usage [:prompt_tokens_details :cached_tokens])})
+
 (defn- sum-over
   "The sum of KEY-OF over CALLS, or nil when no call reported it. `nil`, not 0: a
   key nobody reported must be ABSENT from the answer."
@@ -136,13 +150,13 @@
   (cache-hit-rate) from the calls that reported BOTH halves, so a ratio can never
   put a numerator from one call over a denominator from another."
   [calls]
-  (let [usages (keep :usage calls)]
+  (let [usages (keep :usage calls)
+        sum    (fn [k] (sum-over usages #(get (usage-fields %) k)))]
     (cond-> {}
-      (sum-over usages tokens-of)                                   (assoc :totalTokens (sum-over usages tokens-of))
-      (sum-over usages #(number-at % [:prompt_tokens]))            (assoc :promptTokens (sum-over usages #(number-at % [:prompt_tokens])))
-      (sum-over usages #(number-at % [:completion_tokens]))        (assoc :completionTokens (sum-over usages #(number-at % [:completion_tokens])))
-      (sum-over usages #(number-at % [:prompt_tokens_details :cached_tokens]))
-      (assoc :cachedTokens (sum-over usages #(number-at % [:prompt_tokens_details :cached_tokens]))))))
+      (sum :totalTokens)      (assoc :totalTokens (sum :totalTokens))
+      (sum :promptTokens)     (assoc :promptTokens (sum :promptTokens))
+      (sum :completionTokens) (assoc :completionTokens (sum :completionTokens))
+      (sum :cachedTokens)     (assoc :cachedTokens (sum :cachedTokens)))))
 
 (defn- cache-hit-rate
   "The share of the prompt the vendor served from its own prefix cache, over the

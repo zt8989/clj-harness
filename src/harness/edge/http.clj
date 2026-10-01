@@ -5527,6 +5527,55 @@
                                 (when-some [push @registered]
                                   (host/unwatch! push)))})))
 
+;; ------------------------------------------------------------ the statistics downlink
+;;
+;; A SECOND HOST-LEVEL CATEGORY, and a socket of its own for the reason `harness.edge.host`'s
+;; statistics section gives: the leaderboards are a scan of every tool call this home has made,
+;; and a page that only has a sidebar open must not be made to pay for one. `GET /api/stats` is
+;; the snapshot half, this is the push, and both hand over the payload
+;; `harness.edge.projection/stats-answer` builds.
+
+(defn- stats-frame
+  "The host-level statistics as one downlink frame: `GET /api/stats`' payload plus the type tag
+  that tells this category from every other."
+  [] (assoc (projection/stats-answer) :type "stats"))
+
+(defn- home-stats-get
+  ;; NAMED APART FROM `stats-get` ABOVE, which is the PER-SESSION numbers route under
+  ;; /api/threads/<stem>/: two `defn`s of one name would leave the second meaning everything,
+  ;; and the session route calling a one-arity fn with two arguments (a 500 nobody would
+  ;; connect to a statistics view).
+  "GET /api/stats -- the statistics as one JSON answer: the tool, skill and per-model token
+  leaderboards over every session this home has projected.
+
+  A ROUTE OF ITS OWN rather than a key on GET /api/projects: the sidebar reads that payload on
+  every host change and has no use for a count over every tool call, so folding the two
+  together would make every listing pay for a question only one view asks."
+  [_req]
+  (api-response 200 (projection/stats-answer)))
+
+(defn- stats-stream-get
+  "GET /api/events.stats -- the statistics downlink. A WebSocket handed the leaderboards at
+  once and then once per projection round that wrote rows; nothing is sent over it and there is
+  no set to subscribe. THE FRAME IS THE WHOLE ANSWER, like `events.host`: every connection
+  wants the same leaderboards, so there is no cursor to keep and the last frame wins."
+  [req]
+  (let [registered (atom nil)]
+    (hk/as-channel req
+                   {:on-open  (fn [ch]
+                                (try
+                                  (let [push (fn [] (mux-send! ch (stats-frame)))]
+                                    (reset! registered push)
+                                    (host/watch-stats! push)
+                                    ;; THE FIRST ANSWER AT ONCE: a page that opens this view
+                                    ;; must not wait for the next tool call to draw a ranking.
+                                    (push))
+                                  (catch Throwable t
+                                    (log/error! :stats/watch-failed t))))
+                    :on-close (fn [_ch _status]
+                                (when-some [push @registered]
+                                  (host/unwatch-stats! push)))})))
+
 (defn- add-project-post
   "POST /api/projects {dir} -- DIR becomes a project of this home, with no
   session in it yet. Answers {:projectId .. :path <canonical>}.
@@ -6634,6 +6683,18 @@
     (= "/api/events.host" (:uri req))
     (case (:request-method req)
       :get  (host-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    ;; THE STATISTICS' OWN PAIR, beside the host listing and separate from it: the snapshot a
+    ;; view reads when it opens, and the downlink it then follows.
+    (= "/api/stats" (:uri req))
+    (case (:request-method req)
+      :get  (home-stats-get req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/events.stats" (:uri req))
+    (case (:request-method req)
+      :get  (stats-stream-get req)
       (api-response 405 {:error "method not allowed"}))
     (= "/api/model" (:uri req))
     (case (:request-method req)

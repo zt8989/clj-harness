@@ -16,7 +16,11 @@
 import { useTranslation } from "react-i18next";
 import { useRef, type FC } from "react";
 
-import { RIGHT_PANE_ID, RightPaneCollapseButton } from "@/components/right-pane-toggle";
+import {
+  RIGHT_PANE_ID,
+  RightPaneCollapseButton,
+  RightPaneStatsButton,
+} from "@/components/right-pane-toggle";
 import { type SubagentView } from "@/components/subagent-view-context";
 import { JobRows } from "@/components/task-pane-jobs";
 import { SubagentRows } from "@/components/task-pane-subagents";
@@ -30,11 +34,17 @@ import { useTaskPane } from "@/hooks/use-task-pane";
 /// delegation opens that delegation's mirror, which is the SAME state the transcript's
 /// `agent` card writes -- so the writer is `App`'s (`openMirror`), and the row supplies only
 /// which delegation it is.
+///
+/// `onStats` IS THE WAY OUT TO THE HOME'S STATISTICS, and it is the PAGE's door for the same
+/// reason: the trailing `…` in this header switches the column to a view this component knows
+/// nothing about, so which state that is belongs to whoever owns the state
+/// (`.scratch/global-stats-panel/`).
 export const TaskPane: FC<{
   threadId: string;
   onCollapse: () => void;
   onOpen: (view: SubagentView) => void;
-}> = ({ threadId, onCollapse, onOpen }) => {
+  onStats: () => void;
+}> = ({ threadId, onCollapse, onOpen, onStats }) => {
   const { t } = useTranslation();
   // THE WHOLE OF THIS COMPONENT'S RUNTIME: one hook, mounted with the pane. Closing the pane
   // unmounts it, which is one of the three ways the poll stops -- the other two are the page
@@ -58,6 +68,9 @@ export const TaskPane: FC<{
         >
           {t("rightPane.title")}
         </span>
+        {/* THE HOME'S STATISTICS, at the trailing end: the column's second door, and the only
+            thing that end is for (see `components/right-pane-toggle.tsx`). */}
+        <RightPaneStatsButton onOpen={onStats} />
       </header>
 
       {/* EACH SECTION KEEPS ITS OWN HALF AND SCROLLS INSIDE IT: a section's rows are a list,

@@ -14,10 +14,11 @@ import { createContext, useContext } from "react";
 export type SubagentView = { threadId: string; subagent: string };
 
 /// WHAT THE RIGHT-HAND COLUMN IS SHOWING, AND WHETHER IT IS THERE AT ALL -- ONE value with
-/// three shapes, held by the page (`app.tsx`). The column is a single element in two states
+/// four shapes, held by the page (`app.tsx`). The column is a single element in SEVERAL states
 /// (`.scratch/right-pane-tasks`, decision 1): the TASK VIEW, which is the switch's answer and
-/// the answer nothing else has chosen; or one delegation's MIRROR, which is the `agent` card's
-/// (`SubagentView` above, reused unchanged); or `null`, the column closed.
+/// the answer nothing else has chosen; one delegation's MIRROR, which the `agent` card's own
+/// door writes (`SubagentView` above, reused unchanged); the home's STATISTICS, which the task
+/// view's trailing `…` opens (`.scratch/global-stats-panel/`); or `null`, the column closed.
 ///
 /// ONE VALUE AND NOT TWO (`open` plus `which`) is the decision: there is no moment at which the
 /// column is open and has nothing to show, because opening it IS choosing the task view -- and
@@ -26,6 +27,7 @@ export type SubagentView = { threadId: string; subagent: string };
 export type RightPane =
   | null
   | { kind: "tasks" }
+  | { kind: "stats" }
   | ({ kind: "mirror" } & SubagentView);
 
 /// The opener, or `null` where there is no panel to open (a story, a test that

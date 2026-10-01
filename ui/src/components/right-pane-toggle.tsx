@@ -33,7 +33,7 @@
 //
 // THE COLUMN IS ONE ELEMENT IN TWO STATES -- the task pane, or a subagent's mirror -- and that is
 // why BOTH draw the `id` below: `aria-controls` names the COLUMN, not the view inside it.
-import { ArrowLeftIcon, PanelRightCloseIcon, PanelRightIcon } from "lucide-react";
+import { ArrowLeftIcon, EllipsisIcon, PanelRightCloseIcon, PanelRightIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { FC } from "react";
 
@@ -90,6 +90,38 @@ export const RightPaneOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
     >
       <PanelRightIcon data-slot="right-pane-open-icon" className="size-4" />
       <span className="sr-only">{t("rightPane.open")}</span>
+    </Button>
+  );
+};
+
+/// THE TASK VIEW'S WAY INTO THE HOME'S STATISTICS, at the TRAILING end of its header -- where
+/// the mirror keeps its own way back, because that end is the row's second door: a step OUT of
+/// this session's own business to the counts over every session
+/// (`.scratch/global-stats-panel/`).
+///
+/// IT DRAWS `…` AND SAYS WHAT IT IS. The glyph is the owner's ask (2026-10-01: 「增加...」), and
+/// an icon button whose whole meaning is a glyph has no text to fall back on -- so its
+/// accessible name is its `title` and its `sr-only` span, the pattern every icon button in this
+/// shell follows.
+///
+/// IT NAMES THE SAME REGION, like its three siblings: the statistics are another STATE of one
+/// column rather than a second panel. No `aria-expanded` -- this is a navigation, not a
+/// disclosure (the mirror's back control argues the same line).
+export const RightPaneStatsButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
+  const { t } = useTranslation();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      data-slot="right-pane-stats"
+      aria-controls={RIGHT_PANE_ID}
+      onClick={onOpen}
+      title={t("rightPane.stats")}
+      className="text-muted-foreground hover:text-foreground size-8 shrink-0 p-0"
+    >
+      <EllipsisIcon data-slot="right-pane-stats-icon" className="size-4" />
+      <span className="sr-only">{t("rightPane.stats")}</span>
     </Button>
   );
 };

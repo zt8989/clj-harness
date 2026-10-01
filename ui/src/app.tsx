@@ -97,6 +97,7 @@ import { SessionRunStop } from "@/components/session-run-stop";
 import { SubagentViewPanel } from "@/components/subagent-view";
 import { SubagentViewContext, type RightPane, type SubagentView } from "@/components/subagent-view-context";
 import { RightPaneOpenButton, rightPaneIsDrawer } from "@/components/right-pane-toggle";
+import { StatsView } from "@/components/stats-view";
 import { TaskPane } from "@/components/task-pane";
 import { ContextCards } from "@/components/context-card";
 import { CompactionCards } from "@/components/compaction-card";
@@ -2099,6 +2100,19 @@ export function App() {
             threadId={roster.shown}
             onCollapse={() => setRightPane(null)}
             onOpen={openMirror}
+            // THE TRAILING `…`'s DOOR, through the same writer as the two above: the statistics
+            // are the third state of this column, not a panel stacked over it
+            // (`.scratch/global-stats-panel/`).
+            onStats={() => openPane({ kind: "stats" })}
+          />
+        )}
+        {rightPane !== null && rightPane.kind === "stats" && (
+          // THE THIRD STATE OF THE SAME COLUMN: the home's counts, opened from the task view's
+          // trailing `…` and stepped back to the task view from its own header. `openPane` is
+          // the writer for both, so the drawer rule below `md` applies to this state too.
+          <StatsView
+            onCollapse={() => setRightPane(null)}
+            onBack={() => openPane({ kind: "tasks" })}
           />
         )}
       </div>

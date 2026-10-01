@@ -46,6 +46,19 @@
                 WHERE session_id = ? ORDER BY seq, call_id"
              session-id))
 
+(defn- fact-line
+  "One FACT row of the record -- `model/start` / `model/end` -- as `harness.edge.stats`'s fixture
+  spells it: an `event` row carrying a CUSTOM frame named after the fact, the value inside it."
+  [run-id ts kind value]
+  (line {:ts ts :runId run-id :type "event"
+         :payload {:type "CUSTOM" :name kind :value value}}))
+
+(defn- model-calls-of [session-id]
+  (db/select "SELECT seq, run_id, model, end_seq, prompt_tokens, completion_tokens,
+                     total_tokens, cached_tokens, at, ms
+                FROM model_calls WHERE session_id = ? ORDER BY seq"
+             session-id))
+
 (defn- eventually
   "PRED, asked until it answers, up to ~2 seconds. THE TRIGGER IS ASYNCHRONOUS BY DESIGN (a
   coalesced round on a thread of its own), so a case about it must WAIT for the round rather than
@@ -178,19 +191,26 @@
                              :tool_calls [{:id "c1" :type "function"
                                            :function {:name "read" :arguments "{}"}}]})
               (message-line "r1" 3 "tool" "tool"
-                            {:role "tool" :tool_call_id "c1" :content "the file"})]]
+                            {:role "tool" :tool_call_id "c1" :content "the file"})
+              (fact-line "r1" 4 "model/start" {:model "gpt-x"})
+              (fact-line "r1" 5 "model/end"
+                         {:model "gpt-x"
+                          :usage {:prompt_tokens 7 :completion_tokens 2 :total_tokens 9}})]]
     (write-log! sid rows)
     (projection/project!)
     (let [before (messages-of sid)
-          calls  (calls-of sid)]
+          calls  (calls-of sid)
+          mcalls (model-calls-of sid)]
       (is (seq before))
       (projection/rebuild! sid)
       (is (= before (messages-of sid)))
       (is (= calls (calls-of sid)))
+      (is (= mcalls (model-calls-of sid)))
       (testing "and a whole-home rebuild answers the same thing too"
         (projection/rebuild!)
         (is (= before (messages-of sid)))
-        (is (= calls (calls-of sid)))))))
+        (is (= calls (calls-of sid)))
+        (is (= mcalls (model-calls-of sid)))))))
 
 ;; --------------------------------------------------------------- what a round costs
 
@@ -301,4 +321,93 @@
           (is (<= 1 rounds 3)
               (str "twenty lines made " rounds " round(s) -- one or two is the design,"
                    " twenty would be one transaction per line")))
+        (finally (stop))))))
+
+;; --------------------------------------------------------------- the model calls
+
+(deftest a-model-call-is-copied-with-its-model-and-its-tokens-together
+  ;; THE TWO LINES THE RECORD PAIRS BY ORDER ARE ONE ROW HERE: the model's NAME is on
+  ;; `model/start` and the vendor's USAGE on `model/end`, and a leaderboard that ranked one without
+  ;; the other could not answer which model burned the tokens.
+  (let [sid  "pj-models"
+        rows [(fact-line "r1" 1 "model/start" {:model "gpt-x" :base-url "http://x/v1"})
+              (fact-line "r1" 3 "model/end"
+                         {:model "gpt-x"
+                          :finish-reason "stop"
+                          :usage {:prompt_tokens 10 :completion_tokens 4 :total_tokens 14
+                                  :prompt_tokens_details {:cached_tokens 6}}})]]
+    (write-log! sid rows)
+    (projection/project!)
+    (let [calls (model-calls-of sid)]
+      (is (= 1 (count calls)))
+      (let [c (first calls)]
+        (is (= 0 (:seq c)) "keyed by the START line's own index (zero-based), which a rebuild recomputes")
+        (is (= 1 (:end-seq c)) "and closed by the END line it paired with")
+        (is (= "gpt-x" (:model c)))
+        (is (= 10 (:prompt-tokens c)))
+        (is (= 14 (:total-tokens c)))
+        (is (= 6 (:cached-tokens c)))
+        (is (= 2 (:ms c)) "the pair's own two timestamps, not a guess from another line")))))
+
+(deftest the-leaderboards-count-tools-skills-and-each-model-s-tokens
+  ;; THE PROJECTION'S OWN QUESTIONS (ADR 0008: 'a count by tool name'), and the count is over the
+  ;; HOME rather than over one log -- two conversations, so 'every session' is what is asserted.
+  (let [call (fn [seq name args]
+               (message-line "r1" seq "model" "assistant"
+                             {:role "assistant" :content "calling"
+                              :tool_calls [{:id (str "c" seq) :type "function"
+                                            :function {:name name :arguments args}}]}))
+        tokens (fn [seq model usage]
+                 [(fact-line "r1" seq "model/start" {:model model})
+                  (fact-line "r1" (inc seq) "model/end" {:usage usage})])]
+    (write-log! "pj-lead-a"
+                (into [(call 1 "read" "{}")
+                       (call 2 "read" "{}")
+                       (call 3 "bash" "{\"command\":\"ls\"}")
+                       (call 4 "skill" "{\"name\":\"code-review\"}")
+                       (call 5 "skill" "{\"name\":\"code-review\"}")
+                       (call 6 "skill" "{\"name\":\"tdd\"}")]
+                      (tokens 7 "gpt-x" {:prompt_tokens 10 :completion_tokens 5
+                                          :total_tokens 15})))
+    (write-log! "pj-lead-b"
+                (concat [(call 1 "read" "{}")]
+                        (tokens 2 "gpt-y" {:prompt_tokens 100 :completion_tokens 1
+                                            :total_tokens 101})
+                        (tokens 4 "gpt-y" {:prompt_tokens 100 :completion_tokens 1
+                                            :total_tokens 101})))
+    (projection/project!)
+    (is (= [{:name "read" :calls 3} {:name "skill" :calls 3} {:name "bash" :calls 1}]
+           (projection/tool-leaderboard))
+        "every tool the home has called, most first, ties broken by name")
+    (is (= [{:name "code-review" :calls 2} {:name "tdd" :calls 1}]
+           (projection/skill-leaderboard))
+        "and the SKILLS are the `skill` calls' own argument")
+    (is (= [{:model "gpt-y" :calls 2 :promptTokens 200 :completionTokens 2 :totalTokens 202}
+            {:model "gpt-x" :calls 1 :promptTokens 10 :completionTokens 5 :totalTokens 15}]
+           (projection/model-leaderboard))
+        "most tokens first, summed over the calls that reported them, absences absent")))
+
+(deftest a-repair-fills-what-the-offsets-never-covered
+  ;; A TABLE THAT DID NOT EXIST WHEN THE OFFSETS WERE WRITTEN (`.scratch/global-stats-panel/`):
+  ;; `harness.infra.db`'s `model-calls` step leaves a row in `projection_repairs`, and `start!`
+  ;; makes the whole copy again ONCE. This case plants the same two facts by hand -- the calls
+  ;; copied, then thrown away with a repair left behind -- because a migration that has already
+  ;; run is not something a case can stage.
+  (let [sid "pj-repair"]
+    (write-log! sid [(fact-line "r1" 1 "model/start" {:model "gpt-x"})
+                     (fact-line "r1" 2 "model/end" {:usage {:prompt_tokens 3
+                                                             :completion_tokens 1
+                                                             :total_tokens 4}})])
+    (projection/project!)
+    (is (= 1 (count (model-calls-of sid))))
+    (db/with-transaction
+     (fn [c]
+       (db/execute! c "DELETE FROM model_calls")
+       (db/execute! c "INSERT INTO projection_repairs (name, at) VALUES ('model-calls', 1)")))
+    (let [stop (projection/start!)]
+      (try
+        (is (eventually #(= 1 (count (model-calls-of sid))))
+            "the scheduled repair made the copy again")
+        (is (empty? (db/select "SELECT name FROM projection_repairs"))
+            "and settled the marker, so the next start has nothing to do")
         (finally (stop))))))

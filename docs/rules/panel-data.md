@@ -43,7 +43,7 @@
 
 ## 今天谁这么做了（这份文件就是它们的规矩）
 
-**没有欠账了**——五处都按上面那两半走（2026-09-29 复查过每一条都落在代码里）：
+**没有欠账了**——六处都按上面那两半走（2026-09-29 复查过每一条都落在代码里，2026-10-01 添了第一处新面板）：
 
 - **左侧清单**：挂载一次 `GET /api/projects`，之后每一个 host 级变化（run 起止、别窗发送、项目增删、
   归档）由 `events.host` 推来（`ui/src/components/sidebar.tsx` + `ui/src/lib/host.ts`，ADR 0004）。
@@ -65,7 +65,12 @@
   实测 `open?` 在读者走了以后还是 true）。所以**重连之后它要再问一次**：`onDownlinkOpen`
   （`ui/src/lib/mux.ts`）叫它重开，`ui/src/components/trajectory-view.tsx` 是唯一的读者；没有人在订阅
   这场会话时，服务端把折好的那一份给完就结束，不留门铃。
+- **右栏的统计视图**（`.scratch/global-stats-panel/`，2026-10-01）：挂载（以及页面回到可见、栏回到屏幕）
+  时读一次 `GET /api/stats`，之后由**它自己那一条下行** `events.stats` 推着走——服务端每投影一轮写下
+  行就 ring 一次，而**只有正开着统计视图的页面在听**：这三条排行榜要扫全库的工具调用，只开着侧栏的
+  页面不该为它付钱，所以它是 `harness.edge.host` 里的**第二套 watcher**，不搭 `events.host` 的便车。
+  `ui/src/hooks/use-home-stats.ts` 里**一个计时器都没有**（这里没有「正在走」的量，本文件那条例外用不上）。
 
-**没有欠账了**——上面五处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
+**没有欠账了**——上面六处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
 左栏那一半）；目录选择器那一处是 2026-09-29 随手合上的，trajectory 那一处同一天随
 `.scratch/memory-hygiene/` 票 02 一起（它本来就在推，缺的是「重连之后补一次」。）

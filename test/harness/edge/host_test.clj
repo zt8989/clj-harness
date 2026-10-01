@@ -13,7 +13,12 @@
             [harness.edge.http :as http]
             [org.httpkit.server :as hk]))
 
-(defn- clear! [] (reset! (var-get #'host/watchers) #{}))
+(defn- clear!
+  ;; BOTH DOORBELLS: the statistics have a watcher set of their own (see `harness.edge.host`),
+  ;; and a case that leaves one behind makes the next case's `stats-watching?` a lie.
+  []
+  (reset! (var-get #'host/watchers) #{})
+  (reset! (var-get #'host/stats-watchers) #{}))
 
 (use-fixtures :each (fn [f]
                       (clear!)
@@ -89,3 +94,31 @@
               {:body (java.io.ByteArrayInputStream.
                       (.getBytes (json/write-str {:subscriber "not-a-mux-token" :subscribe []}) "UTF-8"))})]
     (is (= 404 (:status resp)))))
+
+(deftest the-statistics-have-a-doorbell-and-a-downlink-of-their-own
+  ;; A SECOND CATEGORY ON THE SAME NS, and the separation is the whole point: the leaderboards
+  ;; are a scan of every tool call this home has made, so a page with only a sidebar open must
+  ;; not be sent one. This case pins the two halves -- the frame carries all three
+  ;; leaderboards, and a statistics ring reaches the statistics watchers and nobody else.
+  (let [sent (atom []) closed (atom nil)
+        ch   (fake-channel sent closed)]
+    (#'http/stats-stream-get {:async-channel ch})
+    (testing "the opening frame is the leaderboards, tagged as this category"
+      (let [frame (first (frames sent))]
+        (is (= "stats" (:type frame)))
+        (is (contains? frame :tools))
+        (is (contains? frame :skills))
+        (is (contains? frame :models))))
+    (testing "and the ring is the statistics' own"
+      (let [listings (atom 0)
+            stop     (host/watch! (fn [] (swap! listings inc)))]
+        (try
+          (let [before (count @sent)]
+            (host/ring-stats!)
+            (is (= (inc before) (count @sent)) "the statistics watcher heard it")
+            (is (zero? @listings) "and the listing's watcher did not -- a different set"))
+          (finally (host/unwatch! stop)))))
+    (testing "closing releases the watcher"
+      (is (host/stats-watching?))
+      (@closed 1000)
+      (is (not (host/stats-watching?))))))

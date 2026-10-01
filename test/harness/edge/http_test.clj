@@ -7580,3 +7580,24 @@
           (let [verdict (normalized/finish (sessions/fold-value tid :normalized))]
             (is (true? (:normalized? verdict)) "the call has its row now")
             (is (= [] (:reasons verdict)))))))))
+
+;; ------------------------------------------------------------- the statistics route
+
+(deftest the-statistics-route-is-a-question-of-its-own
+  ;; `GET /api/stats`: the three leaderboards over the whole home. A ROUTE OF ITS OWN (see
+  ;; `harness.edge.http/home-stats-get`) because the sidebar reads `/api/projects` on every
+  ;; host change and has no use for a count over every tool call this home has made.
+  ;;
+  ;; NO THREAD AND NO SCRIPT ARE NEEDED -- this route counts what the store already holds --
+  ;; but a server has to be listening, which is what the EMPTY THREAD LIST buys.
+  (with-server [] script
+    (fn []
+      (let [resp (api-call :get "/api/stats" nil)]
+        (is (= 200 (.statusCode resp)))
+        (let [body (read-json resp)]
+          (testing "all three leaderboards are present, each a list"
+            (is (vector? (:tools body)))
+            (is (vector? (:skills body)))
+            (is (vector? (:models body)))))
+        (testing "and a method the route does not serve is a 405 rather than a 500"
+          (is (= 405 (.statusCode (api-call-as :post "/api/stats")))))))))

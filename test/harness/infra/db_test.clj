@@ -212,8 +212,9 @@
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
           (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                  "hashline_undo" "messages" "projection_offsets" "projects"
-                  "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]
+                      "hashline_undo" "messages" "model_calls" "projection_offsets"
+                      "projection_repairs" "projects" "schema_steps" "session_claims"
+                      "sessions" "todos" "tool_calls"]
                  (db/tables))))
         (testing "and the file is claimed: its application id is this store's,
                   read the way a foreign program would read it"
@@ -366,8 +367,9 @@
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
               (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                      "hashline_undo" "messages" "projection_offsets" "projects"
-                      "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]
+                      "hashline_undo" "messages" "model_calls" "projection_offsets"
+                      "projection_repairs" "projects" "schema_steps" "session_claims"
+                      "sessions" "todos" "tool_calls"]
                      (db/tables))
                   "the old table is gone; the home's own tables are here, freshly built")
               (db/with-transaction
@@ -1001,8 +1003,12 @@
                ;; three facts about the OWNER, the claim's own token, and when it
                ;; was taken -- which is why it is state rather than a record.
                "session_claims"     #{"thread_id" "instance" "token" "pid"
-                                      "started_at" "since"}}
-              ;; AND THE PROJECTION'S THREE (ADR 0008, 2026-09-25): the owner overruled the half of
+                                      "started_at" "since"}
+               ;; AND THE REPAIR MARKER, which is STATE and not a record: one row names a thing a
+               ;; migration said the projection still has to do, and `start!` deletes it once the
+               ;; pass is over. There is nothing in a log it could ever be rebuilt from.
+               "projection_repairs" #{"name" "at"}}
+              ;; AND THE PROJECTION'S CONTENT (ADR 0008, 2026-09-25): the owner overruled the half of
               ;; this boundary that said 'jsonl 里的任何内容都不进库', so `messages` and `tool_calls`
               ;; are content BY DECISION and are listed here as exactly what they may hold. They are
               ;; kept in a SEPARATE map from the state tables above because the guard the doseq runs
@@ -1011,14 +1017,17 @@
               ;; would be pretending rather than guarding. What still guards the projection is that
               ;; it is RECOMPUTABLE: `harness.edge.projection-test/
               ;; rebuilding-answers-row-for-row-what-was-there` is the acceptance ADR 0008 decision 6
-              ;; asks for, and `harness.infra.db/projected-content` is where the three tables' shape
+              ;; asks for, and `harness.infra.db/projected-content` is where the content tables' shape
               ;; is decided.
               declared-projected-columns
               {"messages"           #{"session_id" "seq" "run_id" "source" "role" "content"
                                       "reasoning" "tool_calls" "at"}
                "tool_calls"         #{"session_id" "seq" "call_id" "name" "arguments" "result"}
                "projection_offsets" #{"session_id" "path" "byte_offset" "line_offset"
-                                      "updated_at"}}
+                                      "updated_at"}
+               "model_calls"        #{"session_id" "seq" "run_id" "model" "end_seq"
+                                      "prompt_tokens" "completion_tokens" "total_tokens"
+                                      "cached_tokens" "at" "ms"}}
               ;; `titles?` LEFT THIS LIST with `sessions.title` (see the comment above):
               ;; the exact list below is what keeps a column a decision, and a name
               ;; pattern that has to exempt the one column it was written to forbid
@@ -1065,11 +1074,12 @@
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
                                       "hashline_sessions" "hashline_undo" "todos"
-                                      "session_claims"}
-              ;; THE PROJECTION'S THREE ARE TABLES TOO (ADR 0008) -- listed here so that 'the store's
+                                      "session_claims" "projection_repairs"}
+              ;; THE PROJECTION'S TABLES ARE TABLES TOO (ADR 0008) -- listed here so that 'the store's
               ;; tables are exactly the ones the home declared' keeps meaning something now that two of
               ;; them are content.
-              declared-projected-tables #{"messages" "tool_calls" "projection_offsets"}
+              declared-projected-tables #{"messages" "tool_calls" "projection_offsets"
+                                          "model_calls"}
               forbidden            #"(?i)\b(messages?|frames?|events?|logs?|jsonl|transcripts?|contents?|parts?)\b"]
           (testing "the store's tables are exactly the ones the home declared"
             (is (= (into declared-state-tables declared-projected-tables) (set (db/tables)))))
