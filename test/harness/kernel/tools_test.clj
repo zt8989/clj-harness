@@ -400,7 +400,12 @@
       (testing "and the call came back at the limit, not at the end"
         (is (< elapsed 20000) (str "elapsed " elapsed "ms")))
       (testing "and the child the command started is gone with it"
-        (let [pid (Long/parseLong (str/trim (slurp pid-file :encoding "UTF-8")))]
+        ;; POLLED, NOT READ ONCE (`support/child-pid` says why): the child writes its own pid
+        ;; only after it has BOOTED, and a single read under load catches an empty file --
+        ;; which surfaces as a NumberFormatException out of the FIXTURE instead of as the
+        ;; assertion this case is about (seen in a full run, 2026-09-30).
+        (let [pid (support/child-pid pid-file 5000)]
+          (is (some? pid) "the command really did start a child")
           (is (support/gone-within? pid 5000)
               (str "pid " pid " outlived the call that started it"))))
       (finally (support/wipe-tree! dir)))))
