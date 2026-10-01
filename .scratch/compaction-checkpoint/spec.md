@@ -174,3 +174,12 @@ uncommitted (23 path(s)):
 git 事实在不该答的树上**答错过**（thread `a0621fce-…`），`Already produced` 只覆盖被折掉的那段、
 **从不覆盖尾巴**（a0621 被认错的那笔活就在尾巴里），而且它当时在生产上还是空的；hook 的话参考实现
 根本不带。上面 01/02 两节记的是**当时**落地过的东西，按 `docs/agents/domain.md` 的规矩不改旧文。
+
+2026-10-01（夜） — **06 查清了，并落成一处修复。** 差额不是「live 面多带了一类东西」，是
+**密度**：527 发实测/估价逐发对照（`dev/scratch_live_vs_fold.clj`），比值 1.02 → 1.44，
+压缩后那一发 1.29；两参数拟合残差 p50 0.6%。同一段数组连发两次 prompt 完全一致
+（147,357 / 147,357），工具表实测 ~7 字节/token（45 张 schema、45,846 字节 → +6,396）。
+动作：`pressure/tools-bytes-per-token = 7` 按实测计价、docstring 记下实测乐观度与三份可重跑脚本、
+`pressure_test/a-tool-table-is-priced-at-the-density-it-was-measured-at` 钉住。
+证据脚本：`dev/scratch_live_vs_fold.clj`、`dev/scratch_measure_twice.clj`、`dev/scratch_tool_probe.clj`、
+`dev/scratch_cjk_share.clj`、`dev/scratch_two_folds.clj`（后两条分别否掉「中文税」与「两个折叠不一致」）。

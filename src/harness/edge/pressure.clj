@@ -22,6 +22,16 @@
   estimator that undercounts CJK is the expected case, and the anchor is adopted exactly
   then.
 
+  HOW FAR OFF THE ESTIMATOR IS, MEASURED (ticket 06 of `.scratch/compaction-checkpoint`,
+  2026-10-01, `dev/scratch_live_vs_fold.clj`). Over the 527 calls of a real long session that
+  reported usage, the vendor's prompt was **1.27 to 1.45 times** this fold's estimate, and a
+  two-parameter fit (`vendor ≈ a·est + b·reasoning_chars`) explained it with residuals under 2%
+  -- i.e. the error is a DENSITY error, not a missing class of message: the fold and the live
+  array hold the same nodes. Two isolated confirmations on the same vendor: the same array
+  measured twice identically (147,357 / 147,357), and a tool table priced at ~7 bytes to the
+  token (`tools-bytes-per-token`). What is left in the estimate is the honest part of the
+  design -- the ANCHOR above is what buries it, which is why every reading carries `:baseline`.
+
   IT IS A PURE FUNCTION OVER RECORDS (records->pressure) for the same reason its four
   siblings are: what can be asserted is the interesting part. The two-argument arity is
   the same fold with the request an edge has ALREADY ASSEMBLED handed in -- so a trigger
@@ -61,6 +71,15 @@
   bias against CJK and JSON schema. Applied only to the DELTA; see the namespace
   docstring."
   4)
+
+(def tools-bytes-per-token
+  "Seven BYTES of tool schema to a token -- measured, not guessed (ticket 06 of
+  `.scratch/compaction-checkpoint`): 45 generated schemas of 45,846 bytes raised this vendor's
+  prompt from 5,054 to 11,450 on one array (and +6,396 on another), i.e. one token per ~7
+  bytes, where the prose rule above spends one per four CHARACTERS. JSON schema is dense in
+  punctuation and short field names, and the vendor's tokenizer bills it accordingly -- the
+  other half of the bias the namespace docstring admits."
+  7)
 
 (def block-overhead
   "Tokens of framing per content block (JSON bracketing, type tags)."
@@ -117,8 +136,13 @@
   line keeps rather than from the table (ticket 04). Each tool is one block of
   structured JSON -- short fragments, quotes and field names -- which is the other kind
   of text the estimator underprices, so the framing is charged per tool (`:tools-count`)
-  and the table's bytes, when the record has them (`:tools-bytes`), are charged at the
-  same four-characters-to-a-token rule as everything else.
+  and the table's bytes are charged at `tools-bytes-per-token`, MEASURED rather than
+  guessed: 45 tool schemas (45,846 bytes of JSON, ~900 characters of description each)
+  cost this vendor **6,396 prompt tokens** -- one token per ~7 bytes, against the 4
+  characters per token the prose rule spends. A schema is punctuation, field names and
+  quotes, and it prices like text, not like prose (ticket 06 of
+  `.scratch/compaction-checkpoint`, measured 2026-10-01 on glm-5.3-flash; the same call
+  without the table cost 5,054, with it 11,450).
  
   AN OLD RECORD STILL CARRIES THE TABLE, and its size is the best it has to offer."
   [start-payload]
@@ -128,7 +152,7 @@
                     (context/size-of (:tools start-payload))))]
     (+ (* block-overhead n)
        (if (number? bytes)
-         (long (Math/ceil (/ (double bytes) (double chars-per-token))))
+         (long (Math/ceil (/ (double bytes) (double tools-bytes-per-token))))
          0))))
 
 (defn- tools-names-hash-of
