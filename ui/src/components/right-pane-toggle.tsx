@@ -45,10 +45,11 @@ import { Button } from "@/components/ui/button";
 /// repo could see (there is no DOM to resolve it against), and the suites compare the strings.
 export const RIGHT_PANE_ID = "app-right-pane";
 
-/// THE STATISTICS PAGE'S ID, and the second region two of these controls name. IT IS NOT THE
-/// COLUMN'S: the statistics replace the conversation AND the right-hand column (owner,
-/// 2026-10-01), so the `…` that opens them and the button that closes them both point HERE -- a
-/// control naming `RIGHT_PANE_ID` would be pointing at a box it neither opens nor closes.
+/// THE STATISTICS DRAWER'S ID, and the second region two of these controls name. IT IS NOT THE
+/// COLUMN'S: the statistics are a cover over the WHOLE page (owner, 2026-10-01) -- the conversation,
+/// the right-hand column and the left sidebar -- so the `…` that opens them and the button that
+/// closes them both point HERE; a control naming `RIGHT_PANE_ID` would be naming a box it neither
+/// opens nor closes.
 export const STATS_VIEW_ID = "app-stats";
 
 /// THE WIDTH AT WHICH THIS COLUMN IS NO LONGER A DRAWER, spelled the way the CSS spells it:
@@ -110,10 +111,10 @@ export const RightPaneOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
 /// accessible name is its `title` and its `sr-only` span, the pattern every icon button in this
 /// shell follows.
 ///
-/// AND IT NAMES A REGION OF ITS OWN (`STATS_VIEW_ID`), not the right-hand column: the statistics
-/// are a PAGE that replaces the conversation and that column both (owner, 2026-10-01), so a
-/// control pointing at the column would be naming a box it does not open. No `aria-expanded` --
-/// this is a navigation, not a disclosure (the mirror's back control argues the same line).
+/// AND IT NAMES A REGION OF ITS OWN (`STATS_VIEW_ID`), not the right-hand column: the statistics are
+/// a DRAWER over the whole page (owner, 2026-10-01), so a control pointing at the column would be
+/// naming a box it does not open. No `aria-expanded` -- this is a navigation, not a disclosure
+/// (the mirror's back control argues the same line).
 export const StatsOpenButton: FC<{ onOpen: () => void }> = ({ onOpen }) => {
   const { t } = useTranslation();
   return (

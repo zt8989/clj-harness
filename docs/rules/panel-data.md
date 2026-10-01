@@ -65,14 +65,14 @@
   实测 `open?` 在读者走了以后还是 true）。所以**重连之后它要再问一次**：`onDownlinkOpen`
   （`ui/src/lib/mux.ts`）叫它重开，`ui/src/components/trajectory-view.tsx` 是唯一的读者；没有人在订阅
   这场会话时，服务端把折好的那一份给完就结束，不留门铃。
-- **统计页**（`.scratch/global-stats-panel/`，2026-10-01）：挂载、换窗口（7/30/90 天）、页面回到可见
+- **统计抽屉**（`.scratch/global-stats-panel/`，2026-10-01）：挂载、换窗口（7/30/90 天）、页面回到可见
   时各读一次 `GET /api/stats?days=`，之后由**它自己那一条下行** `events.stats?days=` 推着走——服务端每
-  投影一轮写下行就 ring 一次，而**只有正开着统计页的页面在听**：这三条排行榜要扫全库的工具调用，只开着
+  投影一轮写下行就 ring 一次，而**只有正开着统计抽屉的页面在听**：这三条排行榜要扫全库的工具调用，只开着
   侧栏的页面不该为它付钱，所以它是 `harness.edge.host` 里的**第二套 watcher**，不搭 `events.host` 的便车。
   **窗口跟着连接走**（`?days=` 写在 socket URL 上），所以换窗口是换一条连接，不是拿旧答案套新标签。
   `ui/src/hooks/use-home-stats.ts` 里**一个计时器都没有**（这里没有「正在走」的量，本文件那条例外用不上）。
 
-  **页面上那一个动词（`重算`）不违反「读不写」**：写的那一半是 `POST /api/stats/rebuild`，一个 POST 而不是
+  **抽屉里那一个动词（`重算`）不违反「读不写」**：写的那一半是 `POST /api/stats/rebuild`，一个 POST 而不是
   一次 GET；那条 GET 依旧只数行、不落一笔。
 
 **没有欠账了**——上面六处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与

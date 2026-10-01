@@ -45,12 +45,15 @@ start/end 之间——SQL 里就是「这个会话里 `end_seq IS NULL` 的最�
   **排到投影自己的线程上**（请求不等读日志），新数字由那条下行推回来；没有 trigger 在跑时（套件、REPL）
   就地做完再答。
 
-## 三、前端：一整块页
+## 三、前端：一个覆盖整页的抽屉
 
-- `components/stats-view.tsx`：**不是一个窄栏**，而是 `min-h-0 min-w-0 flex-1` 的一块，占了原来会话 + 右栏的
-  地方；`app.tsx` 在它是打开的那个 pane 时把会话那一列 `hidden`（**不卸载**：runtime、run、滚动位置都留着），
-  并且**不给它画抽屉背板**（它不是盖在会话上的抽屉，它就是房间）。左侧栏照旧。
+- `components/stats-view.tsx`：**`bg-background absolute inset-0 z-50 flex flex-col`**——盖住整页
+  （会话、右栏、**连左侧栏一起**），`z-50` 在 shell 画的每一层之上（侧栏/右栏 `z-30`、角上的按钮 `z-40`）。
+  **它不是 flex 行里的兄弟**，所以身后什么都不重排：会话照旧挂着（runtime、run、滚动位置都在），也不画背板
+  （整页都盖住了，旁边没有可点的东西）。
 - 标题栏：`[回到对话] 统计 … [7天|30天|90天] [重算]`。窗口是三个按钮（`aria-pressed` 说明哪个开着）。
+- **Esc 也关它**：`app.tsx` 那个 Escape 处理器里，统计抽屉**排在最前、且不看宽度**（它任何宽度都盖在最上层），
+  下面那句宽度判断是给「只在窄屏才是抽屉」的两个面板的。
 - 三个分区在宽屏是一行、窄屏是一列，各自滚动；**模型 token 排行还在折叠里**（第一轮那句「点击下拉可看」）。
 - `lib/home-stats.ts` + `hooks/use-home-stats.ts`：快照一次 + 订阅那条下行；**窗口是依赖**（换窗口 = 换连接 +
   补一次快照）；三个「不看了」（卸载、页面隐藏、离屏）都停订阅；**没有计时器**。
@@ -69,16 +72,15 @@ start/end 之间——SQL 里就是「这个会话里 `end_seq IS NULL` 的最�
 - `harness.edge.http-test`：`GET /api/stats?days=30` 回 30 与三个列表、POST 不服务的动词是 405、
   `POST /api/stats/rebuild` 是排掉的动作。
 - `ui/test/suites/right-pane.tsx`：两条用例——`…`/关闭两个控件指向 `STATS_VIEW_ID`、页面把会话 `hidden`、
-  没有背板、窗口三个按钮的 `aria-pressed` 与两种语言的词、`重算` 按钮与它带的窗口、折叠默认关着。
-  `ui.test.ts` 的 `EXPECTED_CASES` 203 → 205。
+- `ui/test/suites/right-pane.tsx`：两条用例——`…`/关闭两个控件指向 `STATS_VIEW_ID`、抽屉那串 class
+  （`absolute inset-0 z-50`）且**不是** flex 兄弟、会话**没有**被 `hidden`、Escape 先答统计、窗口三个按钮的
+  `aria-pressed` 与两种语言的词、`重算` 按钮与它带的窗口、折叠默认关着。`ui.test.ts` 的 `EXPECTED_CASES` 203 → 205。
 - `npm run typecheck` / `npm run build` 绿；`npm test`（205/205）绿。
-- **浏览器走查**（AGENTS.md 要求）：`node scripts/dev.mjs --scripted`，走一条消息，右栏标题栏 `…` → 整块统计页
-  → 工具排行、skill 空句子、点开模型排行看到 `scripted / 1k / 2 次调用`、切到 30 天、按 `重算`、`回到对话`。
-  截图：`evidence/stats-page.png`（整块页；`stats-view.png` 是第一轮那个窄栏版本，留作对比）。
-
-  **走查抓到一格机器门看不见的**：左侧栏折起来时那个浮动的「打开侧边栏」正好压在这一页自己的
-  「回到对话」上（两者都是 8,8 那个 32×32 的框），鼠标点不到。修法与 session 标题栏同一句 ——
-  `ps-12 lg:ps-3`，由页面把 `sidebarFolded` 传下来；套件里也钉了这一格。
+- **浏览器走查**（AGENTS.md 要求）：`node scripts/dev.mjs --scripted`，走一条消息，右栏标题栏 `…` → 抽屉盖满整页
+  → 工具排行、skill 空句子、点开模型排行看到 `scripted / 1k / 2 次调用`、切到 30 天、按 `重算`、`回到对话`/`Esc`。
+  截图：`evidence/stats-drawer.png`（抽屉）、`evidence/stats-page.png`（上一版整块页，留作对比）、
+  `evidence/stats-view.png`（第一轮那个窄栏版本）。走查实测：`.stats-view` 的 rect = 整个 viewport（500×296 与
+  1280×800 两档），`z-index: 50`，`elementFromPoint` 在原本侧栏那一列拿到的是抽屉自己的内容。
 
 ## 一个与这一票无关的既有 flake（记录，别当成回归）
 

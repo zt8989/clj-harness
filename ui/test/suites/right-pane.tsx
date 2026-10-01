@@ -144,10 +144,10 @@ function statsCloseControl(language: Language): string {
 /// reaches at module scope touches one: the hook's effects (the snapshot read, the socket, the
 /// observation) never run in `renderToStaticMarkup`, so what is drawn here is the view with no
 /// answer yet -- which is exactly the state its empty sentences exist for.
-function statsView(language: Language, sidebarFolded = false): string {
+function statsView(language: Language): string {
   return renderToStaticMarkup(
     <I18nextProvider i18n={renderI18n(language)}>
-      <StatsView onClose={() => {}} sidebarFolded={sidebarFolded} />
+      <StatsView onClose={() => {}} />
     </I18nextProvider>,
   );
 }
@@ -727,24 +727,29 @@ const cases: Case[] = [
   {
     name: "the-statistics-view-draws-two-rankings-and-folds-the-token-one-away",
     run: async () => {
-      // IT IS NOT A COLUMN BESIDE THE CONVERSATION (owner, 2026-10-01): the page takes the room
-      // the conversation and the right-hand column had, and `app.tsx` HIDES the middle one while
-      // it is open. Read as SOURCE, because that is where the layout lives.
+      // IT IS A DRAWER OVER THE WHOLE PAGE (owner, 2026-10-01): `absolute inset-0` against the
+      // page's own box, above every other layer the shell draws, and NOT a sibling in the flex
+      // row. Read as SOURCE -- this run has no stylesheet, and a class string is where that
+      // decision lives.
       expect(statsViewSource).toContain("id={STATS_VIEW_ID}");
-      expect(statsViewSource).toContain("min-h-0 min-w-0 flex-1");
+      expect(statsViewSource).toContain("bg-background absolute inset-0 z-50");
       expect(statsViewSource).not.toContain("w-[26rem]");
+      expect(statsViewSource).not.toContain("min-h-0 min-w-0 flex-1");
       const app = appSource.replace(/\r\n/g, "\n");
-      expect(app).toContain('rightPane?.kind === "stats" ? " hidden" : ""');
-      // AND IT IS NOT A DRAWER EITHER: the backdrop belongs to the column, and a page that IS
-      // the room needs no tap-beside-it way out.
+      // NOTHING IS HIDDEN BEHIND IT: a drawer slides OVER what is there, so the conversation keeps
+      // its runtime, its run and its scroll position -- and the page needs no backdrop either,
+      // because the cover leaves nothing to tap beside it.
+      expect(app).not.toContain('rightPane?.kind === "stats" ? " hidden" : ""');
       expect(app).toContain('rightPane.kind !== "stats" && (');
-      // AND ONE NEIGHBOUR FACT IS HANDED DOWN: while the sidebar is FOLDED its floating "open the
-      // sidebar" control sits exactly on this page's leading button (both boxes at 8,8 -- found by
-      // walking the page). The header clears it with the session bar's own `ps-12 lg:ps-3`, and
-      // the inset goes away where there is no floating control.
-      expect(app).toContain("sidebarFolded={folded}");
-      expect(statsViewSource).toContain("ps-12 lg:ps-3");
-      expect(attrOf(statsView("en", true), "stats-view-header", "class")).toContain("ps-12");
+      // AND ESCAPE CLOSES WHAT IS ON TOP: the statistics drawer answers FIRST and at every width,
+      // because it is above the two panels whose being drawers depends on the window.
+      expect(app).toContain('rightPane.kind === "stats") {');
+      // NOTHING IS HANDED DOWN ABOUT ITS NEIGHBOURS: the floating "open the sidebar" control and
+      // this header's leading button used to share the box at 8,8 (the walkthrough found it, and
+      // `ps-12 lg:ps-3` cleared it) -- under a cover, that control is BEHIND the drawer instead.
+      expect(app).not.toContain("sidebarFolded");
+      // THE RENDERED HEADER, not the source: the file's own prose names `ps-12` while explaining
+      // why it is gone, and a claim about a class belongs on the element that would wear it.
       expect(attrOf(statsView("en"), "stats-view-header", "class")).not.toContain("ps-12");
 
       // WHAT IT SAYS, IN BOTH LANGUAGES: the words are the whole of what tells these three

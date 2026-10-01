@@ -1,10 +1,9 @@
-// THE STATISTICS PAGE: what the WHOLE HOME has been doing, over a window a reader picks.
+// THE STATISTICS DRAWER: what the WHOLE HOME has been doing, over a window a reader picks.
 //
-// IT IS NOT A COLUMN BESIDE THE CONVERSATION (owner, 2026-10-01): it REPLACES the middle and the
-// right-hand column both -- the left sidebar stays, because that is where the page's own
-// navigation lives -- so a page of rankings is as wide as the room it has. `app.tsx` hides the
-// conversation while `{kind: "stats"}` is the open pane, and the one control that leaves is this
-// page's own leading button; there is nothing else to fold.
+// IT COVERS THE WHOLE PAGE (owner, 2026-10-01): the conversation, the right-hand column and the LEFT
+// SIDEBAR too. It is drawn over the page's own box rather than beside anything in it, so nothing
+// reflows behind it -- `app.tsx` keeps the conversation mounted exactly as it was, and the one
+// control that leaves is this drawer's own leading button.
 //
 // WHAT IT DRAWS, AND WHERE THE NUMBERS COME FROM. Every ranking is the PROJECTION's answer
 // (`harness.edge.projection`'s leaderboards, over `tool_calls` and `model_calls`), read once
@@ -117,19 +116,22 @@ const ModelRows: FC<{ rows: readonly ModelLeader[] }> = ({ rows }) => {
   );
 };
 
-/// The page, with the one way out in its header: closing it puts the conversation back (there is
-/// no column to fold back to -- this page IS the room).
-/// `sidebarFolded` IS THE ONE THING THIS PAGE IS TOLD ABOUT ITS NEIGHBOUR, and it is the same fact
-/// `app.tsx`'s session bar is told: while the LEFT sidebar is folded there is a floating "open the
-/// sidebar" control in the top-left corner, and it sits exactly on this header's own leading
-/// button -- found by WALKING the page rather than by reading it (792px wide, sidebar folded,
-/// both boxes at 8,8). The session bar clears it with `ps-12 lg:ps-3` and explains the
-/// arithmetic there; this header clears it with the same class for the same reason, and `lg:`
-/// takes the inset away again where there is no floating control to clear.
-export const StatsView: FC<{ onClose: () => void; sidebarFolded?: boolean }> = ({
-  onClose,
-  sidebarFolded = false,
-}) => {
+/// THE DRAWER, with the one way out in its header.
+///
+/// IT COVERS THE WHOLE PAGE (owner, 2026-10-01) -- the conversation, the right-hand column and the
+/// LEFT SIDEBAR too -- so it is `absolute inset-0` over the page's own box rather than a sibling
+/// in the flex row: nothing reflows behind it, and there is no width at which it is anything but a
+/// cover. That is also why it does NOT need the session bar's `ps-12 lg:ps-3`: the floating "open
+/// the sidebar" control is UNDER this drawer rather than beside this header's own button (the
+/// earlier, sibling version of this page did need it -- `.scratch/global-stats-panel/spec.md`
+/// keeps that finding and why it went away).
+///
+/// `z-50` IS ABOVE EVERY OTHER LAYER the shell draws: the sidebars and the right column are `z-30`
+/// and their corner controls `z-40`, and a cover that left any of them on top would not be one.
+///
+/// NOTHING BEHIND IT IS UNMOUNTED: the conversation keeps its runtime, its run and its scroll
+/// position under the cover, and Escape -- the page's own handler -- closes what is on top.
+export const StatsView: FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useTranslation();
   const pane = useRef<HTMLElement | null>(null);
   /// THE WINDOW IS THE PAGE'S OWN STATE, above the hook that reads it: changing it is changing
@@ -158,13 +160,11 @@ export const StatsView: FC<{ onClose: () => void; sidebarFolded?: boolean }> = (
       ref={pane}
       data-slot="stats-view"
       aria-label={t("rightPane.stats")}
-      className="bg-background flex min-h-0 min-w-0 flex-1 flex-col"
+      className="bg-background absolute inset-0 z-50 flex flex-col"
     >
       <header
         data-slot="stats-view-header"
-        className={`flex h-12 shrink-0 items-center gap-2 border-b px-3${
-          sidebarFolded ? " ps-12 lg:ps-3" : ""
-        }`}
+        className="flex h-12 shrink-0 items-center gap-2 border-b px-3"
       >
         <StatsCloseButton onClose={onClose} />
         <span data-slot="stats-view-name" className="min-w-0 flex-1 truncate text-sm font-medium">

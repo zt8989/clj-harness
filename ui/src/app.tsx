@@ -1608,6 +1608,13 @@ export function App() {
       // right one is drawn over the left, so Escape closes what the person is looking at rather
       // than what is behind it. From `md` up there is no such cover to close -- the column is a
       // sibling -- and `foldDrawer` decides the sidebar's half by the same reading of the window.
+      // THE STATISTICS DRAWER ANSWERS FIRST AND AT EVERY WIDTH (owner, 2026-10-01): it covers the
+      // whole page, so it is on top wherever the window's own breakpoints have put the other two
+      // -- the width test below is about the two panels that only BECOME covers on a narrow one.
+      if (rightPane !== null && rightPane.kind === "stats") {
+        setRightPane(null);
+        return;
+      }
       if (rightPane !== null && rightPaneIsDrawer()) {
         setRightPane(null);
         return;
@@ -2028,12 +2035,11 @@ export function App() {
             refuses to be narrower than the longest argument list, and the page
             scrolls sideways with every preview running off the edge. The chat never
             needed it because its text wraps. */}
-        {/* `hidden` RATHER THAN UNMOUNTED WHEN THE STATISTICS PAGE IS OPEN (owner, 2026-10-01):
-            the conversation keeps its runtime, its run and its scroll position while somebody
-            reads the numbers -- the same choice the sidebar makes when it folds. */}
-        <div
-          className={`min-h-0 min-w-0 flex-1${rightPane?.kind === "stats" ? " hidden" : ""}`}
-        >
+        {/* IT IS NOT `hidden` BEHIND THE STATISTICS DRAWER, deliberately: a drawer slides OVER what is
+            there rather than reflowing it, so this column keeps its runtime, its run and its scroll
+            position exactly as they were -- the same reason the sidebar's drawer does not unmount
+            the conversation behind it. */}
+        <div className="min-h-0 min-w-0 flex-1">
           {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ON ITS ROW, not
               here: `registerPending`'s failure goes into `openErrors`, which the sidebar
               draws under the session it belongs to. There is no "no session" box any more
@@ -2115,15 +2121,11 @@ export function App() {
           />
         )}
         {rightPane !== null && rightPane.kind === "stats" && (
-          // THE STATISTICS PAGE, AND IT IS NOT THIS COLUMN'S THIRD STATE (owner, 2026-10-01): it
-          // REPLACES the conversation and this column both -- the middle column below is `hidden`
-          // while this is open -- and leaves the left sidebar alone. `openPane` is still the
-          // writer, so the drawer rule below `md` applies to it.
-          // `sidebarFolded` IS HANDED DOWN BECAUSE THE FLOATING "open the sidebar" CONTROL SITS ON
-          // THIS PAGE'S OWN LEADING BUTTON while the sidebar is folded (the walkthrough found the
-          // two boxes at the same 8,8). The session bar is told the same fact for the same reason
-          // -- see `components/stats-view.tsx` and the `ps-12 lg:ps-3` there.
-          <StatsView onClose={() => setRightPane(null)} sidebarFolded={folded} />
+          // THE STATISTICS DRAWER: a cover over the WHOLE page -- this column and the left sidebar
+          // included -- rather than a third state of this column (owner, 2026-10-01). Nothing is
+          // unmounted behind it, and it needs to be told nothing about its neighbours: the boxes
+          // the earlier sibling version had to clear are under it now (`components/stats-view.tsx`).
+          <StatsView onClose={() => setRightPane(null)} />
         )}
       </div>
       </SubagentViewContext.Provider>
