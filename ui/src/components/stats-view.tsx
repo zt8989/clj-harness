@@ -30,8 +30,9 @@ import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { useRef, useState, type FC, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { STATS_VIEW_ID, StatsCloseButton } from "@/components/right-pane-toggle";
+import { STATS_TITLE_ID, STATS_VIEW_ID, StatsCloseButton } from "@/components/right-pane-toggle";
 import { Button } from "@/components/ui/button";
+import { useFocusTrap } from "@/hooks/use-focus-trap";
 import { useHomeStats } from "@/hooks/use-home-stats";
 import { formatTokens } from "@/lib/format";
 import {
@@ -129,11 +130,26 @@ const ModelRows: FC<{ rows: readonly ModelLeader[] }> = ({ rows }) => {
 /// `z-50` IS ABOVE EVERY OTHER LAYER the shell draws: the sidebars and the right column are `z-30`
 /// and their corner controls `z-40`, and a cover that left any of them on top would not be one.
 ///
+/// AND IT IS A MODAL DIALOG RATHER THAN A PANEL THAT MERELY LOOKS LIKE ONE (owner, 2026-10-01):
+/// `role="dialog"` + `aria-modal="true"`, announced by the heading on screen (`STATS_TITLE_ID`),
+/// with the keyboard kept inside by `hooks/use-focus-trap.ts`. THE TWO GO TOGETHER -- `aria-modal`
+/// is a claim that everything outside is inert, and the trap is what makes it true; either one
+/// alone is a lie the next Tab tells.
+///
+/// WHERE THE KEYBOARD GOES WHEN IT CLOSES is the trap's contract taken literally: back to whatever
+/// had focus when it opened, IF that control is still there. For this drawer it usually is not --
+/// closing it closes the right-hand column the `…` lived in -- so focus lands on `body`, from
+/// where the next Tab starts at the top of the page. A better landing spot would be a decision
+/// about the PAGE (which control is the way back in) rather than about this drawer.
+///
 /// NOTHING BEHIND IT IS UNMOUNTED: the conversation keeps its runtime, its run and its scroll
 /// position under the cover, and Escape -- the page's own handler -- closes what is on top.
 export const StatsView: FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useTranslation();
   const pane = useRef<HTMLElement | null>(null);
+  /// THE KEYBOARD STAYS IN HERE (`hooks/use-focus-trap.ts`), which is what makes the
+  /// `aria-modal` below an honest claim rather than a wish.
+  useFocusTrap(pane);
   /// THE WINDOW IS THE PAGE'S OWN STATE, above the hook that reads it: changing it is changing
   /// the question, and the hook re-reads and re-subscribes for the new one.
   const [days, setDays] = useState<number>(STATS_RANGES[0]);
@@ -159,7 +175,15 @@ export const StatsView: FC<{ onClose: () => void }> = ({ onClose }) => {
       id={STATS_VIEW_ID}
       ref={pane}
       data-slot="stats-view"
-      aria-label={t("rightPane.stats")}
+      // A MODAL DIALOG, AND IT IS ONE: `aria-modal` is the claim that what is outside is inert,
+      // and `useFocusTrap` above is what makes it true (the keyboard cannot leave). The name is
+      // the heading below rather than a label of its own -- ANNOUNCED BY WHAT IS ON SCREEN.
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={STATS_TITLE_ID}
+      // THE FALLBACK FOR A DIALOG WITH NOTHING TO FOCUS: it can hold the focus itself without
+      // becoming a tab stop of its own (`use-focus-trap.ts` says why that matters).
+      tabIndex={-1}
       className="bg-background absolute inset-0 z-50 flex flex-col"
     >
       <header
@@ -167,7 +191,11 @@ export const StatsView: FC<{ onClose: () => void }> = ({ onClose }) => {
         className="flex h-12 shrink-0 items-center gap-2 border-b px-3"
       >
         <StatsCloseButton onClose={onClose} />
-        <span data-slot="stats-view-name" className="min-w-0 flex-1 truncate text-sm font-medium">
+        <span
+          id={STATS_TITLE_ID}
+          data-slot="stats-view-name"
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+        >
           {t("rightPane.stats")}
         </span>
         {/* THE WINDOW, as three buttons rather than a select: which one is on is the whole of what
