@@ -83,6 +83,17 @@
 
 ;; ------------------------------------------------------------------ the anchoring
 
+
+(deftest a-tool-table-is-priced-at-the-density-it-was-measured-at
+  ;; TICKET 06 OF `.scratch/compaction-checkpoint`. 45 schemas of 45,846 bytes cost this vendor
+  ;; 6,396 prompt tokens: 5,054 without the table and 11,450 with it on one array, +6,396 on
+  ;; another. That is one token per ~7 BYTES, not the one per four CHARACTERS the prose rule
+  ;; spends -- a schema is punctuation, field names and quotes, and it prices like text.
+  (is (= 6730 (pressure/estimate-tools {:tools-count 45 :tools-bytes 45846}))
+      "45 tools: 4 tokens of framing each, plus 45,846 bytes at 7 to the token")
+  (is (< 6396 (pressure/estimate-tools {:tools-count 45 :tools-bytes 45846}) 7100)
+      "within 5% of the 6,396 the vendor actually charged")
+  (is (= 0 (pressure/estimate-tools {})) "a call with no tool table is charged nothing"))
 (deftest the-meter-anchors-on-the-vendor-and-estimates-only-the-delta
   (let [records [(entry 0 "u1" "hi")
                  (sys 1 "you are a coding agent")
