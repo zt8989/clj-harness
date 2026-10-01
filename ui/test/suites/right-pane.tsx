@@ -50,11 +50,17 @@ import panelSource from "../../src/components/subagent-view.tsx?raw";
 import contextSource from "../../src/components/subagent-view-context.ts?raw";
 import appSource from "../../src/app.tsx?raw";
 import type { Language } from "../../src/lib/language";
-import { STATS_VIEW_ID, StatsCloseButton, StatsOpenButton } from "../../src/components/right-pane-toggle";
+import {
+  STATS_TITLE_ID,
+  STATS_VIEW_ID,
+  StatsCloseButton,
+  StatsOpenButton,
+} from "../../src/components/right-pane-toggle";
 import { StatsView } from "../../src/components/stats-view";
 import statsViewSource from "../../src/components/stats-view.tsx?raw";
 import homeStatsSource from "../../src/lib/home-stats.ts?raw";
 import useHomeStatsSource from "../../src/hooks/use-home-stats.ts?raw";
+import focusTrapSource from "../../src/hooks/use-focus-trap.ts?raw";
 
 /// THE TEXT OF ONE SLOT, and ONE ATTRIBUTE OF ONE SLOT: the two readers `suites/sidebar.tsx`
 /// defines for its rendered controls and rows, restated here for the same reason it gives --
@@ -751,6 +757,23 @@ const cases: Case[] = [
       // THE RENDERED HEADER, not the source: the file's own prose names `ps-12` while explaining
       // why it is gone, and a claim about a class belongs on the element that would wear it.
       expect(attrOf(statsView("en"), "stats-view-header", "class")).not.toContain("ps-12");
+
+      // A MODAL DIALOG, AND BOTH HALVES ASSERTED TOGETHER because either one alone is a lie:
+      // `aria-modal` claims everything outside is inert, and the trap is what makes that true.
+      // The name is the heading ON SCREEN rather than a label of its own, and the container takes
+      // focus itself (`tabindex="-1"`) for the case where there is nothing inside to focus.
+      expect(attrOf(statsView("en"), "stats-view", "role")).toBe("dialog");
+      expect(attrOf(statsView("en"), "stats-view", "aria-modal")).toBe("true");
+      expect(attrOf(statsView("en"), "stats-view", "aria-labelledby")).toBe(STATS_TITLE_ID);
+      expect(attrOf(statsView("en"), "stats-view-name", "id")).toBe(STATS_TITLE_ID);
+      expect(attrOf(statsView("en"), "stats-view", "tabindex")).toBe("-1");
+      expect(statsViewSource).toContain("useFocusTrap(pane)");
+      // AND THE TRAP'S OWN RULES, as source: what it does with Tab needs a DOM, and that half is
+      // the walkthrough's (a real browser pressing the key) -- what a string can see is that the
+      // three promises are written down at all.
+      expect(focusTrapSource).toContain("event.shiftKey");
+      expect(focusTrapSource).toContain("previous.focus()");
+      expect(focusTrapSource).toContain("!root.contains(here)");
 
       // WHAT IT SAYS, IN BOTH LANGUAGES: the words are the whole of what tells these three
       // rankings apart, and a heading swapped between them would be a green tree and a wrong

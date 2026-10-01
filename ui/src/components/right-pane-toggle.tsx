@@ -52,6 +52,13 @@ export const RIGHT_PANE_ID = "app-right-pane";
 /// opens nor closes.
 export const STATS_VIEW_ID = "app-stats";
 
+/// THE NAME THE DRAWER IS ANNOUNCED BY (`aria-labelledby`), and a constant for the reason the two
+/// ids above are: the string is a REFERENCE between two elements -- the dialog's `aria-labelledby`
+/// and the heading it points at -- and a literal written twice is a reference nothing in this repo
+/// could see. It reads the same word the `…` button says, which is what makes the announcement and
+/// the control that opened it agree.
+export const STATS_TITLE_ID = "app-stats-name";
+
 /// THE WIDTH AT WHICH THIS COLUMN IS NO LONGER A DRAWER, spelled the way the CSS spells it:
 /// `md` in Tailwind v4 is `48rem`, so this query and the `md:` classes in
 /// `components/task-pane.tsx` / `components/subagent-view.tsx` (and the backdrop's `md:hidden`

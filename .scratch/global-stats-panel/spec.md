@@ -52,6 +52,15 @@ start/end 之间——SQL 里就是「这个会话里 `end_seq IS NULL` 的最�
   **它不是 flex 行里的兄弟**，所以身后什么都不重排：会话照旧挂着（runtime、run、滚动位置都在），也不画背板
   （整页都盖住了，旁边没有可点的东西）。
 - 标题栏：`[回到对话] 统计 … [7天|30天|90天] [重算]`。窗口是三个按钮（`aria-pressed` 说明哪个开着）。
+- **它是一张真正的模态对话框**（主人 2026-10-01 补的一层）：`role="dialog"` + `aria-modal="true"`，
+  用屏上的标题当名字（`STATS_TITLE_ID`），键盘由 `hooks/use-focus-trap.ts` **关在里面**。
+  这两半是一件事：`aria-modal` 是「外头是惰性的」这句**声称**，陷阱是让它成真的那一半——
+  只剩一半的话，下一次 Tab 就把它戳穿。
+  陷阱做三件事：挂载时**焦点进去**（第一个可聚焦的，没有就把焦点落在容器自己身上，所以 `tabIndex={-1}`）、
+  **Tab 首尾环绕**（`Shift+Tab` 从第一个绕到最后一个，Tab 从最后一个绕回第一个；中间那些交还给浏览器），
+  卸载时**还给原来的元素**（还在文档里才还）。**Esc 不在这里**——关它是页面的事（`app.tsx` 已经有那个处理器）。
+  仓库里同一条规矩的另一处是 `assistant-ui/elements/image.tsx`（它把 zoom 浮层自己夹住）；那一份**故意不改用**
+  这个 hook：那个文件是上游的、就地翻译的（它自己的头注释写着），把它挪进本仓库的词汇只会多出一处偏离。
 - **Esc 也关它**：`app.tsx` 那个 Escape 处理器里，统计抽屉**排在最前、且不看宽度**（它任何宽度都盖在最上层），
   下面那句宽度判断是给「只在窄屏才是抽屉」的两个面板的。
 - 三个分区在宽屏是一行、窄屏是一列，各自滚动；**模型 token 排行还在折叠里**（第一轮那句「点击下拉可看」）。
@@ -81,6 +90,11 @@ start/end 之间——SQL 里就是「这个会话里 `end_seq IS NULL` 的最�
   截图：`evidence/stats-drawer.png`（抽屉）、`evidence/stats-page.png`（上一版整块页，留作对比）、
   `evidence/stats-view.png`（第一轮那个窄栏版本）。走查实测：`.stats-view` 的 rect = 整个 viewport（500×296 与
   1280×800 两档），`z-index: 50`，`elementFromPoint` 在原本侧栏那一列拿到的是抽屉自己的内容。
+
+  **焦点那一半是走查里按真键走的**（字符串测不出来）：打开时 `document.activeElement` = `stats-close`（在里面）；
+  连按 12 次 Tab 的落点轨迹是 `range-7 → range-30 → range-90 → rebuild → models-toggle → close →`（绕回）`range-7 …`，
+  **一次都没出去**；从第一个 `Shift+Tab` 绕到最后一个 `models-toggle`；Esc 关掉之后焦点不在任何残留里（落回 `body`，
+  下一次 Tab 从 `sidebar-open` 开始）——这正是上面那条「原来那个控件已经不在」的边界。
 
 ## 一个与这一票无关的既有 flake（记录，别当成回归）
 
