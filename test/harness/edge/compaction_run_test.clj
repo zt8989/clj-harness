@@ -345,48 +345,35 @@
         (io/delete-file log true)
         (providers/use-provider! "compact-reasoning" nil)))))
 
-;; ---------------------------------- the half that cannot be forgotten (ticket 02)
+;; ---------------------------------- nothing of ours rides on the prompt (owner, 2026-10-01)
 
-(deftest the-already-produced-facts-read-the-surface-the-plan-has
-  ;; MEASURED DEAD ON A REAL SESSION (thread `a0621fce-...`, 2026-10-01). `product-facts` read
-  ;; the PROVIDER shape of a tool call (`[:function :name]`) while the plan's surface -- the
-  ;; record's own fold -- spells one the AG-UI way (`:toolCalls` / `:toolCallId`). So the list
-  ;; came out EMPTY, `summary-content` skipped the section, and the `Already produced` half of
-  ;; the prompt -- the half whose own docstring says it is what stops a model mistaking its own
-  ;; work for somebody else's -- was never written. This test goes the whole way: AG-UI frames
-  ;; into a planted record, the route's own plan, and the instruction it really laid down.
-  (let [thread-id "compact-facts"
-        made      "dev/scratch_from_the_test.clj"
-        rows      (vec (concat (frame-rows [(ev/run-start)
-                                            (ev/tool-call "c1" "write"
-                                                          (json/write-str {:path made
-                                                                          :content "(ns x)\n"}))
-                                            (ev/tool-result "c1" "wrote it" false)
-                                            (ev/text-delta "wrote the file")
-                                            (ev/run-end)])
-                               ;; AND THE RUN'S OWN ROW FOR THE ANSWER: a tool call whose answer is only a
-                               ;; FRAME is one this record cannot be continued from (the reader refuses it by
-                               ;; name), so the fixture carries both halves the way the edge writes them.
-                               [{:ts 1 :runId "r1" :type "message" :source "model" :id "r1-t0"
-                                 :payload {:role "tool" :tool_call_id "c1" :content "wrote it"}}]
-                               (map (fn [i] (entry (+ 10 i) (str "u" i)
-                                                   (apply str (repeat 4000 "a"))))
-                                    (range 25))))
+(deftest the-router-hands-the-summarizer-the-instruction-and-nothing-else
+  ;; FOLLOW THE REFERENCE'S POLICY EXACTLY. Three things of ours used to ride on the summary
+  ;; request, and this route is where they were attached (`:environment` / `:blocks`):
+  ;;
+  ;;   - git facts (`Where this work is happening`, owner's addition of 2026-09-27) -- read in the
+  ;;     BOUND checkout, so a session working in a worktree was told about somebody else's
+  ;;     uncommitted files (thread `a0621fce-...`, 2026-10-01);
+  ;;   - the `Already produced` list, which covered only the range being folded -- never the part
+  ;;     of the conversation the model actually mis-read;
+  ;;   - a `:pre-compact` hook's words, which the reference's request does not carry at all.
+  ;;
+  ;; What tells a continuing model who it is now: the retained tail verbatim, the checkpoint's
+  ;; preamble, and `## Current Work` / `## Next Step` at the foot of the summary.
+  (let [thread-id "compact-plain"
+        rows      (mapv (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 25))
         log       (plant! thread-id rows)
         stop      (http/start! {:port 0})]
     (providers/use-provider! thread-id (fake/scripted [{:content "THE SUMMARY"}]))
     (try
-      (let [resp (#'http/compact-post nil thread-id)
-            body (json/read-str (String. ^bytes (:body resp) "UTF-8") :key-fn keyword)]
-        (is (= 200 (:status resp)) (pr-str body))
-        (is (true? (:compacted body)))
-        (let [rows      (wait-for-rows log "compaction/end")
-              start-row (first (filter #(= "compaction/start" (replay/kind %)) rows))
-              asked     (:instruction (replay/payload start-row))]
-          (is (str/includes? asked "Already produced")
-              "the facts section is really in the prompt the summarizer was handed")
-          (is (str/includes? asked made)
-              "and it names the file this range's own tool call wrote")))
+      (is (= 200 (:status (#'http/compact-post nil thread-id))))
+      (let [asked (:instruction (replay/payload
+                                 (first (filter #(= "compaction/start" (replay/kind %))
+                                                (wait-for-rows log "compaction/end")))))]
+        (is (= compaction/summary-instruction asked)
+            "the prompt on the row is the instruction, byte for byte")
+        (is (not (str/includes? asked "Already produced")))
+        (is (not (str/includes? asked "worktree:"))))
       (finally
         (stop)
         (io/delete-file log true)

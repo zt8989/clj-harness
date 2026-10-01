@@ -25,9 +25,7 @@
             [harness.cap.project :as project]
             [harness.edge.ag-ui :as ag]
             [harness.edge.replay :as replay]
-            [clojure.data.json :as json]
             [clojure.string :as str]
-            [harness.infra.shell :as shell]
             [harness.kernel.llm :as llm]))
 
 (def summary-instruction
@@ -46,10 +44,16 @@
       (thread `a0621fce-...`, 2026-10-01) said 'not created by me -- reported by git now',
       which is exactly the kind of sentence that made it read its own work as a stranger's.
 
-  OUR ONE ADDITION is the `Already produced` list, which `summary-content` appends to this
-  message from `product-facts` -- the artifacts read off the tool calls. It is kept because its
-  own docstring names the failure it guards ('a model that cannot see what it already made
-  mistakes its own work for somebody else's'), and the reference has no equivalent."
+  AND THIS MESSAGE CARRIES NOTHING ELSE (owner, 2026-10-01: follow DSH's strategy exactly).
+  No git facts, no list of what the range already produced, no hook output -- those three were
+  ours, and each went for a reason the incident teaches: the git block (`Where this work is
+  happening`, the owner's own addition of 2026-09-27) answered with the BOUND checkout while the
+  work was in a worktree, i.e. it named somebody else's uncommitted files as the session's; the
+  `Already produced` list covered only the range being folded, while the work the model then
+  mis-attributed was in the RETAINED tail, so it never once stood in the way; and the hook's
+  words are not part of the reference's request at all. What tells a continuing model who it is
+  and where the work stands is now exactly what the reference uses: the retained tail verbatim,
+  the checkpoint's preamble, and `## Current Work` / `## Next Step` at the foot of the summary."
   (str/join
    "\n"
    ["You are now acting as a compaction engine for this AI coding assistant. Condense the"
@@ -93,242 +97,8 @@
     "- Output only the checkpoint text: do not call any tool or take any other action."
     "- If the conversation already contains a <compacted-summary> block, it is a PRIOR"
     "checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones,"
-    "and merge newer information into a single consolidated summary under the same structure."
-    "- The artifacts this range has produced are listed for you at the end of this message"
-    "under `Already produced`, read off the tool calls; do not invent entries and do not drop"
-    "the list."]))
+    "and merge newer information into a single consolidated summary under the same structure."]))
 
-(def ^:private shell-productions
-  "The shell shapes that CREATE an artifact a later model must not re-create, as patterns
-  over a command. A short list on purpose: a command that only READS changes nothing, and
-  guessing about the rest would put an invented fact into the summary."
-  [#"(?m)git\s+worktree\s+add\s+(\S+)"
-   #"(?m)git\s+switch\s+-c\s+(\S+)"
-   #"(?m)git\s+checkout\s+-b\s+(\S+)"])
-
-(defn- tool-arguments
-  "CALL's arguments as a map, or nil when they are absent or not JSON (a vendor may hand
-  back a call whose arguments were cut off)."
-  [call]
-  (try
-    (let [a (get-in call [:function :arguments])]
-      (when (string? a) (json/read-str a :key-fn keyword)))
-    (catch Throwable _ nil)))
-
-(defn product-facts
-  "MESSAGES (the model view of the range about to be folded) -> the ARTIFACTS that range has
-  already produced, as a sorted, de-duplicated vector of one-line strings: files written or
-  edited, worktrees and branches created.
-
-  IT IS A PROJECTION OF THE TOOL CALLS, not a summary -- the exact paths and branch names,
-  read off the calls themselves. The summarizer is ALSO asked to write an `Already produced`
-  section (see `summary-instruction`); this is the half that cannot be forgotten, and a
-  caller appends it to the summary request so the two agree on the facts that matter most.
-
-  A `/tmp/...` path is still reported: it is what the call said, and dropping it would be
-  this function deciding what mattered.
-
-  IT FOLDS ITS INPUT FIRST, and that is not tidiness -- it is the whole of a bug found on a
-  real session (thread `a0621fce-...`, 2026-10-01). A plan's surface is the record's own
-  fold, whose messages are in the KERNEL (AG-UI) shape -- a tool call lives under
-  `:toolCalls` / `:toolCallId` -- while this function read the PROVIDER shape
-  (`[:function :name]`). So it answered the EMPTY list on every real compaction, the
-  `Already produced` section of the instruction was never written, and the half whose own
-  docstring says it is what stops a model mistaking its own work for somebody else's was
-  dead in production (measured on that session: 0 facts read the kernel shape, 31 through
-  this fold). A caller that hands provider-shaped messages in is unaffected: the fold is the
-  run path's own `ag/provider-messages`, and it is idempotent."
-  [messages]
-  (let [messages (ag/provider-messages messages)
-        calls    (for [m    messages
-                      :when (= "assistant" (:role m))
-                      call (:tool_calls m)]
-                  call)]
-    (->> calls
-         (mapcat (fn [call]
-                   (let [name (get-in call [:function :name])
-                         args (tool-arguments call)]
-                     (cond
-                       (#{"write" "replace" "insert"} name) [(:path args)]
-                       (= "bash" name)
-                       (mapcat (fn [re] (map second (re-seq re (str (:command args)))))
-                               shell-productions)
-                       :else []))))
-         (remove str/blank?)
-         distinct
-         sort
-         vec)))
-
-(def ^:private git-timeout-ms
-  "How long one git question may take at a compaction. SHORT ON PURPOSE: this runs on the
-  path whose whole job is to shrink a request, and a working tree that does not answer in a
-  ten seconds is not going to make the summary better."
-  10000)
-
-(defn- git
-  "One git question in DIR, or nil when it does not answer. EVERY FAILURE IS NIL -- no git,
-  no repository, a timeout -- because the environment block is a courtesy the summary gets
-  and never a reason a compaction fails."
-  [dir args]
-  (try
-    (let [r (shell/run {:command (str "git " args) :dir dir :timeout-ms git-timeout-ms})]
-      (when (and (zero? (long (or (:exit r) 1))) (not (:timeout r)))
-        (str/trim (str (:out r)))))
-    (catch Throwable _ nil)))
-
-(def ^:private uncommitted-limit
-  "How many `git status` lines the block carries. A cap rather than a promise: a tree with
-  four hundred changed files is a fact worth knowing and not worth transcribing."
-  20)
-
-(defn environment
-  "DIR -> what the WORKING TREE looks like right now, as
-  {:worktree .. :branch .. :uncommitted [line ..] :dirty-total n} -- or nil when DIR is nil
-  or git says nothing there.
-
-  IT IS READ, NOT REMEMBERED, AND NOT THE MODEL'S TO INVENT (owner, 2026-09-27). This is the
-  fact thread `068fd63f` lost: a model compacted mid-task could not see which worktree it
-  was in, took its OWN uncommitted work for another session's, and stopped. The branch, the
-  worktree and the dirty paths are read off git at the moment of the compaction, so the
-  summary cannot get them wrong -- and a `/tmp`-style path is reported as git spells it."
-  [dir]
-  (when (and dir (not (str/blank? (str dir))))
-    (let [worktree (git dir "rev-parse --show-toplevel")
-          branch   (git dir "rev-parse --abbrev-ref HEAD")
-          dirty    (some-> (git dir "status --porcelain") str/split-lines)]
-      (when (or worktree branch (seq dirty))
-        {:worktree    worktree
-         :branch      branch
-         :uncommitted (vec (take uncommitted-limit dirty))
-         :dirty-total (count dirty)}))))
-
-(defn environment-block
-  "ENVIRONMENT (`environment`'s answer) -> the text appended to the summary request, or nil
-  when there is nothing to say. PURE, so the shape a person reads is a test's rather than
-  git's."
-  [env]
-  (when (seq env)
-    (let [{:keys [worktree branch uncommitted dirty-total]} env]
-      (->> [(when (seq worktree) (str "worktree: " worktree))
-            (when (seq branch)   (str "branch:   " branch))
-            (when (seq uncommitted)
-              (str "uncommitted (" dirty-total " path(s)):"
-                   (str/join (map #(str "\n  " %) uncommitted))
-                   (when (> dirty-total (count uncommitted))
-                     (str "\n  ...and " (- dirty-total (count uncommitted)) " more"))))]
-           (remove nil?)
-           (str/join "\n")))))
-
-(def ^:private trees-limit
-  "How many OTHER working trees of one repository the block may name. The bound directory
-  always comes; the others come when they have uncommitted changes. A repository with twenty
-  worktrees must not turn `compaction/start` into a directory listing."
-  4)
-
-(defn- worktree-listing
-  "`git worktree list --porcelain`'s TEXT -> [{:path .. :branch ..} ..], in git's own order."
-  [text]
-  (loop [lines (str/split-lines (str text)) trees [] current nil]
-    (if-some [line (first lines)]
-      (cond
-        (str/starts-with? line "worktree ")
-        (recur (rest lines) (cond-> trees (some? current) (conj current)) {:path (subs line 9)})
-
-        (str/starts-with? line "branch ")
-        (recur (rest lines) trees
-               (assoc current :branch (str/replace (subs line 7) #"^refs/heads/" "")))
-
-        (= line "detached")
-        (recur (rest lines) trees (assoc current :branch "detached"))
-
-        :else (recur (rest lines) trees current))
-      (cond-> trees (some? current) (conj current)))))
-
-(defn- dirty-tree
-  "One worktree from the listing -> `environment`'s shape, or nil when that tree has nothing
-  uncommitted. ONE `git status` in that tree; the path and the branch are the listing's own."
-  [{:keys [path branch]}]
-  (let [dirty (some-> (git path "status --porcelain") str/split-lines)]
-    (when (seq dirty)
-      {:worktree    path
-       :branch      branch
-       :uncommitted (vec (take uncommitted-limit dirty))
-       :dirty-total (count dirty)})))
-
-(defn other-trees
-  "DIR -> this repository's OTHER working trees that have uncommitted changes, each in
-  `environment`'s shape, or nil when there is nothing to say (not a repository, no other
-  tree, every other tree clean).
-
-  WHY A LIST OF TREES AND NOT JUST DIR. A session's binding is the PROJECT directory and an
-  agent that works in a worktree (`git worktree add .worktrees/x`) never moves it -- so a block
-  that answers DIR alone tells a session working elsewhere that 'the work is happening' in the
-  main checkout, and then transcribes THAT tree's uncommitted paths (the owner's own incident,
-  thread `a0621fce-...`, 2026-10-01: the summary said `M .gitignore` / `?? .claude/` -- not
-  the session's files -- while the session's two edited test files sat in
-  `.worktrees/shell-03-07`, and the model went on to take its OWN uncommitted work for
-  another session's). The trees are read off git at the moment of the compaction; which one
-  the work is in is then a fact the reader can see, not this function's guess."
-  [dir]
-  (when (and dir (not (str/blank? (str dir))))
-    (let [bound (git dir "rev-parse --show-toplevel")]
-      (->> (worktree-listing (git dir "worktree list --porcelain"))
-           (remove #(= (:path %) bound))
-           (keep dirty-tree)
-           (take trees-limit)
-           vec))))
-
-(defn repository
-  "DIR -> `{:bound <environment for DIR> :others <other-trees>}`, or nil when neither has
-  anything to say. `:bound` is nil for an unbound session or a directory git does not know."
-  [dir]
-  (let [bound  (environment dir)
-        others (other-trees dir)]
-    (when (or bound (seq others))
-      {:bound bound :others (vec others)})))
-
-(defn repository-block
-  "REPOSITORY (`repository`'s answer) -> the text the summary request carries about WHERE
-  this work is happening, or nil when there is nothing to say. PURE, so the shape is a test's
-  rather than git's.
-
-  THE BOUND DIRECTORY IS NAMED AS THE BOUND DIRECTORY. It is the one tree the harness knows the
-  session is rooted in, and it is not the same claim as 'the work is here' -- the trees with
-  uncommitted changes are listed under it, each with its own branch and paths, so a session
-  working in a worktree reads its own tree's name back instead of the main checkout's."
-  [{:keys [bound others]}]
-  (let [parts (cond-> []
-                bound
-                (conj (str "this session's bound directory: " (:worktree bound) "\n"
-                           (environment-block (dissoc bound :worktree))))
-
-                (seq others)
-                (conj (str "other working trees of this repository with uncommitted changes:\n"
-                           (str/join "\n\n"
-                                     (map (fn [t]
-                                            (str (:worktree t) "\n"
-                                                 (environment-block (dissoc t :worktree))))
-                                          others)))))]
-    (when (seq parts) (str/join "\n\n" parts))))
-(defn summary-content
-  "THE ONE USER MESSAGE THE SUMMARIZER IS HANDED, assembled from what the caller knows:
-
-    :facts       the artifacts read off the tool calls (`product-facts`)
-    :environment the repository's working trees and their uncommitted paths, read off git
-                 (`repository-block`)
-    :blocks      what a `:pre-compact` hook printed, verbatim and in declaration order
-
-  EACH PART IS OPTIONAL AND AN EMPTY ONE IS SIMPLY ABSENT -- no heading for nothing to say.
-  IT LIVES HERE, PURE, so that what the summarizer is told is a test's rather than a run's:
-  the caller supplies the facts and this decides the shape."
-  [{:keys [facts environment blocks]}]
-  (str summary-instruction
-       (when (seq facts)
-         (str "\n\nAlready produced (read off the tool calls above):\n" (str/join "\n" facts)))
-       (when (seq environment)
-         (str "\n\nThe working trees of this repository (read from git just now):\n" environment))
-       (when (seq blocks)
-         (str "\n\n" (str/join "\n\n" blocks)))))
 
 (defn summary-messages
   "MESSAGES (the plan's model view) + INSTRUCTION -> the array the summarizer is handed: the
@@ -669,8 +439,7 @@
   SURFACE AND MIN-HEAD-TOKENS RIDE STRAIGHT TO THE PLAN (`plan`'s docstring has both): the array
   the model is actually handed, and the relief the caller's trigger asked for. A plan that answers
   nil for either reason writes NOTHING -- no `compaction/start` row, no summary call, no card."
-  [records {:keys [window retain-ratio append summarize plan-fn environment blocks surface
-             min-head-tokens]}]
+  [records {:keys [window retain-ratio append summarize plan-fn surface min-head-tokens]}]
   (when-not (lock-active? records)
     (when-let [head ((or plan-fn plan) records window retain-ratio surface
                      {:min-head-tokens min-head-tokens})]
@@ -684,9 +453,7 @@
             ;; here -- they are what `context/compacted` says about the work; this row says what
             ;; the work was TOLD. It goes here rather than on the fact because it is written
             ;; BEFORE any work: a compaction that fails still says what it tried.
-            instruction (summary-content {:facts       (product-facts (:messages head))
-                                          :environment environment
-                                          :blocks      blocks})]
+            instruction summary-instruction]
         (append "compaction/start" {:compactionId id :instruction instruction})
         (try
           (let [summary (summarize (:messages head) instruction)
