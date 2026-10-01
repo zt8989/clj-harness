@@ -97,6 +97,7 @@ import { SessionRunStop } from "@/components/session-run-stop";
 import { SubagentViewPanel } from "@/components/subagent-view";
 import { SubagentViewContext, type RightPane, type SubagentView } from "@/components/subagent-view-context";
 import { RightPaneOpenButton, rightPaneIsDrawer } from "@/components/right-pane-toggle";
+import { StatsView } from "@/components/stats-view";
 import { TaskPane } from "@/components/task-pane";
 import { ContextCards } from "@/components/context-card";
 import { CompactionCards } from "@/components/compaction-card";
@@ -1607,6 +1608,13 @@ export function App() {
       // right one is drawn over the left, so Escape closes what the person is looking at rather
       // than what is behind it. From `md` up there is no such cover to close -- the column is a
       // sibling -- and `foldDrawer` decides the sidebar's half by the same reading of the window.
+      // THE STATISTICS DRAWER ANSWERS FIRST AND AT EVERY WIDTH (owner, 2026-10-01): it covers the
+      // whole page, so it is on top wherever the window's own breakpoints have put the other two
+      // -- the width test below is about the two panels that only BECOME covers on a narrow one.
+      if (rightPane !== null && rightPane.kind === "stats") {
+        setRightPane(null);
+        return;
+      }
       if (rightPane !== null && rightPaneIsDrawer()) {
         setRightPane(null);
         return;
@@ -1969,7 +1977,10 @@ export function App() {
             drawn by the page for the reason the sidebar's is -- the backdrop is the page's box,
             not the panel's -- and `aria-hidden` for the same reason again: it is the second way
             to press the column's own collapse control, and that one is the one with a name. */}
-        {rightPane !== null && (
+        {/* AND NOT FOR THE STATISTICS PAGE (`rightPane.kind === "stats"`): it is not a drawer over the
+            conversation, it IS the room (owner, 2026-10-01) -- there is nothing beside it to tap,
+            and a backdrop would be a second way to do what its own leading button does. */}
+        {rightPane !== null && rightPane.kind !== "stats" && (
           <div
             data-slot="right-pane-backdrop"
             aria-hidden={true}
@@ -2024,6 +2035,10 @@ export function App() {
             refuses to be narrower than the longest argument list, and the page
             scrolls sideways with every preview running off the edge. The chat never
             needed it because its text wraps. */}
+        {/* IT IS NOT `hidden` BEHIND THE STATISTICS DRAWER, deliberately: a drawer slides OVER what is
+            there rather than reflowing it, so this column keeps its runtime, its run and its scroll
+            position exactly as they were -- the same reason the sidebar's drawer does not unmount
+            the conversation behind it. */}
         <div className="min-h-0 min-w-0 flex-1">
           {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ON ITS ROW, not
               here: `registerPending`'s failure goes into `openErrors`, which the sidebar
@@ -2099,7 +2114,18 @@ export function App() {
             threadId={roster.shown}
             onCollapse={() => setRightPane(null)}
             onOpen={openMirror}
+            // THE TRAILING `…`'s DOOR, through the same writer as the two above: the statistics
+            // are the third state of this column, not a panel stacked over it
+            // (`.scratch/global-stats-panel/`).
+            onStats={() => openPane({ kind: "stats" })}
           />
+        )}
+        {rightPane !== null && rightPane.kind === "stats" && (
+          // THE STATISTICS DRAWER: a cover over the WHOLE page -- this column and the left sidebar
+          // included -- rather than a third state of this column (owner, 2026-10-01). Nothing is
+          // unmounted behind it, and it needs to be told nothing about its neighbours: the boxes
+          // the earlier sibling version had to clear are under it now (`components/stats-view.tsx`).
+          <StatsView onClose={() => setRightPane(null)} />
         )}
       </div>
       </SubagentViewContext.Provider>

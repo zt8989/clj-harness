@@ -46,6 +46,19 @@
                 WHERE session_id = ? ORDER BY seq, call_id"
              session-id))
 
+(defn- fact-line
+  "One FACT row of the record -- `model/start` / `model/end` -- as `harness.edge.stats`'s fixture
+  spells it: an `event` row carrying a CUSTOM frame named after the fact, the value inside it."
+  [run-id ts kind value]
+  (line {:ts ts :runId run-id :type "event"
+         :payload {:type "CUSTOM" :name kind :value value}}))
+
+(defn- model-calls-of [session-id]
+  (db/select "SELECT seq, run_id, model, end_seq, prompt_tokens, completion_tokens,
+                     total_tokens, cached_tokens, at, ms
+                FROM model_calls WHERE session_id = ? ORDER BY seq"
+             session-id))
+
 (defn- eventually
   "PRED, asked until it answers, up to ~2 seconds. THE TRIGGER IS ASYNCHRONOUS BY DESIGN (a
   coalesced round on a thread of its own), so a case about it must WAIT for the round rather than
@@ -178,19 +191,26 @@
                              :tool_calls [{:id "c1" :type "function"
                                            :function {:name "read" :arguments "{}"}}]})
               (message-line "r1" 3 "tool" "tool"
-                            {:role "tool" :tool_call_id "c1" :content "the file"})]]
+                            {:role "tool" :tool_call_id "c1" :content "the file"})
+              (fact-line "r1" 4 "model/start" {:model "gpt-x"})
+              (fact-line "r1" 5 "model/end"
+                         {:model "gpt-x"
+                          :usage {:prompt_tokens 7 :completion_tokens 2 :total_tokens 9}})]]
     (write-log! sid rows)
     (projection/project!)
     (let [before (messages-of sid)
-          calls  (calls-of sid)]
+          calls  (calls-of sid)
+          mcalls (model-calls-of sid)]
       (is (seq before))
       (projection/rebuild! sid)
       (is (= before (messages-of sid)))
       (is (= calls (calls-of sid)))
+      (is (= mcalls (model-calls-of sid)))
       (testing "and a whole-home rebuild answers the same thing too"
         (projection/rebuild!)
         (is (= before (messages-of sid)))
-        (is (= calls (calls-of sid)))))))
+        (is (= calls (calls-of sid)))
+        (is (= mcalls (model-calls-of sid)))))))
 
 ;; --------------------------------------------------------------- what a round costs
 
@@ -302,3 +322,135 @@
               (str "twenty lines made " rounds " round(s) -- one or two is the design,"
                    " twenty would be one transaction per line")))
         (finally (stop))))))
+
+;; --------------------------------------------------------------- the model calls
+
+(deftest a-model-call-is-copied-with-its-model-and-its-tokens-together
+  ;; THE TWO LINES THE RECORD PAIRS BY ORDER ARE ONE ROW HERE: the model's NAME is on
+  ;; `model/start` and the vendor's USAGE on `model/end`, and a leaderboard that ranked one without
+  ;; the other could not answer which model burned the tokens.
+  (let [sid  "pj-models"
+        rows [(fact-line "r1" 1 "model/start" {:model "gpt-x" :base-url "http://x/v1"})
+              (fact-line "r1" 3 "model/end"
+                         {:model "gpt-x"
+                          :finish-reason "stop"
+                          :usage {:prompt_tokens 10 :completion_tokens 4 :total_tokens 14
+                                  :prompt_tokens_details {:cached_tokens 6}}})]]
+    (write-log! sid rows)
+    (projection/project!)
+    (let [calls (model-calls-of sid)]
+      (is (= 1 (count calls)))
+      (let [c (first calls)]
+        (is (= 0 (:seq c)) "keyed by the START line's own index (zero-based), which a rebuild recomputes")
+        (is (= 1 (:end-seq c)) "and closed by the END line it paired with")
+        (is (= "gpt-x" (:model c)))
+        (is (= 10 (:prompt-tokens c)))
+        (is (= 14 (:total-tokens c)))
+        (is (= 6 (:cached-tokens c)))
+        (is (= 2 (:ms c)) "the pair's own two timestamps, not a guess from another line")))))
+
+(deftest the-leaderboards-count-tools-skills-and-each-model-s-tokens
+  ;; THE PROJECTION'S OWN QUESTIONS (ADR 0008: 'a count by tool name'), and the count is over the
+  ;; HOME rather than over one log -- two conversations, so 'every session' is what is asserted.
+  ;;
+  ;; THE CLOCK IS THE FIXTURE'S: a window question is asked of the record's own `ts`, so these rows
+  ;; have to be stamped around NOW for a 7-day window to hold them -- the one place a case cannot
+  ;; write 1, 2, 3 for a timestamp.
+  (let [now  (System/currentTimeMillis)
+        week (- now (* 7 24 60 60 1000))
+        call (fn [ts name args]
+               (message-line "r1" ts "model" "assistant"
+                             {:role "assistant" :content "calling"
+                              :tool_calls [{:id (str "c" ts) :type "function"
+                                            :function {:name name :arguments args}}]}))
+        tokens (fn [ts model usage]
+                 [(fact-line "r1" ts "model/start" {:model model})
+                  (fact-line "r1" (+ ts 5) "model/end" {:usage usage})])]
+    (write-log! "pj-lead-a"
+                (into [(call (- now 6000) "read" "{}")
+                       (call (- now 5000) "read" "{}")
+                       (call (- now 4000) "bash" "{\"command\":\"ls\"}")
+                       (call (- now 3000) "skill" "{\"name\":\"code-review\"}")
+                       (call (- now 2000) "skill" "{\"name\":\"code-review\"}")
+                       (call (- now 1000) "skill" "{\"name\":\"tdd\"}")]
+                      (tokens (- now 900) "gpt-x" {:prompt_tokens 10 :completion_tokens 5
+                                                   :total_tokens 15})))
+    (write-log! "pj-lead-b"
+                (concat [(call (- now 800) "read" "{}")]
+                        (tokens (- now 700) "gpt-y" {:prompt_tokens 100 :completion_tokens 1
+                                                     :total_tokens 101})
+                        (tokens (- now 600) "gpt-y" {:prompt_tokens 100 :completion_tokens 1
+                                                     :total_tokens 101})
+                        ;; ONE ROW OLDER THAN THE WINDOW, so the window is proved to be the
+                        ;; QUESTION and not a filter laid over a whole-home answer.
+                        [(call (- now (* 30 24 60 60 1000)) "ancient" "{}")]))
+    (projection/project!)
+    (is (= [{:name "read" :calls 3} {:name "skill" :calls 3} {:name "bash" :calls 1}]
+           (projection/tool-leaderboard week))
+        "every tool the home has called IN THE WINDOW, most first, ties broken by name")
+    (is (= [{:name "code-review" :calls 2} {:name "tdd" :calls 1}]
+           (projection/skill-leaderboard week))
+        "and the SKILLS are the `skill` calls' own argument")
+    (is (= [{:model "gpt-y" :calls 2 :promptTokens 200 :completionTokens 2 :totalTokens 202}
+            {:model "gpt-x" :calls 1 :promptTokens 10 :completionTokens 5 :totalTokens 15}]
+           (projection/model-leaderboard week))
+        "most tokens first, summed over the calls that reported them, absences absent")
+    (testing "and a wider window is a different question about the same copy"
+      (let [quarter (- now (* 90 24 60 60 1000))]
+        (is (contains? (set (map :name (projection/tool-leaderboard quarter))) "ancient"))
+        (is (not (contains? (set (map :name (projection/tool-leaderboard week))) "ancient"))
+            "the old call is in the quarter and not in the week")))))
+
+(deftest a-model-call-written-now-is-projected-by-the-same-listener
+  ;; THE NEW TABLE IS FILLED BY THE SAME INCREMENTAL PASS AS THE OTHER THREE -- never by a second
+  ;; reader, a clock, or a scan of its own (`.scratch/global-stats-panel/`: 「确保投影都是增量订阅，
+  ;; 而不是全量阅读」). This case writes through the WRITER, so the record's own doorbell rings, and
+  ;; asserts the pair reaches `model_calls` WITHOUT a `project!` anywhere in it.
+  (let [sid "pj-model-listened"
+        f   (home/log-file (io/file (home/projects-dir) "unbound") sid)]
+    (project/register-session! sid)
+    (.mkdirs (.getParentFile f))
+    (let [stop (projection/start!)]
+      (try
+        (stream/push! sid f (fact-line "r1" 1 "model/start" {:model "gpt-x"}))
+        (stream/push! sid f (fact-line "r1" 2 "model/end"
+                                       {:usage {:prompt_tokens 3 :completion_tokens 1
+                                                :total_tokens 4}}))
+        (is (eventually #(= 1 (count (model-calls-of sid))))
+            "the written pair reached the store with nobody calling project!")
+        (testing "and the same pair copied again by a rebuild is the same row"
+          (let [copied (model-calls-of sid)]
+            (projection/rebuild! sid)
+            (is (= copied (model-calls-of sid)))))
+        (finally (stop))))))
+
+(deftest a-window-rebuild-makes-the-copy-again-for-the-window-only
+  ;; THE ONE FULL READ, AND IT IS SCOPED (`.scratch/global-stats-panel/`). A table added to the
+  ;; projection cannot be filled by offsets written before it existed, and the answer is a BUTTON on
+  ;; the statistics view: `rebuild-window!` makes the copy again for the conversations a reader is
+  ;; looking at, and touches nothing outside the window.
+  ;;
+  ;; THE UPGRADE IS STAGED BY HAND -- the model rows copied, then thrown away -- because a
+  ;; migration that has already run is not something a case can arrange.
+  (let [now    (System/currentTimeMillis)
+        recent "pj-window-now"
+        older  "pj-window-old"]
+    (write-log! recent [(message-line "r1" now "client" "user" {:role "user" :content "hi"})
+                        (fact-line "r1" (+ now 1) "model/start" {:model "gpt-x"})
+                        (fact-line "r1" (+ now 2) "model/end"
+                                   {:usage {:prompt_tokens 3 :completion_tokens 1
+                                            :total_tokens 4}})])
+    (write-log! older [(message-line "r1" (- now (* 60 24 60 60 1000)) "client" "user"
+                                    {:role "user" :content "old"})
+                       (fact-line "r1" 2 "model/start" {:model "gpt-old"})])
+    (projection/project!)
+    (is (= 1 (count (model-calls-of recent))))
+    (is (= 1 (count (model-calls-of older))))
+    (db/with-transaction (fn [c] (db/execute! c "DELETE FROM model_calls")))
+    (let [answer (projection/rebuild-window! 7)]
+      (is (= 1 (:sessions answer)) "only the conversation IN the window was made again")
+      (is (= ["gpt-x"] (mapv :model (model-calls-of recent))))
+      (is (empty? (model-calls-of older)) "the one outside it was not read at all")
+      (testing "and the leaderboard that window asks for has the model back"
+        (is (= ["gpt-x"]
+               (mapv :model (projection/model-leaderboard (- now (* 7 24 60 60 1000))))))))))

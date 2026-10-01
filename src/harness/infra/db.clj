@@ -1008,6 +1008,53 @@
               line_offset INTEGER NOT NULL,
               updated_at  INTEGER NOT NULL)"))
 
+(defn- model-calls
+  "Version n -> n+1: the MODEL CALLS the record holds, one row per `model/start` … `model/end`
+  pair.
+
+  A FOURTH CONTENT TABLE, and it is here for a question the three above cannot answer: the
+  token usage of ONE MODEL across every session -- the leaderboard `harness.edge.projection`
+  serves. `messages` has the conversation and `tool_calls` the calls the model made; neither
+  carries what the vendor reported ABOUT a call, and that lives on fact rows rather than message
+  rows: `model/start` names the model, `model/end` carries the usage.
+
+  THE PAIR IS KEYED BY THE START LINE'S `seq`, and a `model/end` row fills the same row in
+  later, because the model's name and the vendor's usage arrive on DIFFERENT lines and the record
+  pairs them BY ORDER. `end_seq` is the column that makes that pairing RESUMABLE: a byte offset
+  can land between a start and its end, so a pass that read only the start leaves a row with a
+  NULL `end_seq` for the next pass to find -- the same reason the projection has an offset at
+  all, one level down.
+
+  A TABLE OF ITS OWN RATHER THAN COLUMNS ON `messages`: a model call is not a message, it has its
+  own line numbers, and one message row is one line while a completed call is two.
+
+  AND IT IS FILLED BY THE SAME INCREMENTAL PASS AS THE OTHER THREE, never by a scan of its own:
+  the listener hands the projection the lines a run just wrote, and a `model/start` / `model/end`
+  pair is read from that stream byte by byte like every message row (`.scratch/global-stats-panel/`).
+
+  THE OFFSETS DO NOT SPEAK FOR IT, though, and that is worth saying out loud: `projection_offsets`
+  says 'everything before this was projected' about the tables that existed when it was written, so
+  on a store that had already copied content this table starts EMPTY while the rest is full. Nothing
+  here repairs that on its own -- a process that re-read every log at startup is exactly the
+  full read this layer refuses -- so the copy is made again ON REQUEST, scoped to a time window,
+  through `harness.edge.projection/rebuild-window!` (the statistics view's own button)."
+  [^Connection c]
+  (ddl! c "CREATE TABLE model_calls (
+              session_id        TEXT NOT NULL,
+              seq               INTEGER NOT NULL,
+              run_id            TEXT,
+              model             TEXT,
+              end_seq           INTEGER,
+              prompt_tokens     INTEGER,
+              completion_tokens INTEGER,
+              total_tokens      INTEGER,
+              cached_tokens     INTEGER,
+              at                INTEGER,
+              ms                INTEGER,
+              PRIMARY KEY (session_id, seq))")
+  ;; NOTHING ELSE IS CREATED HERE: the table and its index are the whole step.
+  (ddl! c "CREATE INDEX model_calls_by_model ON model_calls (model)"))
+
 
 (def migrations
   "The forward migration chain, as NAMED steps.
@@ -1112,7 +1159,12 @@
    ;; step's own docstring for what that costs and what it does not touch.
    {:name     "projected-content"
     :present? #(table? % "messages")
-    :run      projected-content}])
+    :run      projected-content}
+   ;; APPENDED, like every step after the first: a store written before this table existed has no
+   ;; record of it, and the probe is what says whether it needs it.
+   {:name     "model-calls"
+    :present? #(table? % "model_calls")
+    :run      model-calls}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

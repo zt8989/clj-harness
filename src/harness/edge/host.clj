@@ -49,3 +49,46 @@
   (doseq [f @watchers]
     (try (f) (catch Throwable _ nil)))
   nil)
+
+;; ------------------------------------------------------ the statistics' own doorbell
+;;
+;; A SECOND SET OF WATCHERS IN THIS NAMESPACE, and a second category on purpose. The listing
+;; above changes on a run boundary or a row being written, and every page with a sidebar wants
+;; it. The STATISTICS change on a projection round copying rows into `tool_calls` /
+;; `model_calls`, and they cover EVERY conversation -- so the only thing they share with the
+;; listing is being host-level.
+;;
+;; WHY THEY DO NOT RIDE THE LISTING: building the leaderboards is a scan of every tool call
+;; this home has made, and a page that only has a sidebar open must not be made to pay for it.
+;; A watcher here is a page with the statistics view on screen, and `ring-stats!` builds
+;; nothing when there are none.
+
+(defonce ^:private stats-watchers
+  (atom #{}))
+
+(defn watch-stats!
+  "Add a statistics watcher (a 0-arg fn) and answer it, so a caller can hand it back to
+  `unwatch-stats!`."
+  [f]
+  (swap! stats-watchers conj f)
+  f)
+
+(defn unwatch-stats!
+  "Stop calling F. Idempotent, the same way `unwatch!` is."
+  [f]
+  (swap! stats-watchers disj f)
+  nil)
+
+(defn stats-watching?
+  "Whether anybody is looking at the statistics -- a caller that would otherwise do work to
+  build a frame may ask first."
+  []
+  (boolean (seq @stats-watchers)))
+
+(defn ring-stats!
+  "Say the statistics may have changed. The same discipline as `ring!`: a watcher that throws
+  must not stop the others or reach the projection thread that rang it."
+  []
+  (doseq [f @stats-watchers]
+    (try (f) (catch Throwable _ nil)))
+  nil)

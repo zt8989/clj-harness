@@ -588,7 +588,11 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// text, because asserting on two constants defined next to each other stays green when the prop
 /// between them is deleted, which is the regression the case exists for. The parse rate it buys
 /// is a browser's measurement (that ticket's `spec.md`), not a suite's.
-const EXPECTED_CASES = 203;
+///
+/// 203 -> 205: the home's statistics are the right-hand column's third state
+/// (`.scratch/global-stats-panel/`) -- the trailing `…` that opens it, and the column itself,
+/// which draws two rankings on sight and folds the token-per-model one away.
+const EXPECTED_CASES = 205;
 
 
 let total = 0;

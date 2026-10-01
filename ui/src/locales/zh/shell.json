@@ -107,6 +107,23 @@
     "subagentElapsed": "已跑 {{time}}",
     "subagentTook": "耗时 {{time}}",
     "jobElapsed": "已跑 {{time}}",
-    "jobStop": "停掉这条后台任务"
+    "jobStop": "停掉这条后台任务",
+    "stats": "统计",
+    "statsTools": "工具调用排行",
+    "statsToolsEmpty": "这个家里还没有调用过工具。",
+    "statsSkills": "Skill 调用排行",
+    "statsSkillsEmpty": "这个家里还没有加载过 skill。",
+    "statsModels": "各模型 token 用量",
+    "statsModelsEmpty": "还没有模型调用报告过用量。",
+    "statsUnknownModel": "未命名的模型",
+    "statsTokensAbsent": "无用量",
+    "statsModelCalls_other": "{{count}} 次调用",
+    "statsClose": "回到对话",
+    "statsRange": "统计范围",
+    "statsDays_other": "{{count}} 天",
+    "statsRebuild": "重算",
+    "statsRebuildHint": "把这段时间的投影整份重算一遍：上头的计数就会包含这份拷贝还没拷过的行。",
+    "statsModelsShow": "展开 token 用量",
+    "statsModelsHide": "收起 token 用量"
   }
 }

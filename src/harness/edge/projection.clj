@@ -41,6 +41,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [harness.edge.replay :as replay]
+            [harness.edge.host :as host]
+            [harness.edge.stats :as stats]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.infra.log :as log]
@@ -133,8 +135,10 @@
        :calls     (vec (:tool_calls m))
        :at        (:ts row)})))
 
-(defn- project-row!
-  "Write ONE record row into the projection. Idempotent by construction: every statement is keyed."
+(defn- project-message!
+  "One MESSAGE row into the conversation tables, and the tool calls it declared.
+
+  Idempotent by construction: every statement is keyed."
   [^java.sql.Connection c session-id entry]
   (when-some [{:keys [seq run-id source role content reasoning calls at]} (message-row entry)]
     (db/execute! c "INSERT OR REPLACE INTO messages
@@ -156,6 +160,69 @@
                    content session-id (str call-id))))
   nil)
 
+(defn- project-model-start!
+  "One `model/start` FACT row -> a new row in `model_calls`, keyed by ITS OWN line index.
+
+  The model's NAME is here -- `harness.kernel.event/model-start` records what the request went
+  out under -- and the usage is not: that arrives on the `model/end` line, and
+  `project-model-end!` fills this row in when it does."
+  [^java.sql.Connection c session-id [i row]]
+  (let [p (replay/payload row)]
+    (db/execute! c "INSERT OR REPLACE INTO model_calls
+                      (session_id, seq, run_id, model, at)
+                    VALUES (?, ?, ?, ?, ?)"
+                 session-id (long i) (:runId row) (:model p) (:ts row))))
+
+(defn- project-model-end!
+  "One `model/end` FACT row -> the call its `model/start` opened, filled in with the vendor's report.
+
+  PAIRED BY ORDER, WHICH IS WHAT THE RECORD SAYS: the newest start of this session with no end
+  yet is this end's call (`harness.kernel.event/model-start` pairs them the same way). ASKED OF
+  THE STORE RATHER THAN REMEMBERED IN A PASS, because a byte offset can fall between the two
+  lines -- a pass may read the end long after it read the start, and a pending call held in
+  memory would be gone by then. The same reason there is an offset at all, one level down.
+
+  AN END WITH NO START is still a call that happened (a reset onto a log whose first readable
+  line is an end): it is written under its OWN line index rather than dropped, and the
+  leaderboard counts it."
+  [^java.sql.Connection c session-id [i row]]
+  (let [p     (replay/payload row)
+        usage (:usage p)
+        f     (stats/usage-fields usage)
+        at    (:ts row)]
+    (when (zero? (db/execute! c "UPDATE model_calls
+                                    SET end_seq = ?, model = COALESCE(?, model),
+                                        prompt_tokens = ?, completion_tokens = ?,
+                                        total_tokens = ?, cached_tokens = ?, ms = ? - at
+                                  WHERE session_id = ? AND seq = (
+                                    SELECT MAX(seq) FROM model_calls
+                                     WHERE session_id = ? AND end_seq IS NULL)"
+                               (long i) (:model p)
+                               (:promptTokens f) (:completionTokens f)
+                               (:totalTokens f) (:cachedTokens f) at
+                               session-id session-id))
+      (db/execute! c "INSERT OR REPLACE INTO model_calls
+                        (session_id, seq, run_id, model, end_seq,
+                         prompt_tokens, completion_tokens, total_tokens, cached_tokens, at)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                   session-id (long i) (:runId row) (:model p) (long i)
+                   (:promptTokens f) (:completionTokens f)
+                   (:totalTokens f) (:cachedTokens f) at))))
+
+(defn- project-row!
+  "Write ONE record row into the projection. Idempotent by construction: every statement is keyed.
+
+  WHAT A ROW IS DECIDES WHICH TABLE IT LANDS IN (`replay/kind`): a message row the conversation,
+  the two `model/*` fact rows the call they bracket. Everything else -- the wire frames and the
+  other facts -- is not something this copy answers a question about, and is left alone."
+  [^java.sql.Connection c session-id entry]
+  (case (replay/kind (second entry))
+    "message"     (project-message! c session-id entry)
+    "model/start" (project-model-start! c session-id entry)
+    "model/end"   (project-model-end! c session-id entry)
+    nil)
+  nil)
+
 ;; ------------------------------------------------------------------ the offset table
 
 (defn- stored-offset
@@ -173,7 +240,18 @@
   [^java.sql.Connection c session-id]
   (db/execute! c "DELETE FROM messages WHERE session_id = ?" session-id)
   (db/execute! c "DELETE FROM tool_calls WHERE session_id = ?" session-id)
+  (db/execute! c "DELETE FROM model_calls WHERE session_id = ?" session-id)
   (db/execute! c "DELETE FROM projection_offsets WHERE session_id = ?" session-id))
+
+(defn- forget-everything!
+  "Drop the WHOLE projection -- every content table and every offset -- so the next pass copies
+  every log again. `rebuild!` with no session named, and the action a schema change that added a
+  table asks for (`.scratch/global-stats-panel/`)."
+  [^java.sql.Connection c]
+  (db/execute! c "DELETE FROM messages")
+  (db/execute! c "DELETE FROM tool_calls")
+  (db/execute! c "DELETE FROM model_calls")
+  (db/execute! c "DELETE FROM projection_offsets"))
 
 (defn- find-log
   "The file SESSION-ID's record is in, or nil: a session that has never run, and -- because
@@ -337,10 +415,15 @@
     ;; EACH SESSION COMMITS ITSELF, IN CHUNKS (see `write-session!`): a pass that took one lock for
     ;; everything it had to write is exactly the long transaction the chunks exist to avoid.
     (doseq [w work] (write-session! w))
-    {:sessions (count work)
-     :rows     (reduce + 0 (map :total work))
-     :skipped  (reduce + 0 (map :skipped work))
-     :bytes    (reduce + 0 (map :bytes work))}))
+    (let [answer {:sessions (count work)
+                  :rows     (reduce + 0 (map :total work))
+                  :skipped  (reduce + 0 (map :skipped work))
+                  :bytes    (reduce + 0 (map :bytes work))}]
+      ;; THE STATISTICS ARE A DOORBELL OF THEIR OWN (`.scratch/global-stats-panel/`): a round that
+      ;; wrote rows may have moved a leaderboard, and the ring reaches only a reader who is looking
+      ;; at one -- a page with no statistics view open pays nothing for this line.
+      (when (pos? (:rows answer)) (host/ring-stats!))
+      answer)))
 
 (defn project! []
   "One pass over EVERY session this home lists: the whole-store form of `project-round!`, kept
@@ -378,8 +461,8 @@
   boundary this decision overrules was protecting."
   ([] (rebuild! nil))
   ([session-id]
-   (when session-id
-     (db/with-transaction (fn [c] (forget! c (str session-id)))))
+   (db/with-transaction
+    (fn [c] (if session-id (forget! c (str session-id)) (forget-everything! c))))
    (project!)))
 
 (defn forget-session!
@@ -391,6 +474,151 @@
   conversation nobody has."
   [session-id]
   (db/with-transaction (fn [c] (forget! c (str session-id)))))
+
+;; ------------------------------------------------ what the copy is asked to COUNT
+;;
+;; THE SECOND THING THE PROJECTION IS FOR (ADR 0008: 'a range by `seq`, a search by keyword, a
+;; count by tool name'). Everything below is a QUESTION rather than a copy -- the record could
+;; answer each of them, only not without reading every log this home holds.
+
+(defn tool-leaderboard
+  "Every tool this home has called SINCE the cutoff (epoch ms), most calls first:
+  [{:name .. :calls n} ..].
+
+  A RANKING, AND A STABLE ONE: ties break by name, so two reads of an unchanged store answer the
+  same order rather than whatever SQLite happened to reach first.
+
+  THE TIME IS THE MESSAGE'S, NOT A COLUMN OF `tool_calls`: a call has no timestamp of its own --
+  it rides the assistant message that declared it, on the same record line, so the join is on the
+  key the two tables already share (`session_id` + `seq`). Nothing about already-projected rows has
+  to be redone to ask this, which is the whole reason it is a join rather than a fifth column."
+  [since]
+  (let [rows (db/select "SELECT t.name AS name, COUNT(*) AS calls
+                           FROM tool_calls t
+                           JOIN messages m ON m.session_id = t.session_id AND m.seq = t.seq
+                          WHERE t.name IS NOT NULL AND m.at >= ?
+                          GROUP BY t.name",
+                        since)]
+    (vec (sort-by (fn [{:keys [name calls]}] [(- (long calls)) (str name)]) rows))))
+
+(defn- skill-name
+  "One `skill` call's arguments -> the skill it named, or nil for arguments this build cannot read."
+  [arguments]
+  (try (some-> (json/read-str (str arguments) :key-fn keyword) :name str)
+       (catch Throwable _ nil)))
+
+(defn skill-leaderboard
+  "The SKILLS this home has loaded SINCE the cutoff, most loads first: [{:name .. :calls n} ..].
+
+  A SKILL IS LOADED BY THE `skill` TOOL, and WHICH one is the call's own `name` argument -- so
+  this asks `tool_calls` for those rows and counts the name inside the arguments, rather than
+  adding a column the projection would have to keep in step with the tool's own schema. The window
+  is the declaring message's, the same join `tool-leaderboard` makes."
+  [since]
+  (let [counts (frequencies (keep (comp skill-name :arguments)
+                                  (db/select "SELECT t.arguments AS arguments
+                                                FROM tool_calls t
+                                                JOIN messages m ON m.session_id = t.session_id
+                                                                   AND m.seq = t.seq
+                                               WHERE t.name = 'skill' AND m.at >= ?"
+                                             since)))]
+    (vec (->> counts
+              (map (fn [[name calls]] {:name name :calls (long calls)}))
+              (sort-by (fn [{:keys [name calls]}] [(- (long calls)) (str name)]))))))
+
+(defn model-leaderboard
+  "Token usage per model SINCE the cutoff, most tokens first: [{:model .. :calls n ..} ..].
+
+  A KEY NO CALL REPORTED IS ABSENT FROM THE ROW (`harness.edge.stats/usage-fields` keeps 'not
+  reported' apart from zero), and the order puts a model whose usage nobody reported after the
+  ones with numbers: a count of calls is not a count of tokens. `model_calls` carries its own
+  timestamp (the START line's), so this window needs no join."
+  [since]
+  (let [rows (db/select "SELECT model AS model, COUNT(*) AS calls,
+                                SUM(prompt_tokens) AS prompt_tokens,
+                                SUM(completion_tokens) AS completion_tokens,
+                                SUM(total_tokens) AS total_tokens,
+                                SUM(cached_tokens) AS cached_tokens
+                           FROM model_calls
+                          WHERE at >= ?
+                          GROUP BY model",
+                        since)]
+    (vec (sort-by (fn [r] [(- (long (or (:total-tokens r) 0)))
+                           (- (long (:calls r)))
+                           (str (:model r))])
+                  (mapv (fn [r]
+                          (cond-> {:model (:model r) :calls (long (:calls r))}
+                            (some? (:prompt-tokens r))     (assoc :promptTokens (long (:prompt-tokens r)))
+                            (some? (:completion-tokens r)) (assoc :completionTokens (long (:completion-tokens r)))
+                            (some? (:total-tokens r))      (assoc :totalTokens (long (:total-tokens r)))
+                            (some? (:cached-tokens r))     (assoc :cachedTokens (long (:cached-tokens r)))))
+                        rows)))))
+
+(defn stats-answer
+  "The three leaderboards over the last DAYS days, as one answer -- the whole of what the
+  statistics view draws, and the payload `GET /api/stats` and the statistics downlink both hand
+  over.
+
+  THE WINDOW IS THE QUESTION, not a filter laid over a whole-home number: each ranking is asked
+  with a cutoff, so the store reads the rows in the window and nothing else. `:since` rides along
+  so a reader can say what the numbers cover rather than guess."
+  [days]
+  (let [days  (max 1 (min 3650 (long days)))
+        since (- (System/currentTimeMillis) (* days 24 60 60 1000))]
+    {:days   days
+     :since  since
+     :tools  (tool-leaderboard since)
+     :skills (skill-leaderboard since)
+     :models (model-leaderboard since)}))
+
+;; ------------------------------------------------ making the copy again, for a window
+;;
+;; THE ONE THING IN THIS NAMESPACE THAT IS NOT INCREMENTAL, and it is A PERSON'S ACTION rather than
+;; a process's (`.scratch/global-stats-panel/`): everything above reads bytes it has not read yet;
+;; this re-reads a BOUNDED set of logs on request. It exists because a table added to the
+;; projection cannot be filled by offsets written before it existed (`harness.infra.db`'s
+;; `model-calls` step), and the answer is the statistics view's own button -- NOT a scan at startup,
+;; which would be exactly the full read this layer refuses.
+
+;; The trigger's thread, declared here because the scheduling below needs it and its own section is
+;; further down (`declare` is the idiom the trigger section uses for `run-round!`).
+(declare ^:private clock)
+
+(defn- sessions-in-window
+  "The conversations with a projected row at or after SINCE."
+  [since]
+  (vec (distinct (map :session-id
+                      (db/select "SELECT session_id AS session_id FROM messages WHERE at >= ?
+                                  UNION
+                                  SELECT session_id AS session_id FROM model_calls WHERE at >= ?"
+                                 since since)))))
+
+(defn rebuild-window!
+  "Make the copy again for the conversations with anything in the last DAYS days, and answer
+  {:days n :since ms :sessions n :rows n ...} (the rest of the totals is `project-round!`'s).
+
+  SCOPED ON PURPOSE. `rebuild!` with an argument does one conversation and with no argument does
+  the whole store; this does the ones a reader is actually looking at, so the cost is proportional
+  to the window rather than to the home.
+
+  IT CHANGES NO RECORD. It deletes projected rows and projects them again from the same logs --
+  ADR 0008 decision 6's action, the claim that makes a second copy of the content acceptable."
+  [days]
+  (let [days  (max 1 (min 3650 (long days)))
+        since (- (System/currentTimeMillis) (* days 24 60 60 1000))
+        ids   (sessions-in-window since)]
+    (db/with-transaction (fn [c] (doseq [id ids] (forget! c (str id)))))
+    (assoc (project-round! ids) :days days :since since)))
+
+(defn schedule-rebuild-window!
+  "Run `rebuild-window!` on the projection's own thread, so a request does not wait for logs to be
+  read. Answers whether it was scheduled: with no trigger running (`start!` was never called -- a
+  REPL, a suite) there is no thread of ours to lend, and the caller runs it itself."
+  [days]
+  (if-some [^ScheduledExecutorService s @clock]
+    (do (.schedule s ^Runnable (fn [] (rebuild-window! days)) 0 TimeUnit/MILLISECONDS)
+        true)
+    false))
 
 ;; ------------------------------------------------ the trigger is the write stream, not a clock
 
@@ -521,6 +749,10 @@
   store's write lock while the test was using it, and `harness.edge.http-test` went past its 300s
   limit (measured: three namespaces never got to run). An idle server now pays for one listener
   that is never called -- and an idle process runs no round at all.
+
+  IT ASKS THE STORE NOTHING AND READS NO LOG (`schedule-rebuild-window!` is where the one action
+  that does is scheduled, and it is a person's). Everything here is a doorbell: the pass itself
+  is the listener's, and it starts nothing.
 
   WHAT IT GIVES UP, SAID OUT LOUD: a line a PREVIOUS process wrote and never copied before it stopped
   has nobody left to ring the bell, so it waits for that conversation's next line -- the narrow window
