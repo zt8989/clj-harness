@@ -135,14 +135,38 @@
                     {:reason :retain-not-below-threshold})))
   merged)
 
+(def known-keys
+  "EVERY KEY `:session :compaction` MAY CARRY, and the point of the list is the ones that are
+  NOT on it: a key nobody reads is a knob nobody turned, and it is the exact shape of a typo
+  that costs an afternoon -- `:retain-ration`, `:thresold-ratio`, `:maxTokens` all look right
+  while the value beside them does nothing. The reference refuses unknown keys when its config
+  loads (`dsh-compaction-basic`'s own schema); this harness reads config.edn lazily, so it
+  refuses at the first read instead (`block`, one layer later, and every reader goes through it).
+
+  THE LIST IS WHAT THE CODE READS, sorted: the two proportions, the overflow retries, and the
+  summary call's output cap."
+  #{:threshold-ratio :retain-ratio :overflow-retries :max-tokens})
+
+(defn check-keys!
+  "BLOCK -> BLOCK, or a refusal naming every key this harness does not read. Split out for the
+  same reason `check-ratios!` is: the refusal can be asserted without a file."
+  [m]
+  (let [unknown (remove known-keys (keys m))]
+    (when (seq unknown)
+      (throw (ex-info (str "config.edn's :session :compaction carries " (count unknown)
+                           " key(s) nothing reads: " (str/join ", " (sort (map name unknown)))
+                           " -- known: " (str/join ", " (sort (map name known-keys))))
+                      {:keys (vec unknown) :reason :unknown-compaction-key})))
+    m))
+
 (defn- block
   "config.edn's :session :compaction block for THREAD-ID, as it was written -- nothing merged
   with the defaults and nothing validated. The one reader, so `config` and
   `overflow-retries` cannot fold the same file two different ways. ONE LEVEL: the project
   level this key used to compose against is gone (.scratch/config-merge/spec.md decision 2)."
   [thread-id]
-  (let [b (:compaction (project/harness-config thread-id))]
-    (if (map? b) b {})))
+  (check-keys! (let [b (:compaction (project/harness-config thread-id))]
+                 (if (map? b) b {}))))
 
 (defn config
   "The compaction proportions THIS SESSION is configured with, from config.edn's
@@ -204,28 +228,31 @@
 
 ;; ------------------------------------------------------------------------ the lock
 
-(defn- lifecycle-rows
-  "The compaction lifecycle rows of RECORDS, in order, as {:kind :payload}."
-  [records]
-  (keep (fn [row]
-          (let [kind (replay/kind row)]
-            (when (#{"compaction/start" "compaction/end"} kind)
-              {:kind kind :payload (replay/payload row)})))
-        records))
-
 (defn lock-active?
-  "RECORDS -> the compaction id of an UNMATCHED `compaction/start`, or nil when the lock is
-  free. A started-but-not-ended compaction blocks every entry point (a second one would
-  pick a range the first is already replacing); a matched pair is over."
+  "RECORDS -> the compaction id of an UNMATCHED `compaction/start` that is still this record's
+  business, or nil when the lock is free. A started-but-not-ended compaction blocks every entry
+  point (a second one would pick a range the first is already replacing); a matched pair is over.
+
+  AND A START NO LATER PROCESS IS HOLDING IS OVER TOO. `session/closed-off` is the record's own
+  boundary: it is written when a reader finds the log ending MID-RUN -- i.e. a process was killed
+  between a run's last frame and its terminal one (`harness.edge.http`). A compaction whose start
+  is OLDER than that boundary died with that process and its `end` is never coming, so the lock
+  it left must not be inherited: without this rule the failure is PERMANENT -- every later
+  compaction of that session is refused by a start whose process is gone, and nothing short of
+  editing the record by hand can clear it. The same rule the reference keeps (`dsh-compaction`
+  drops a start older than the newest session boundary)."
   [records]
   (first
-   (reduce (fn [open {:keys [kind payload]}]
-             (let [id (:compactionId payload)]
-               (if (= "compaction/start" kind)
-                 (conj open id)
-                 (vec (remove #(= id %) open)))))
+   (reduce (fn [open row]
+             (let [kind (replay/kind row)
+                   id   (:compactionId (replay/payload row))]
+               (cond
+                 (= "session/closed-off" kind) []
+                 (= "compaction/start" kind)    (conj open id)
+                 (= "compaction/end" kind)      (vec (remove #(= id %) open))
+                 :else open)))
            []
-           (lifecycle-rows records))))
+           records)))
 
 ;; ----------------------------------------------------------------------- the range
 
