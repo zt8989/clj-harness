@@ -588,6 +588,9 @@
   the relief the VENDOR's refusal triggers; this is the same relief, asked BEFORE the refusal
   instead of after it (`.scratch/compaction-shape` ticket 04: a run grew from 62% of its
   window to over 100% in twelve minutes, and nothing looked again until the vendor said no).
+  SINCE 2026-10-01 THE EDGE FOLDS ONLY WHEN THE REQUEST WOULD NOT FIT (owner): the threshold is
+  the run-start trigger's question, and asking it again mid-run folded turns that were about to
+  end. The seam is unchanged; what the edge does with the question is its own.
 
   WHAT IT IS HANDED IS THE ARRAY ABOUT TO GO OUT, so an edge that measures it measures a
   REQUEST rather than a record it hopes agrees with one.
@@ -839,7 +842,11 @@
                       ;; IS THIS THE REQUEST TO SEND? Asked before EVERY call -- not only at
                       ;; the run's start -- because a conversation grows BETWEEN calls (one tool
                       ;; result can be enormous), and the vendor's refusal for length arrives
-                      ;; only after a request was assembled and paid for. What the edge hands
+                      ;; only after a request was assembled and paid for. WHETHER THAT QUESTION IS
+                      ;; ANSWERED WITH A FOLD IS THE EDGE'S (`relieve-pressure!` there folds only
+                      ;; when the request would NOT FIT; the threshold is the run-start trigger's
+                      ;; question, and folding on it mid-run spent summary calls on turns that were
+                      ;; about to end -- owner, 2026-10-01). What the edge hands
                       ;; back is the CONVERSATION and not this run's per-call decorations, so the
                       ;; step is applied to it again; `prepare` derives what is missing (a skill
                       ;; body, a job's ending) rather than duplicating what is there, and

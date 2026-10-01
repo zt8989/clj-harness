@@ -402,7 +402,11 @@ token，只有一个 4 字符 ≈ 1 token 的估算器，而且只作用在**增
 **阈值比例 / 保留比例** —— 一对比例：`thresholdRatio`（默认 **0.7**）是压力越过它就**开始压缩**的那条
 线；`retainRatio`（默认 **0.16**）是压缩**逐字保留**的最近那段窗口。保留必须**严格小于**阈值，否则压缩
 会把它被要求缩小的东西全留下。两个数都住在 `harness.edge.pressure`（默认值），由 `harness.edn` 的
-`:compaction` 块按 key 覆盖；自动触发与手动 `/compact` 都照它动手。
+:compaction` 块按 key 覆盖；自动触发与手动 `/compact` 都照它动手。**两个自动触发点问的不是同一个问题**
+（[ADR 0014](docs/adr/0014-the-mid-run-trigger-folds-only-when-the-request-would-not-fit.md)）：run 开头的那个问
+「下一个用户轮要不要从更干净的会话开始」——判据是**阈值**；**轮中**那个问「这次就要发出去的请求塞得下吗」
+——判据是**窗口**（`pressure ≥ window` 才折，省掉一次被拒的请求）。阈值与窗口之间不动手：那是下一个用户轮
+的事。
 
 **压缩**（compaction）—— 把一段历史从**模型视图**里去掉、换成一条**摘要**，而**记录**一行不删、**会话投影**
 照旧（模型读摘要，人读原文）。记录里它是一条 `context/compacted` 事实行：`:shadowed` 是权威的、**按 surface

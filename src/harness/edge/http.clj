@@ -6574,9 +6574,23 @@
     (catch Throwable _ nil)))
 
 (defn- relieve-pressure!
-  "MID-RUN AUTO COMPACTION (ticket 04 of `.scratch/compaction-shape`): the run-start trigger's
-  question -- is the window about to run out? -- asked before EVERY model call instead of once
-  per run, and answered with a SHORTER model view when it is.
+  "MID-RUN AUTO COMPACTION (ticket 04 of `.scratch/compaction-shape`): asked before EVERY model
+  call, and answered with a SHORTER model view only when the request WOULD NOT FIT.
+
+  THE WINDOW, NOT THE THRESHOLD (owner, 2026-10-01). The threshold is the RUN-START trigger's
+  question -- 'should the next user turn begin on a tidier conversation?' -- and asking it again
+  mid-run is wrong in the common case: a turn's pressure crosses seven tenths on some step, the
+  fold happens, and the very next call turns out to be the turn's LAST one, so a summary call
+  was spent on a request that would have fitted and a conversation that is not read again until
+  the person asks. The owner's own record (thread `3c85b20e-…`, 2026-10-01 16:41) is exactly
+  that: `compaction/start` between a `step/end` and the `step/start` of the final step, 30
+  tokens under nothing at all -- it fired at 0.75 of a 1M window.
+
+  WHAT IT STILL DOES IS THE THING IT WAS ADDED FOR: a run that grows past its window between two
+  calls (`62f30024-…`: 62% to over 100% in twelve minutes) is caught BEFORE the vendor is asked,
+  instead of paying a refused request and then the harsh `recover-overflow!` fold. A request
+  between the threshold and the window is left alone; the next run's head folds it properly, and
+  a request that really cannot fit still has `recover-overflow!` behind it.
 
   HISTORY IS THE ARRAY ABOUT TO GO OUT, which is the point: the meter is handed a REQUEST
   rather than a record it hopes agrees with one (`log-pressure`'s own contract), and this run's
@@ -6606,8 +6620,11 @@
     (let [ratios (compaction/config stem)
           window (:context-window provider)
           answer (pressure/log-pressure stem history window)]
-      (when (and (:thresholdTokens answer)
-                 (>= (:pressureTokens answer) (:thresholdTokens answer)))
+      ;; WOULD THIS REQUEST FIT? The window is the vendor's own limit, and the threshold below it
+      ;; belongs to the run-start trigger -- see the docstring for why the two questions are not
+      ;; the same one.
+      (when (and (:windowTokens answer)
+                 (>= (:pressureTokens answer) (:windowTokens answer)))
         (locking compaction-lock
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
