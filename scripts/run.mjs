@@ -4,12 +4,14 @@
 //
 //   1. npm run build        —— 页面建出来（ui/dist；它自带 `tsc --noEmit`）
 //   2. 编译检查             —— 一个 JVM 里把服务端那棵树 require 一遍
-//   3. clojure -M:run       —— 后台跑起来，并且**确认它真的起来了**
+//   3. clojure -M:run       —— 起后端，并且**确认它真的起来了**（默认脱离这个脚本）
 //
 //   node scripts/run.mjs                        端口由 OS 挑（0），起来后打印地址
 //   node scripts/run.mjs --port 8080            指定端口
 //   node scripts/run.mjs --port 8080 --detach   新后端**生下来就是孤儿**：在 clj-harness 会话里
 //                                               跑，也不会随那个会话被收走（见下）
+//   node scripts/run.mjs --foreground          输出进**这个终端**（同一份也落进日志），脚本一直
+//                                               活到它退出，这个终端里 Ctrl-C 停它
 //   node scripts/run.mjs --stop --port 8080     停掉 :8080 上的后端（不建页面、不起新的）
 //   node scripts/run.mjs --restart --port 8080  先停后起（要显式端口，理由见下）
 //   node scripts/run.mjs --restart --port 8080 --detach
@@ -34,6 +36,12 @@
 // 走的是 `.descendants` —— 每一层的 PPID 树），而「脚本的后代」正好在那棵树里。`--detach` 就是
 // 为这件事：新后端由 `setsid -f` 生下来，中间那层立刻退出，它**一出生就是孤儿**（PPID 是 1），
 // 那棵树里没有它。自己终端里跑 `clojure -M:run` 当然也行，两条路都对。
+//
+// `--foreground` 是第三条路，也是唯一一条**不属于**上面这段话的：那一发不脱离、不 unref，输出的
+// 两根管子回到脚本手里、由脚本转给终端，脚本一直活到它退出为止 —— 它就是这个终端的孩子，
+// Ctrl-C 由操作系统送给这一组，谁也不用转发（见 `scripts/proc.mjs` 的 `runInForeground`）。
+//
+// 后端那个 JVM 的命令行上还写着一个堆上限（`JVM_ARGS`），理由在第 3 步那一处。
 //
 // `--stop` / `--restart` 认的是**地址**而不是 pid：端口是浏览器和 README 指向过的东西，pid 是
 // 昨天写下、今天可能已经被回收的号码。所以「停掉后端」=「停掉 :PORT 上正在听的那个」，现问现算
@@ -60,6 +68,7 @@ import {
   leaveBehindOrphan,
   listenerOn,
   run,
+  runInForeground,
   stopTree,
 } from "./proc.mjs";
 
@@ -69,12 +78,14 @@ const UI_DIR = path.join(ROOT, "ui");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const USAGE = `把真正的服务起起来（建页面 -> 验编译 -> 后台跑，并且确认它真的起来了）。
+const USAGE = `把真正的服务起起来（建页面 -> 验编译 -> 起后端，并且确认它真的起来了）。
 
   node scripts/run.mjs                        端口由 OS 挑（0），起来后打印地址
   node scripts/run.mjs --port 8080            指定端口
   node scripts/run.mjs --port 8080 --detach   新后端生下来就是孤儿（PPID 1）：在 clj-harness
                                               会话里跑也不会随那个会话被收走
+  node scripts/run.mjs --foreground           输出进这个终端（同一份也落进日志）：脚本一直活到
+                                             它退出才返回，这个终端里 Ctrl-C 停它
   node scripts/run.mjs --stop --port 8080     停掉 :8080 上的后端
   node scripts/run.mjs --restart --port 8080  先停后起（要显式端口）
   node scripts/run.mjs --restart --port 8080 --detach
@@ -92,7 +103,7 @@ const STOP_INSIST_MS = 5_000;
 
 // ----------------------------------------------------------------- arguments
 
-const options = { port: 0, grace: 30, detach: false, restart: false, restartLater: false, stop: false };
+const options = { port: 0, grace: 30, detach: false, foreground: false, restart: false, restartLater: false, stop: false };
 const argv = process.argv.slice(2);
 
 function usageThenExit(code, line) {
@@ -108,6 +119,8 @@ for (let index = 0; index < argv.length; index += 1) {
     process.exit(0);
   } else if (arg === "--detach") {
     options.detach = true;
+  } else if (arg === "--foreground") {
+    options.foreground = true;
   } else if (arg === "--restart") {
     options.restart = true;
   } else if (arg === "--restart-later") {
@@ -137,6 +150,10 @@ if ((options.stop || options.restart || options.restartLater) && options.port ==
   usageThenExit(2, "要停/要重启就得说清端口（--port N）：0 是「让 OS 挑」，挑出来的号码下次不是它");
 }
 if (options.stop && options.restart) usageThenExit(2, "--stop 只停、--restart 停完再起，两件事选一件");
+if (options.foreground && options.detach) {
+  // 一个是「生下来就脱离调用者」，一个是「跟着这个终端活」，没有一句能同时成立。
+  usageThenExit(2, "--detach 与 --foreground 说的是两件相反的事，选一件");
+}
 
 // ------------------------------------------------------- who is on that port
 
@@ -279,7 +296,18 @@ if (options.restart || options.restartLater) {
 
 const logPath = path.join(os.tmpdir(), `clj-harness-run-${Date.now()}.log`);
 const pidPath = path.join(os.tmpdir(), `clj-harness-run-${Date.now()}.pid`);
-console.log(`run.mjs: 起后端（clojure -M:run --port ${options.port}），它的输出进 ${logPath}`);
+
+/// 后端这个 JVM 的堆上限，写在**命令行**上而不是 `deps.edn` 的 `:jvm-opts`：这台机器的
+/// deps.clj 启动器不读 `:jvm-opts`（`deps.edn` 里那段注释也记着这件事），只有 `-J` 顶用 ——
+/// 实测 `-J-Xmx321m` 进来就是 322 MB 的上限。不写的话默认是**物理内存的 1/4**（这台 4 GB），
+/// 而 G1 不会自己把 region 交回 OS（`G1PeriodicGCInterval` 默认是 0），于是一阵高峰把堆顶到
+/// 1.7 GB 之后，那个水面就一直挂在任务管理器上：2026-10-01 实测，进程 1.6 GB 工作集，活着的
+/// 对象只有 51 MB，一次强制 Full GC 吐回 1.2 GB（读数与那三笔账见
+/// `.scratch/memory-hygiene/spec.md`）。第 2 步那个编译检查**不封顶**：它是一次性的，不是这个
+/// 长住的进程。
+const JVM_ARGS = ["-J-Xmx1g"];
+const backendArgs = [...JVM_ARGS, "-M:run", "--port", String(options.port)];
+console.log(`run.mjs: 起后端（clojure ${JVM_ARGS.join(" ")} -M:run --port ${options.port}），它的输出进 ${logPath}`);
 
 // 用 `leaveBehind` 而不是 `run`，两件在 Windows 上量过的事写在 `scripts/proc.mjs` 里：
 // 走一层 shell 的自定义 stdio 一个字节都不进文件；`detached` 会把 java 的话整个吞掉。
@@ -288,13 +316,32 @@ console.log(`run.mjs: 起后端（clojure -M:run --port ${options.port}），它
 // `--detach` 走 `leaveBehindOrphan`：多一层 `setsid -f`（换成孤儿），并且让它**自己**把 pid
 // 写下来——`setsid` 把中间那层换掉了，spawn 给的那个号码在返回前就已经没了，而「起没起来」和
 // 「怎么停它」都要那个真号码。写 pid 的动作就是 `exec` 之前的那一次重定向，没有别的机关。
-const backend = options.detach
-  ? leaveBehindOrphan("clojure", ["-M:run", "--port", String(options.port)], {
-      cwd: ROOT,
-      logPath,
-      pidPath: ON_WINDOWS ? null : pidPath,
-    })
-  : leaveBehind("clojure", ["-M:run", "--port", String(options.port)], { cwd: ROOT, logPath });
+//
+// `--foreground` 走 `runInForeground`：不脱离、不进自己的进程组，就挂在这个终端上，而两根
+// 管子回到这里。**验证仍然只有一条路**（下面那个循环读的还是这份日志），因为这里的 tee 把每个
+// 字节同时送给终端与日志 —— 两半都要，所以别把 tee 挪到下面去。
+const backend = options.foreground
+  ? runInForeground("clojure", backendArgs, { cwd: ROOT })
+  : options.detach
+    ? leaveBehindOrphan("clojure", backendArgs, {
+        cwd: ROOT,
+        logPath,
+        pidPath: ON_WINDOWS ? null : pidPath,
+      })
+    : leaveBehind("clojure", backendArgs, { cwd: ROOT, logPath });
+
+if (options.foreground) {
+  // 同步追加是故意的：读这份日志的就是下面那个循环，写完再读没有先后之争。异步写会留下一段
+  // 「它已经说了、日志里还没有」的窗口，而这里的判据正是「日志里有没有那句话」。
+  backend.stdout.on("data", (chunk) => {
+    fs.appendFileSync(logPath, chunk);
+    process.stdout.write(chunk);
+  });
+  backend.stderr.on("data", (chunk) => {
+    fs.appendFileSync(logPath, chunk);
+    process.stderr.write(chunk);
+  });
+}
 
 /// `--detach` 之后我们手里没有 pid（POSIX），只有它自己写下的那一行；其余情况手里就是 child。
 const ownedPid = options.detach && !ON_WINDOWS ? null : backend.pid;
@@ -378,9 +425,14 @@ const backendPid = readPidFile();
 const home = process.env.CLJ_HARNESS_HOME ?? path.join(os.homedir(), ".clj-harness");
 console.log(`run.mjs: 起来了 —— ${url}`);
 console.log("run.mjs: 页面（ui/dist）与 API 是同一个地址，敲一下就是刚建的那一页");
-console.log(`run.mjs: 它的输出：${logPath}`);
+console.log(options.foreground
+  ? `run.mjs: 它的输出：这个终端（同一份也落在 ${logPath}）`
+  : `run.mjs: 它的输出：${logPath}`);
 console.log(`run.mjs: harness 自己的日志：${path.join(home, "logs", "harness.infra.log")}`);
-if (backendPid !== null && backendPid !== undefined) {
+if (options.foreground) {
+  console.log("run.mjs: 它是**前台**跑的：这个脚本坐在这儿，直到它退出才返回");
+  console.log("run.mjs: 停它：这个终端里 Ctrl-C —— 脚本不抢先 taskkill，让后端走完自己的收尾");
+} else if (backendPid !== null && backendPid !== undefined) {
   console.log(`run.mjs: 停它：${ON_WINDOWS ? `taskkill /PID ${backendPid} /T /F` : `kill ${backendPid}`}，或 node scripts/run.mjs --stop --port ${bound}`);
 }
 if (options.detach) {
@@ -388,5 +440,12 @@ if (options.detach) {
 } else {
   console.log("run.mjs: 它是这个脚本的后代：跑脚本的那个 clj-harness 会话退出时，它会被一起收掉");
   console.log("run.mjs: 要它活过那个会话，加 --detach（生下来就脱离），或在自己的终端里跑 clojure -M:run");
+}
+if (options.foreground) {
+  // 前台的整个意思就是「这个脚本是那个终端到后端的一个窗口」：它活到后端退出为止，后端怎么退的，
+  // 它怎么退。信号不在这里接 —— 为什么不接写在 `runInForeground` 上。
+  const code = await exitOf(backend);
+  console.log(`run.mjs: 后端退了（退出码 ${code}），脚本跟着退`);
+  process.exit(code);
 }
 process.exit(0);

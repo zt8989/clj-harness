@@ -45,6 +45,9 @@ cd .. && clojure -M:run                 # http://localhost:8080 既是页面也�
 node scripts/run.mjs --port 8081          # 起来后打印地址、日志路径、以及怎么停它
 node scripts/run.mjs --port 8081 --detach # 同上，但新后端**生下来就脱离**调用者：
                                           # 在 clj-harness 会话里跑也不会随那个会话被收走
+node scripts/run.mjs --port 8081 --foreground
+                                          # 输出进这个终端（同一份也落进日志）：脚本一直活到它
+                                          # 退出才返回，这个终端里 Ctrl-C 停它
 node scripts/run.mjs --stop --port 8081   # 停掉 :8081 上的后端
 node scripts/run.mjs --restart --port 8081
                                           # 先停后起（要显式端口：0 是「让 OS 挑」，
@@ -59,6 +62,9 @@ node scripts/run.mjs --restart --port 8081 --detach --grace 30
 - `--detach` 用 `setsid -f` 把新进程**孤儿式**地生下来（PPID 1）。跑脚本的 clj-harness 会话
   退出时会收掉自己整棵后代树（`harness.infra.shell/reap!` 走的是 `.descendants`），
   `--detach` 起的不在那棵树里；自己终端里跑也照样长住，两条路都对。
+- 后端那个 JVM 的堆上限写在 `scripts/run.mjs` 的 `JVM_ARGS` 上（`-J-Xmx1g`）。不写会默认成
+  物理内存的 1/4，而 G1 不会自己把空闲的 region 交回 OS，任务管理器上就长期挂着一个大数字
+  （实测：工作集 1.6 GB，活着的对象 51 MB）。要更多就在那一行上改。
 
 **分开起 + 热更新**（改 `ui/src` 立刻见效）：
 

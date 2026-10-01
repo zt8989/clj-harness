@@ -39,6 +39,33 @@ export function run(command, args, options = {}) {
   });
 }
 
+/// Start a child this process MEANS TO SIT WITH, in the terminal it was started from: its two
+/// streams come back as PIPES (the caller reads the line the child prints AND shows those same
+/// bytes to the person), and NOTHING IS DETACHED -- the child stays in the caller's own console
+/// (Windows) or process group (elsewhere), so a Ctrl-C in that terminal reaches it by the OS's own
+/// mechanism and nothing has to be forwarded from here.
+///
+/// THAT LAST CLAUSE IS THE WHOLE DIFFERENCE FROM `run` ABOVE, which is `detached` off Windows (a
+/// process group of its own): right for a launcher that keeps a handle in order to stop the child
+/// later, wrong for one that is only a window onto it.
+///
+/// WINDOWS STILL PUTS `cmd` IN BETWEEN, for the reason `run` does: `clojure` may be a `.cmd`, which
+/// node refuses to spawn without a shell. The command line is the same quoted one `leaveBehind`
+/// builds, and the pipes do reach the grandchild through cmd -- what `leaveBehind` documents losing
+/// is an fd THIS PROCESS OPENED (`fs.openSync`), which is not what a pipe is.
+export function runInForeground(command, args, options = {}) {
+  if (ON_WINDOWS) {
+    const line = [command, ...args].map(quoteForWindows).join(" ");
+    return spawn("cmd", ["/d", "/s", "/c", line], {
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
+  }
+  return spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+}
+
 /// Start a child this process means to LEAVE BEHIND: detached, its own process, its
 /// standard streams on files the CALLER opened.
 ///
