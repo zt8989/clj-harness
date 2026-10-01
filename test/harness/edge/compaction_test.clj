@@ -54,6 +54,55 @@
   newer half -- instead of re-typing the sentence."
   [summary]
   (:content (replay/compaction-summary summary)))
+
+(defn- lifecycle
+  "One `compaction/start` or `compaction/end` row, as the edge writes it (`log!` wraps a kind in
+  the CUSTOM frame whose name is that kind)."
+  [ts name id]
+  {:ts ts :runId "r1" :type "event"
+   :payload {:type "CUSTOM" :name name :value {:compactionId id}}})
+
+(defn- a-process-was-killed-here
+  "One `session/closed-off` row -- the record's own boundary: a reader found the log ending
+  MID-RUN, i.e. the process that owned those rows is gone (`harness.edge.http`)."
+  [ts]
+  {:ts ts :runId "r1" :type "event"
+   :payload {:type "CUSTOM" :name "session/closed-off"
+             :value {:run-id "r1" :last-frame "RUN_ERROR" :frames ["RUN_ERROR"]}}})
+
+(deftest a-start-whose-process-is-gone-is-not-a-lock
+  ;; THE CRASH CASE, and it is not hypothetical: a process killed between `compaction/start` and
+  ;; `compaction/end` leaves an unmatched start, and the next process reads that record (and
+  ;; writes `session/closed-off` for the run it found cut off). A lock inherited from a dead
+  ;; process is PERMANENT -- every later compaction is refused, and nothing in the harness can
+  ;; clear it.
+  (let [start (lifecycle 1 "compaction/start" "c1")]
+    (is (= "c1" (compaction/lock-active? [start])) "an unmatched start holds the lock")
+    (is (nil? (compaction/lock-active? [start (a-process-was-killed-here 2)]))
+        "a boundary written after it says that process is gone: the lock is not inherited")
+    (is (= "c2" (compaction/lock-active? [start (a-process-was-killed-here 2)
+                                          (lifecycle 3 "compaction/start" "c2")]))
+        "while a start written after the boundary holds one of its own")
+    (is (nil? (compaction/lock-active? [start (lifecycle 4 "compaction/end" "c1")]))
+        "a matched pair is over, exactly as before")))
+
+(deftest a-compaction-key-nobody-reads-is-refused-by-name
+  ;; A KEY NOBODY READS IS A KNOB NOBODY TURNED: `:retain-ration` or `:maxTokens` beside a
+  ;; correct-looking value is a silent no-op, and the reference refuses the like when its config
+  ;; loads. Ours reads config.edn lazily, so the refusal happens at the first read.
+  (is (= {:threshold-ratio 0.7 :retain-ratio 0.16}
+         (compaction/check-keys! {:threshold-ratio 0.7 :retain-ratio 0.16}))
+      "the keys the code reads pass straight through")
+  (let [all (zipmap compaction/known-keys (repeat 1))]
+    (is (= all (compaction/check-keys! all)) "and so does every one of them together"))
+  (is (= {} (compaction/check-keys! {})) "a session that configured nothing is not a typo")
+  (let [t (try (compaction/check-keys! {:retain-ratio 0.1 :retain-ration 0.2})
+               nil
+               (catch Throwable e e))]
+    (is (instance? clojure.lang.ExceptionInfo t) "a key nothing reads is refused")
+    (is (str/includes? (ex-message t) "retain-ration") "naming the offender")
+    (is (str/includes? (ex-message t) "retain-ratio") "beside the key it was meant to be")))
+
 ;; -------------------------------------------------------------- the projection
 
 (deftest a-compaction-hides-its-range-from-the-model-and-leaves-the-record-alone

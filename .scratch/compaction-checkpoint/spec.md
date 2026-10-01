@@ -183,3 +183,19 @@ git 事实在不该答的树上**答错过**（thread `a0621fce-…`），`Alrea
 `pressure_test/a-tool-table-is-priced-at-the-density-it-was-measured-at` 钉住。
 证据脚本：`dev/scratch_live_vs_fold.clj`、`dev/scratch_measure_twice.clj`、`dev/scratch_tool_probe.clj`、
 `dev/scratch_cjk_share.clj`、`dev/scratch_two_folds.clj`（后两条分别否掉「中文税」与「两个折叠不一致」）。
+
+2026-10-01（夜，续） — **对参考实现的两个欠账补上**（都是会真咬人的那两条）：
+
+1. **过期锁**（参考实现 `dsh-compaction` 有、我们没有）：一个未配对的 `compaction/start` 如果
+   比记录里最新的 `session/closed-off` 边界**更早**，那个进程已经死了、它的 `end` 永远不会来，
+   锁不该被继承——否则那条会话的每一次压缩都被一个死进程的 start 挡住，且**没有**任何机制能清
+   （只能手改记录）。`lock-active?` 现在按边界清账；回归
+   `compaction_test/a-start-whose-process-is-gone-is-not-a-lock`。
+2. **配置键按名拒绝**（参考实现在装载期拒绝未知键）：`:session :compaction` 里出现一个谁都不读的
+   键（`:retain-ration`、`:maxTokens`……）是**静默的 no-op**，而现在 `block` 在读的时候按名拒掉，
+   并把已知键一并列出来；回归 `compaction_test/a-compaction-key-nobody-reads-is-refused-by-name`。
+
+仍然没做的（留给下一轮，按「会不会咬人」排）：策略旋钮（`retainTokens` 绝对值、`compactionRetries`、
+`auto` 开关、`modelPolicies`、独立的 `summarizationProvider/Model`、默认阈值 0.8）；**取消**
+（`AbortSignal` 一路到摘要调用，我们现在一个 abort 都没有）；lifecycle 行的 `:turn` 归属；
+不变式伴随插件；`/compact` 报告省下多少 token 与「跑的时候发来的话排队」；pruner 三个数可配。
