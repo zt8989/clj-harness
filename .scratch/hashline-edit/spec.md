@@ -731,3 +731,55 @@ old_string 编辑，undo_last_replace 是锚点那套，请用 replace；要切�
 `eval` 还写着 `harness.memory`（那个命名空间早已解散，API 回了 `harness.tools`），于是标记本身抛错、
 write 不 park 而是直接跑完。**红得很像 flaky，其实是那一行名字过期**：改成 `harness.tools/...` 之后
 11/11 全绿。main 上早已是同一个名字、同一行，两边不会打架。
+
+## 落地结果
+
+**票 01（`replace` / `insert` 写不了一行本身长得像 JSON 数组的内容）**：2026-10-01 落地，票文件按本仓
+规矩删掉。
+
+`replacement-arg`（`replace` 的 `replacement_lines` 与 `insert` 的 `lines` 共用）原来无条件解包：
+整个字段、或**任何一个元素**，只要去空白后以 `[` 开头、以 `]` 结尾、且能解析成字符串数组，就解包成
+若干行。代价是两种字面量写不进去：`[]` 解包成**零行**（这一行消失），`["a","b"]` 解包成两行。
+
+收法是**照上游（`pi-hashline-edit-pro` 5.0.0）的两条闸门**，两条都在包内实测过：
+
+- 元素解包只在**该数组恰好一个元素**时发生（`src/utils.ts:333`，`value.length === 1`）；
+- 解出来的结果**非空**才解包（`src/utils.ts:319/321`）——上游 `decodeStringArray("[]")` 返回
+  `undefined`，且有用例钉着（`test/core/utils.test.ts:267`）。
+
+本仓按同一把尺改成（`edit.clj` 的 `replacement-arg`，新增 `json-string-array` / `json-array-lines` /
+`field-lines` 三个私有小函数）：
+
+- **元素**：`(= 1 (count v))` 且解析出**非空**字符串数组时才解包。多元素数组里的 JSON 串、以及
+  `[]`，一律按字面量写下去——`[]` 在这里是内容（一个空 arglist、一行空 JSON），而且没有第二种写法。
+- **整个字段是字符串**：仍按票 03 的既定行为解回数组，但**空数组不再解包**：`replacement_lines: "[]"`
+  从「删掉这一段」变成写一行字面量 `[]`。删范围这件事现在只由**数组** `[]` 表达。
+- 两处「拒绝解包」各留一句 warning（`Kept … as the literal line it is: …`），所以 `:strict-input`
+  仍然拒掉这两种输入，与改前同口径。
+
+**行为变化三处**（`replace` 与 `insert` 同时生效）：
+
+| 输入 | 改前 | 改后 |
+|---|---|---|
+| 元素 `"[]"`（单元素） | 解包成 0 行，那一行消失 | 原样写一行 `[]` |
+| 元素 `"[\"a\",\"b\"]"`（多元素之一） | 解包成两行 | 原样写 |
+| 字段是字符串 `"[]"` | 解包成 0 行 = 删掉这一段 | 原样写一行 `[]` |
+
+**刻意不动的两处宽松**（各有用例钉着）：整个字段是一个 JSON 数组字符串（`"[\"X\",\"Y\"]"` → 两行）、
+单个元素里粘了一整个数组（`[\"[\\\"X\\\",\\\"Y\\\"]\"]` → 两行）。**数组 `[]` 删范围**也不动。
+
+**用例**：`replace_test.clj` 的 `a-line-that-looks-like-a-json-array-is-written-as-it-is`、
+`insert_test.clj` 的 `a-line-that-looks-like-a-json-array-is-inserted-as-it-is`，各五段（三种字面量 +
+数组 `[]` 仍删 + 该解包的仍解包）。**先红后绿**：把 `edit.clj` stash 回旧代码，这两条各红一遍
+（10 处断言），其余 54 条不动；装回去即全绿。
+
+**实测**（本机，2026-10-01）：`harness.cap.hashline.replace-test` + `insert-test` →
+`Ran 56 tests containing 231 assertions. 0 failures, 0 errors.`；后端全量 →
+`Ran 1421 tests containing 14528 assertions. 0 failures, 0 errors.`（那行 `ISOLATION NOTE` 说的是这台机器上
+那个活着的 app 在写自己的库，按规矩不算红）。**全量第一轮出现过 1 处红**，同一份代码重跑即全绿——名字被
+管道里的 `tail` 吃掉了，照本仓规矩把这事记在这里，不假装它没发生。
+
+**顺带记一条不在本票、也不在本仓的差距**：字符串字段这条路，上游当**字面文本**（payload 分支，
+`resolve.ts:198-200`），本仓解 JSON——票 03 当初记成 parity 的那条上游依据读错了分支。已立
+`.scratch/hashline-upstream-parity/issues/10-string-field-decodes-json-not-upstream.md`，并在那份
+spec 的差额表 03 行与落地段各加复议。

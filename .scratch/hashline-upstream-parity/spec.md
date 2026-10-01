@@ -30,6 +30,15 @@
 | 08 | 响应里的 `patch`/`diffLineNumbers` | `src/replace-diff.ts:566` `genPatch`；`src/replace-response.ts:157,162` | 只有带锚点的 `+/-/上下文` 行，无 unified patch、无行号数组 | 票 08（决策） |
 | 09 | 刻意不跟的实现 | 见票面 | — | 票 09（`wontfix` 记录） |
 
+> **2026-10-01 复议（票 10）——03 行的「上游证据」是错的。** 上游 `replace` 拿到**字符串**字段时走的是
+> payload 分支（`src/hashline/resolve.ts:198-200` → `parsePayloadText`），契约就是「the exact text to
+> write」：**原样写文本、不解 JSON**。包内实测（真实 `replace` 工具，落盘字节）：
+> `replacement_lines: "[]"` → 一行 `[]`；`replacement_lines: "[\"a\",\"b\"]"` → 一行 `["a","b"]`。
+> `decodeStringArray` 的**字符串分支**在 replace 路径上根本走不到——全仓除 `utils.ts` 自己，只有
+> `resolve.ts:203` 一处调用它，而那处拿到的是数组。所以「字段本身是字符串就解回数组」是本仓**自己的**
+> 读法，票 03 当初把它记成了 parity。见
+> `.scratch/hashline-upstream-parity/issues/10-string-field-decodes-json-not-upstream.md`。
+
 ## 交叉：已有票覆盖的部分（**不重复立票**）
 
 - **`read` 行加行号 / 抄回 write 的标记从拒绝改剥离** → 已在
@@ -96,6 +105,9 @@
 - **03 字符串字段**：`replacement-arg`（`replace` 的 `replacement_lines` 与 `insert` 的 `lines` 共用）
   接受「字段本身是字符串」：JSON 数组解回数组、其余按换行切行，带 warning；`:strict-input` 会拒绝它。
   **行为变化**：`replacement_lines "X"` 以前是 `:not-an-array` 拒绝，现在是单行 `"X"`（`42` 等非字符串仍拒绝）。
+  > **2026-10-01 复议（票 10）**：上面那句里的「上游」不成立——上游的字符串字段是 payload，原样写文本。
+  > 「非空 JSON 字符串数组就解回数组」是本仓的读法。顺带：`[]` **空数组**那一格已由 `hashline-edit`
+  > 票 01 改成「写一行字面量 `[]`」——解包成零行等于悄悄删掉这一段。
 - **04 大小写提示**：`replace.clj` 的 `unresolvable!` 先查本会话是否持有只差大小写的锚点，命中就点名；
   否则维持原来的 `:not-read` / `:not-an-anchor` 两句。**行为变化**：只改一句拒绝话术，不挡任何编辑。
 - **05 页脚起始行**：`reading.clj` 的 `footer` 收真实起始行。**行为变化**：`offset>1` 且被截断时页脚从

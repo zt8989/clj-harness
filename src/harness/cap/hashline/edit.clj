@@ -19,11 +19,16 @@
   are), which is why their anchor column is blanked -- a model that copied a stale
   anchor because it looked available would be back to guessing.
 
-  THE SLIPS ARE FIXED, AND SAID SO. A model pastes the whole JSON array into one
-  element, embeds `\\n`, copies a row's `anchor│` prefix, or keeps the `+` from a
-  diff preview. Each of those has exactly one sensible reading, so it is applied
-  and REPORTED, with `:strict-input true` available for the sessions that would
-  rather see the slip refused than silently interpreted.
+  THE SLIPS ARE FIXED, AND SAID SO. A model sends the whole JSON array as the
+  FIELD or as the field's ONLY element, embeds `\n`, copies a row's `anchor│`
+  prefix, or keeps the `+` from a diff preview. Each of those has exactly one
+  sensible reading, so it is applied and REPORTED, with `:strict-input true`
+  available for the sessions that would rather see the slip refused than
+  silently interpreted. Two array-shaped inputs are deliberately NOT fixed,
+  because the bytes are what the caller asked for: a JSON array pasted into one
+  of several elements (the other elements are already exact, and unpacking this
+  one would move the line count), and the empty array -- which unpacks to no
+  lines at all, so `[]` stays a line and only the ARRAY `[]` deletes a range.
 
   WHAT IT WILL NOT FIX. A NUL byte (a text file cannot hold one, and writing it
   would break every later read), emptying a non-empty file (that is `write`'s job,
@@ -135,6 +140,39 @@
   [k v warnings]
   (anchor-arg k v warnings))
 
+(defn- json-string-array
+  "The strings a JSON array spells, when TEXT is one -- the EMPTY vector included.
+  Anything else is nil, which is the answer for text that is not an array at all."
+  [text]
+  (let [t (str/trim (str text))]
+    (when (and (str/starts-with? t "[") (str/ends-with? t "]"))
+      (let [parsed (try (json/read-str t) (catch Exception _ nil))]
+        (when (and (sequential? parsed) (every? string? parsed))
+          (vec parsed))))))
+
+(defn- json-array-lines
+  "`json-string-array`, but only when it holds at least one line.
+
+  The empty array is deliberately NOT a reading of a field of lines: it unpacks
+  to no lines at all, and the `[]` that deletes a range is the ARRAY, not the
+  text of one. Unpacking it would write bytes nobody asked for -- zero lines --
+  so it is left as the literal text it is. Upstream draws the same line
+  (`pi-hashline-edit-pro/src/utils.ts:319`, the `decoded.length > 0` guard)."
+  [text]
+  (let [parsed (json-string-array text)]
+    (when (seq parsed) parsed)))
+
+(defn- field-lines
+  "The whole field read as text: one line per newline, CRLF folded, and the
+  split said out loud when it made more than one line."
+  [v warnings]
+  (let [lines (vec (str/split (str/replace v "\r\n" "\n") #"\n" -1))]
+    (when (> (count lines) 1)
+      (swap! warnings conj
+             (str "Split the whole `replacement_lines` field into " (count lines)
+                  " lines on newlines.")))
+    lines))
+
 (defn- replacement-arg
   "`replacement_lines` as a vector of strings, with the four auto-fixes applied and
   reported."
@@ -148,23 +186,34 @@
     ;; The WHOLE FIELD arrived as one string: a JSON array of strings, or content to
     ;; split on newlines. Each has exactly one reading, so it is fixed and said.
     (string? v)
-    (let [t (str/trim v)]
-      (if (and (str/starts-with? t "[") (str/ends-with? t "]"))
-        (let [parsed (try (json/read-str t) (catch Exception _ nil))]
-          (if (and (sequential? parsed) (every? string? parsed))
-            (do (swap! warnings conj
-                       (str "Unwrapped a JSON array passed as the whole `replacement_lines`"
-                            " field."))
-                (vec parsed))
-            (throw (ex-info (str "`replacement_lines` must be an array of strings, one per line"
-                                 " ([] deletes the range); got " (pr-str v) ".")
-                            {:argument :replacement_lines :value v :reason :not-an-array}))))
-        (let [lines (vec (str/split (str/replace v "\r\n" "\n") #"\n" -1))]
-          (when (> (count lines) 1)
-            (swap! warnings conj
-                   (str "Split the whole `replacement_lines` field into " (count lines)
-                        " lines on newlines.")))
-          lines)))
+    (let [t     (str/trim v)
+          array (json-array-lines t)]
+      (cond
+        array
+        (do (swap! warnings conj
+                   (str "Unwrapped a JSON array passed as the whole `replacement_lines`"
+                        " field."))
+            array)
+
+        ;; The empty array is the one array-shaped text that is NOT unpacked (see
+        ;; `json-array-lines`): it unpacks to no lines at all, so the text is
+        ;; written as the one literal line it reads as.
+        (json-string-array t)
+        (do (swap! warnings conj
+                   (str "Kept the whole `replacement_lines` field literal: an empty"
+                        " JSON array unpacks to no lines, and the range-deleting []"
+                        " is the array itself."))
+            (field-lines v warnings))
+
+        ;; Array-shaped text that is not an array of STRINGS is still refused: it
+        ;; has no second reading, and a silent one would be worse than a name.
+        (and (str/starts-with? t "[") (str/ends-with? t "]"))
+        (throw (ex-info (str "`replacement_lines` must be an array of strings, one per line"
+                             " ([] deletes the range); got " (pr-str v) ".")
+                        {:argument :replacement_lines :value v :reason :not-an-array}))
+
+        :else
+        (field-lines v warnings)))
 
     (not (sequential? v))
     (throw (ex-info (str "`replacement_lines` must be an array of strings, one per line"
@@ -181,17 +230,38 @@
                                      {:argument :replacement_lines :index i
                                       :value line :reason :not-a-string}))
 
-                     ;; The whole array pasted into one element.
-                     (and (str/starts-with? (str/trim line) "[")
-                          (str/ends-with? (str/trim line) "]"))
-                     (let [parsed (try (json/read-str (str/trim line))
-                                       (catch Exception _ nil))]
-                       (if (and (sequential? parsed) (every? string? parsed))
-                         (do (swap! warnings conj
-                                    (str "Unwrapped a JSON array pasted into `replacement_lines`"
-                                         " element " (inc i) "."))
-                             parsed)
-                         [line]))
+                     ;; The whole array pasted into one element -- the field's ONLY
+                     ;; element, and one that holds a line: the slip this leniency is
+                     ;; for, and the one reading it has.
+                     (and (= 1 (count v)) (json-array-lines line))
+                     (do (swap! warnings conj
+                                (str "Unwrapped a JSON array pasted into `replacement_lines`"
+                                     " element " (inc i) "."))
+                         (json-array-lines line))
+
+                     ;; ...but never out of an element that is one of SEVERAL. The
+                     ;; contract is one element per line, so unpacking a middle one
+                     ;; would silently change the line count of a payload whose other
+                     ;; elements are already exact. Upstream unpacks no such element
+                     ;; (`pi-hashline-edit-pro/src/utils.ts:333`, the `length === 1`
+                     ;; gate on the whole field).
+                     (and (> (count v) 1) (json-string-array line))
+                     (do (swap! warnings conj
+                                (str "Kept `replacement_lines` element " (inc i)
+                                     " as the literal line it is: a JSON array is"
+                                     " unpacked only when it is the field's ONLY"
+                                     " element."))
+                         [line])
+
+                     ;; ...and never to NO lines. `[]` here is content -- an empty
+                     ;; Clojure arglist, an empty JSON row -- and a line that cannot
+                     ;; be written is a line the caller has no other way to spell.
+                     (json-string-array line)
+                     (do (swap! warnings conj
+                                (str "Kept `replacement_lines` element " (inc i)
+                                     " as the literal line it is: an empty JSON"
+                                     " array unpacks to no lines."))
+                         [line])
 
                      ;; Embedded newlines: one element per line is the contract,
                      ;; and splitting is the reading that was meant.
