@@ -8,6 +8,14 @@
 // `harness.cap.todos` writes its own docstring for. See
 // `.scratch/composer-todo-strip/spec.md`.
 //
+// IT IS A CARD, NOT A LINE OF TEXT ON THE COMPOSER'S BACKDROP (owner, 2026-10-01). It
+// carries the same rounded box the composer does -- `rounded-(--composer-radius)`,
+// `border-border/60`, `bg-(--composer-bg)` -- so it reads as a thing of its own ABOVE the
+// composer rather than as part of the grey frame around it, and a blank gap under it keeps
+// the two apart. The one strip that is joined to the composer is the QUEUE of messages
+// waiting to go (`components/composer-queue.tsx`), because that is what the composer is
+// about to send.
+//
 // ONE VERB: LOOK. There is no check, no delete, no reorder here. The model is the list's
 // only writer; the strip draws what it wrote and is not a second hand on it.
 //
@@ -110,7 +118,9 @@ export const TodoRows: FC<{ todos: readonly TodoItem[] }> = ({ todos }) => {
           key={index}
           data-slot="composer-todos-item"
           data-status={todo.status}
-          className="flex items-start gap-2 px-1.5 py-0.5 text-xs"
+          // `px-2` LINES THE ROWS UP WITH THE TRIGGER'S TEXT above them, which is `px-2`
+          // too -- the box around this list is the strip's own card now (owner, 2026-10-01).
+          className="flex items-start gap-2 px-2 py-0.5 text-xs"
         >
           <StatusIcon status={todo.status} />
           <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{todo.content}</span>
@@ -139,11 +149,16 @@ export const ComposerTodosView: FC<{ todos: readonly TodoItem[] | null }> = ({ t
       data-slot="composer-todos"
       open={open}
       onOpenChange={setOpen}
-      className="flex flex-col"
+      // A ROUNDED BOX OF ITS OWN, in the composer's own material -- so it reads as a card
+      // sitting above the composer rather than as a line of text on the grey backdrop behind
+      // it (owner, 2026-10-01). `mb-1.5` is the BLANK GAP under it, the same 6px the error
+      // card above uses and the same the frame pads itself with; the strip therefore never
+      // sits flush against the composer's box.
+      className="border-border/60 bg-(--composer-bg) mb-1.5 flex flex-col rounded-(--composer-radius) border"
     >
       <CollapsibleTrigger
         data-slot="composer-todos-toggle"
-        className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex w-full items-center gap-2 rounded-(--composer-radius) px-1.5 py-0.5 text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex w-full items-center gap-2 rounded-(--composer-radius) px-2 py-1.5 text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
       >
         <ListTodoIcon aria-hidden className="size-4 shrink-0" />
         <span data-slot="composer-todos-summary" className="min-w-0 flex-1 text-start">

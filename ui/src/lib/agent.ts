@@ -274,7 +274,7 @@ export class HarnessAgent extends HttpAgent {
   /// A REJECTION OUT OF `ready` IS SWALLOWED, and that is the ordering's own logic rather
   /// than politeness: the run is what creates the session, so a registration that failed
   /// must not become a refused run on top of it. The failure is worded by whoever passed
-  /// the hook -- the page puts the sentence on the row (`openErrors`) -- and if the id is
+  /// the hook -- the page files it as a session failure (`app.tsx`'s `reportFailure`,
   /// STILL unknown when the request arrives, the edge's own refusal is the honest answer
   /// to give the person.
   constructor(config: HarnessAgentConfig) {

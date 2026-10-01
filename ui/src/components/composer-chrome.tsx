@@ -112,6 +112,10 @@ import { ContextRing } from "./context-ring";
 import { SessionNumbers } from "./composer-numbers";
 import { ComposerStats } from "./composer-stats";
 import { ComposerTodos } from "./composer-todos";
+import { ComposerGoal } from "./composer-goal";
+import { ComposerQueue } from "./composer-queue";
+import { SessionErrorCard } from "./session-error-card";
+import { useSessionFailure } from "./session-error-state";
 import { Picker } from "./picker";
 // THE SENTENCE A CONVERSATION THE SERVER IS STILL ANSWERING USED TO OWE IS GONE (ticket 09
 // of `.scratch/session-after-refresh`): what stands there now is a STOP button, drawn in
@@ -855,7 +859,10 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
     attachmentGuard.subscribe,
     attachmentGuard.current,
   ).refusal;
-
+  // WHAT THIS SESSION FAILED AT, if it failed at all -- read off the context the host
+  // provides, because the card belongs here and this frame cannot be handed a prop (owner,
+  // 2026-10-01). Null is the ordinary answer and draws nothing.
+  const failure = useSessionFailure();
   if (threadId === null) return <>{children}</>;
 
   return (
@@ -877,9 +884,26 @@ export const ComposerFrame: FC<PropsWithChildren> = ({ children }) => {
             (ticket 09): the composer's own action row draws a STOP there instead
             (`thread.aui.tsx`'s `ComposerStop`), because the thing that was shut is a
             thing a person can now act on. */}
-        {/* THE TASK LIST SITS ABOVE THE INPUT -- the same slot the context bar leaves once
-            the conversation starts, so the two never meet and neither has to be ordered. */}
+        {/* THE STACK ABOVE THE INPUT, IN THE ORDER THE OWNER ASKED FOR (owner,
+            2026-10-01), top to bottom: WHAT FAILED, this session's GOAL, its TASK LIST, the
+            QUEUE of messages waiting to go, and then the composer itself.
+            --
+            THE GAPS ARE WHAT SEPARATE THEM, AND THE LAST ONE HAS NONE. Every block that
+            DRAWS carries a `mb-1.5` blank gap under it, so each reads as a card of its own
+            rather than as part of the composer -- and so a stack of them never sits flush
+            against the composer's box. The QUEUE is the exception and carries none: a
+            queued message is what this composer is about to send, so those two are one
+            thing and are joined. The goal and the queue are RESERVED SLOTS that draw nothing
+            yet (`composer-goal.tsx`, `composer-queue.tsx`); they render null, so a session
+            with neither shows the same stack minus those two rows. */}
+        {/* The failure card is its own file for the reason above: it is a block, and its
+            own sentence has to be renderable by a suite that has no DOM. */}
+        {failure !== null && <SessionErrorCard failure={failure} />}
+        <ComposerGoal threadId={threadId} />
+        {/* THE TASK LIST, the same slot the context bar leaves once the conversation
+            starts -- so the two never meet and neither has to be ordered. */}
         <ComposerTodos threadId={threadId} />
+        <ComposerQueue threadId={threadId} />
         {children}
         {refusal !== null && (
           <p

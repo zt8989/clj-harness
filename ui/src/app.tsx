@@ -49,10 +49,14 @@
 // the honest answer -- the alternative would be a second writer for a file the
 // server already owns.
 //
-// A LOAD THAT FAILS LEAVES NO HOST. The server's own refusal -- a truncated or
-// corrupt log, a stem naming two files -- arrives at `onError`; the host is
-// dropped and the page falls back to the session it was on, so the sentence lands
-// on the row that was clicked and clicking it again is a retry.
+// A FAILURE A SESSION RAISES KEEPS ITS HOST (owner, 2026-10-01). The server's own refusal
+// -- a truncated or corrupt log, a stem naming two files -- AND a run that died both
+// arrive at this host's `onError`. It used to be read as "this session cannot be shown":
+// the host was dropped, the page fell back to another session, and the sentence landed
+// under the row in the left column -- so the conversation you were reading vanished and
+// the reason appeared where you were no longer looking. The failure is a fact about the
+// conversation in front of you, so the host stays and the sentence is drawn above the
+// composer (`SessionErrorContext` -> `components/session-error-card.tsx`).
 //
 // -------------------------------------------------------------- what is where
 //
@@ -83,6 +87,12 @@ import {
   type HeldSession,
 } from "@/components/composer-chrome";
 import { SessionRunContext, SessionWritableContext } from "@/components/session-run-state";
+// THE FAILURE A SESSION RAISED, drawn above the composer instead of under its row in
+// the left column (owner, 2026-10-01). The value travels as a context because the card
+// lives inside the copied element; `lib/session-error.ts` is what turns an `Error` into
+// the sentence and the JSON detail. See the header comment.
+import { SessionErrorContext } from "@/components/session-error-state";
+import { sessionFailureOf, type SessionFailure } from "@/lib/session-error";
 // THE TURN'S OWN WORD (ticket 02 of `.scratch/refreshed-turn-keeps-growing`): which turn the
 // server says is open, as a value this host holds and the message footer reads -- see
 // `lib/live-turn.ts` for why the run's word cannot answer that question.
@@ -823,7 +833,14 @@ const SessionHost: FC<{
   onStatus: (id: string, status: SessionStatus) => void;
   onTitle: (id: string, title: string | null) => void;
   onForget: (id: string) => void;
-  onError: (id: string, message: string) => void;
+  /// WHAT THIS SESSION FAILED AT, reported to the page rather than kept here -- the card
+  /// that draws it is inside the copied element, which this host renders as `children` and
+  /// so cannot hand a prop to. A `SessionFailure` is the error's sentence and its JSON
+  /// (`lib/session-error.ts`); `null` CLEARS it, which is what a new run does.
+  ///
+  /// IT IS NOT A REASON TO DROP THE HOST ANY MORE: a session that failed is still the
+  /// session somebody is reading, and the sentence belongs above its composer.
+  onFailure: (id: string, failure: SessionFailure | null) => void;
   /// WHAT THIS SESSION'S RECORD LOOKS LIKE, reported to the page rather than kept
   /// here: the sentence is drawn by the column, which this host renders as
   /// `children` and therefore cannot hand a prop to. `null` is the ordinary answer
@@ -843,7 +860,7 @@ const SessionHost: FC<{
   /// so does the moment the request is built.
   onReady: (id: string) => Promise<void>;
   children: ReactNode;
-}> = ({ threadId, read, visible, onStatus, onTitle, onForget, onError, onRecord, onWindow, onReady, children }) => {
+}> = ({ threadId, read, visible, onStatus, onTitle, onForget, onFailure, onRecord, onWindow, onReady, children }) => {
   // The agent is built ONCE for this host and owns this session's id for the
   // host's whole life. Rebuilding it would throw the thread away mid-run -- the
   // same reason the old single-agent memo had an empty dependency list, paid per
@@ -917,11 +934,20 @@ const SessionHost: FC<{
   const ranSomething = useRef(false);
   const [ownRun, setOwnRun] = useState(false);
   const ownRunNow = useRef(false);
-  const reportOwnRun = useCallback((running: boolean) => {
-    if (running) ranSomething.current = true;
-    ownRunNow.current = running;
-    setOwnRun(running);
-  }, []);
+  const reportOwnRun = useCallback(
+    (running: boolean) => {
+      if (running) {
+        ranSomething.current = true;
+        // A RUN THAT STARTS REPLACES THE LAST FAILURE: the card above the composer is
+        // about the answer that broke, and sending again is how somebody asks for a new
+        // one -- leaving the old sentence up would say the new answer failed too.
+        onFailure(threadId, null);
+      }
+      ownRunNow.current = running;
+      setOwnRun(running);
+    },
+    [threadId, onFailure],
+  );
 
   /// WHAT THE SERVER SAYS THIS SESSION IS DOING, as the window last reported it: `running`
   /// while a run of this conversation is in flight in the harness process -- WHETHER OR NOT
@@ -1023,7 +1049,7 @@ const SessionHost: FC<{
       threadList: { threadId },
     },
     onError: (error) => {
-      // A CANCELLATION IS NOT A HOST FAILURE (ticket 09 of `.scratch/session-after-refresh`).
+      // A CANCELLATION IS NOT A FAILURE (ticket 09 of `.scratch/session-after-refresh`).
       //
       // WHEN THIS PAGE PRESSES STOP, the server ends the run and its `code: "stopped"` terminal
       // reaches `lib/agent.ts`, which turns it into the library's cancellation channel
@@ -1031,14 +1057,17 @@ const SessionHost: FC<{
       // turn is drawn "Cancelled" -- BUT it also hands the same error to this callback first,
       // and the runtime only suppresses that when its OWN controller was aborted (which it was
       // not: the stop was a request to the server, not a local abort). Left alone, this page
-      // would set `openErrors[threadId]` for a run that ended exactly as somebody asked, and
-      // the whole session column would be dropped for it.
+      // would draw an error card for a run that ended exactly as somebody asked.
       //
       // SO THE NAME IS THE TEST, exactly as it is on the way in (`asAbort`): an error the
       // client renamed to `AbortError` is a run that ended because somebody stopped it, and
-      // there is no host failure to report.
+      // there is no failure to report.
       if (error.name === "AbortError") return;
-      onError(threadId, error.message);
+      // EVERYTHING ELSE IS A FAILURE ABOUT THIS CONVERSATION, and it is reported rather than
+      // acted on here: the page keeps it for the session and the composer's frame draws it
+      // (`SessionErrorContext`). The host stays, so the conversation you were reading is still
+      // the thing the sentence is about.
+      onFailure(threadId, sessionFailureOf(error));
     },
   });
 
@@ -1215,7 +1244,12 @@ const SessionColumn: FC<{
   /// somebody sends. Handed down so the composer can tell the two kinds of session
   /// apart; see `heldSession`.
   binds: Map<string, string | null>;
-}> = ({ threadId, view, onView, folded, record, window, binds, title }) => {
+  /// THE FAILURE THIS SESSION RAISED, or null while it has none -- kept by the page for
+  /// the reason `record` is (the fact arrives on the host, which renders this column as
+  /// `children`), and PROVIDED AS A CONTEXT rather than drawn here: the card belongs above
+  /// the composer, which is inside the copied element.
+  failure: SessionFailure | null;
+}> = ({ threadId, view, onView, folded, record, window, binds, title, failure }) => {
   const { t } = useTranslation();
   /// THE COMPOSER'S STOP, AS A COMPONENT THE ELEMENT CAN DRAW (ticket 09 of
   /// `.scratch/session-after-refresh`): it carries THIS session's id, which is what the
@@ -1237,6 +1271,10 @@ const SessionColumn: FC<{
           be written to. NESTED INSIDE the id, because it is the same fact -- this
           session's -- and the same bar reads both. See `heldSession`. */}
       <HeldSessionContext.Provider value={heldSession(threadId, binds)}>
+      {/* AND WHAT THIS SESSION FAILED AT, if it failed at all -- for the same reason and
+          by the same door as the run's own word (`SessionRunContext`): the card is inside
+          the copied element and cannot be handed a prop. See `session-error-state.ts`. */}
+      <SessionErrorContext.Provider value={failure}>
       <div className="flex h-full min-h-0 min-w-0 flex-col">
         {/* The switch sits ABOVE the column. The trajectory reads the run's own
             state for its refetch trigger, and it does that INSIDE the runtime
@@ -1342,6 +1380,7 @@ const SessionColumn: FC<{
           )}
         </div>
       </div>
+      </SessionErrorContext.Provider>
       </HeldSessionContext.Provider>
     </ThreadIdContext.Provider>
   );
@@ -1532,9 +1571,12 @@ export function App() {
   // the same reason the record's health does -- the column is drawn as the HOST's
   // `children`, so a host cannot hand it a prop.
   const [windows, setWindows] = useState<Record<string, WindowControls | null>>({});
-  // The sessions whose history would not load, keyed by session, so the refusal
-  // lands on the row that was clicked.
-  const [openErrors, setOpenErrors] = useState<Record<string, string>>({});
+  // WHAT EACH SESSION FAILED AT, keyed by session -- the sentence and its JSON detail,
+  // as `lib/session-error.ts` builds it. It replaced `openErrors` (owner, 2026-10-01) and
+  // with it the two things the old map did: a failure no longer lands on the session's row
+  // in the left column, and a session that failed is no longer DROPPED. `null` for a
+  // session is the ordinary answer (no failure, or one a new run cleared).
+  const [sessionErrors, setSessionErrors] = useState<Record<string, SessionFailure>>({});
   // WHICH VIEW THE COLUMN SHOWS. Session-scoped UI state and deliberately NOT
   // persisted: it is a way of looking at the conversation in front of you, not a
   // preference about sessions, and a stored one would surprise a reader on the
@@ -1637,37 +1679,37 @@ export function App() {
         let live = prev.live;
         if (existing === undefined) {
           live = [...live, { id, read, attempt: 0 }];
-        } else if (openErrors[id] !== undefined) {
-          // Its history would not load last time. Opening it again is a retry, so
-          // the host is remounted (the key carries the attempt) and the load runs
-          // once more.
+        } else if (sessionErrors[id] !== undefined) {
+          // IT FAILED LAST TIME, so opening it again is a retry: the host is remounted
+          // (the key carries the attempt) and its history is read once more. The card
+          // above the composer is the other way through -- a new run clears it -- and
+          // this one is for a history that would not load at all.
           live = live.map((host) =>
             host.id === id ? { ...host, attempt: host.attempt + 1 } : host,
           );
         }
         return { shown: id, live };
       });
-      setOpenErrors((prev) => dropKey(prev, id));
+      setSessionErrors((prev) => dropKey(prev, id));
     },
-    [openErrors],
+    [sessionErrors],
   );
 
-  /// A host whose history would not load LEAVES NO HOST: there is no conversation
-  /// behind it, so keeping it would mean an empty column pretending to be that
-  /// session. The page falls back to the last session it still has -- which is
-  /// where the old code left you, because a failed switch never moved the page.
-  const hostFailed = useCallback((id: string, message: string) => {
-    setOpenErrors((prev) => ({ ...prev, [id]: message }));
-    setRoster((prev) => {
-      const live = prev.live.filter((host) => host.id !== id);
-      const fallback = live[live.length - 1];
-      return {
-        shown: prev.shown === id && fallback !== undefined ? fallback.id : prev.shown,
-        live,
-      };
-    });
+  /// WHAT A SESSION FAILED AT, filed against the session it belongs to.
+  ///
+  /// THE HOST IS NOT TOUCHED. This replaced `hostFailed`, which removed the failing
+  /// session from the roster and wrote a sentence under its row in the left column -- so
+  /// a run that died took the conversation away with it, and a log that would not load
+  /// fell back to whatever session happened to be open. The failure is about the
+  /// conversation in front of the reader, so the conversation stays and the sentence is
+  /// drawn above its composer (`SessionColumn`'s `failure`).
+  ///
+  /// `null` CLEARS IT, which is what a new run does (`SessionHost`'s `reportOwnRun`).
+  const reportFailure = useCallback((id: string, failure: SessionFailure | null) => {
+    setSessionErrors((prev) =>
+      failure === null ? dropKey(prev, id) : { ...prev, [id]: failure },
+    );
   }, []);
-
   const reportStatus = useCallback((id: string, status: SessionStatus) => {
     setStatuses((prev) => {
       const current = prev[id];
@@ -1685,6 +1727,10 @@ export function App() {
     // a control left behind for a session that is restored later would draw the last
     // window's button over a page that has not read one yet.
     setWindows((prev) => dropKey(prev, id));
+    // AND ITS FAILURE, for the same reason: the sentence above the composer is about a
+    // conversation this page can still open, and one whose host is gone has nothing left
+    // to be about -- a reopened session starts from its own read.
+    setSessionErrors((prev) => dropKey(prev, id));
   }, []);
 
   /// MAKE THE SERVER KNOW THIS SESSION, IMMEDIATELY BEFORE ITS FIRST RUN REQUEST.
@@ -1709,13 +1755,12 @@ export function App() {
   /// gone, and the next run takes the server's own refusal into the conversation, which is
   /// the honest place for it.
   ///
-  /// A REFUSAL IS ALSO A SENTENCE ON THE ROW, through the same `openErrors` map a history
-  /// that would not load uses: a bind the server would not take (a project removed in
-  /// another tab) is a fact about the row the person clicked. It does NOT stop the run --
-  /// the run is what they asked for -- and if the id is still unknown when it arrives, the
-  /// edge's refusal is what the person sees: it reaches this page as a run error
-  /// (`useAgUiRuntime`'s `onError` -> `hostFailed`), which is a sentence on that same row.
-  /// The two failures therefore land in one place, and the run is never silently dropped.
+  /// A REFUSAL IS ALSO A FAILURE ABOUT THIS SESSION, through the same door a run's own
+  /// error takes (`reportFailure`): a bind the server would not take (a project removed
+  /// in another tab) is a sentence above this session's composer. It does NOT stop the
+  /// run -- the run is what they asked for -- and if the id is still unknown when it
+  /// arrives, the edge's refusal replaces this card with its own sentence. The two
+  /// failures therefore land in one place, and the run is never silently dropped.
   const registerPending = useCallback(
     async (id: string): Promise<void> => {
       if (!pendingBinds.current.has(id)) return;
@@ -1725,13 +1770,10 @@ export function App() {
         if (dir !== null) await bindThread(id, dir, tErrors);
         else await startTask(tErrors, id);
       } catch (failure: unknown) {
-        setOpenErrors((prev) => ({
-          ...prev,
-          [id]: failure instanceof Error ? failure.message : String(failure),
-        }));
+        reportFailure(id, sessionFailureOf(failure));
       }
     },
-    [tErrors],
+    [tErrors, reportFailure],
   );
 
   /// WHAT THIS PAGE LEARNS FROM A HOST: what a session it MINTED is CALLED, and nothing
@@ -2007,7 +2049,6 @@ export function App() {
           onListed={onListed}
           statuses={statuses}
           liveTitles={liveTitles}
-          openErrors={openErrors}
           onShow={showExisting}
           onShowFresh={showFresh}
           folded={folded}
@@ -2040,11 +2081,11 @@ export function App() {
             position exactly as they were -- the same reason the sidebar's drawer does not unmount
             the conversation behind it. */}
         <div className="min-h-0 min-w-0 flex-1">
-          {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ON ITS ROW, not
-              here: `registerPending`'s failure goes into `openErrors`, which the sidebar
-              draws under the session it belongs to. There is no "no session" box any more
-              (the roster mints one at mount, so the column is never empty), and there is
-              no ask whose refusal could leave one. */}
+          {/* AND A PAGE THAT COULD NOT REGISTER A MINTED SESSION SAYS SO ABOVE THAT
+              SESSION'S COMPOSER, not here: `registerPending`'s failure is filed through
+              `reportFailure`, the same door a run's own error takes. There is no "no
+              session" box any more (the roster mints one at mount, so the column is never
+              empty), and there is no ask whose refusal could leave one. */}
           {/* OPENING A SESSION IS THE PAGE'S, and a message's Fork asks for it through
               this: the fork lands on the server and the page switches to what it made
               (`showExisting`, the same door the sidebar's rows use). */}
@@ -2058,7 +2099,7 @@ export function App() {
               onStatus={reportStatus}
               onTitle={reportTitle}
               onForget={forgetStatus}
-              onError={hostFailed}
+              onFailure={reportFailure}
               onRecord={reportRecord}
               onWindow={reportWindow}
               onReady={registerPending}
@@ -2078,6 +2119,9 @@ export function App() {
                 // copy the sidebar's row does. `liveTitles` is only the page's own word
                 // for a session no listing has named yet.
                 title={storeTitles[host.id] ?? liveTitles[host.id] ?? null}
+                // WHAT THIS SESSION FAILED AT, if it failed at all -- filed by
+                // `reportFailure` and drawn above the composer (owner, 2026-10-01).
+                failure={sessionErrors[host.id] ?? null}
               />
             </SessionHost>
           ))}

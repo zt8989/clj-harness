@@ -63,6 +63,7 @@ import { normalizationSuite } from "./suites/normalization";
 import { composerTodosSuite } from "./suites/composer-todos";
 import { composerStateSuite } from "./suites/composer-state";
 import { composerContextBarSuite } from "./suites/composer-context-bar";
+import { sessionErrorSuite } from "./suites/session-error";
 import { settingsSessionsSuite } from "./suites/settings-sessions";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
@@ -81,7 +82,7 @@ import { settingsSessionsSuite } from "./suites/settings-sessions";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, trajectorySuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, sessionErrorSuite, trajectorySuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -592,7 +593,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 203 -> 205: the home's statistics are the right-hand column's third state
 /// (`.scratch/global-stats-panel/`) -- the trailing `…` that opens it, and the column itself,
 /// which draws two rankings on sight and folds the token-per-model one away.
-const EXPECTED_CASES = 205;
+const EXPECTED_CASES = 211;
 
 
 let total = 0;

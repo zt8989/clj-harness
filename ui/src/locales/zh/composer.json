@@ -45,5 +45,8 @@
       "inProgress": "进行中",
       "pending": "待处理"
     }
+  },
+  "error": {
+    "details": "详情"
   }
 }

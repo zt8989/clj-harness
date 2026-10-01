@@ -49,5 +49,8 @@
       "inProgress": "in progress",
       "pending": "pending"
     }
+  },
+  "error": {
+    "details": "Details"
   }
 }

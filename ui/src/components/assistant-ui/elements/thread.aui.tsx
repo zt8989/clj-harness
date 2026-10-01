@@ -87,7 +87,6 @@ import {
   type AssistantState,
   BranchPickerPrimitive,
   ComposerPrimitive,
-  ErrorPrimitive,
   groupPartByType,
   MessagePrimitive,
   SuggestionPrimitive,
@@ -638,15 +637,12 @@ const ComposerAction: FC = () => {
   );
 };
 
-const MessageError: FC = () => {
-  return (
-    <MessagePrimitive.Error>
-      <ErrorPrimitive.Root className="aui-message-error-root border-destructive bg-destructive/10 text-destructive dark:bg-destructive/5 mt-2 rounded-md border p-3 text-sm dark:text-red-200">
-        <ErrorPrimitive.Message className="aui-message-error-message line-clamp-2" />
-      </ErrorPrimitive.Root>
-    </MessagePrimitive.Error>
-  );
-};
+// NO ERROR IS DRAWN IN THE CONVERSATION (owner, 2026-10-01). Upstream's
+// `MessagePrimitive.Error` used to put a red alert under the failed turn -- and the same
+// failure was then said a second time, in a second place, with a different amount of it.
+// A failure is now drawn ONCE, in the strip above the composer
+// (`components/session-error-card.tsx`), which is where the composer -- the thing a person
+// acts on next -- is. Nothing here draws it.
 
 const AssistantMessage: FC = () => {
   const {
@@ -863,7 +859,9 @@ const AssistantMessage: FC = () => {
             }
           }}
         </MessagePrimitive.GroupedParts>
-        <MessageError />
+        {/* NO ERROR IS RENDERED IN THIS MESSAGE (owner, 2026-10-01) -- see the note where
+            the error component used to live. The same failure is drawn once, above the
+            composer, and nowhere else. */}
       </div>
 
       <div

@@ -305,11 +305,11 @@ type SidebarProps = {
   /// row must not be given. The page speaks only for a conversation it started itself
   /// (`app.tsx`'s `minted`), and the store answers for everything else.
   liveTitles: Record<string, string>;
-  /// The refusals that came from SESSIONS rather than from this component -- a
-  /// history that would not load, keyed by the session it would not load for.
-  /// The page owns them because the load happens in a host, not here; they are
-  /// drawn in exactly the same place as this component's own row errors.
-  openErrors: Record<string, string>;
+  /// A SESSION'S OWN FAILURE IS NOT HERE ANY MORE (owner, 2026-10-01). It used to arrive as a
+  /// map of session id to a sentence and be drawn under the session's row; it is now drawn
+  /// above that session's composer (`app.tsx`'s `reportFailure` ->
+  /// `components/session-error-card.tsx`), so this column carries only the failures its OWN
+  /// rows raise.
   /// SHOW A SESSION THAT HAS A CONVERSATION: host it if it has no host yet and
   /// rebuild its history once, then put it on screen.
   onShow: (threadId: string) => void;
@@ -378,7 +378,6 @@ export const Sidebar: FC<SidebarProps> = ({
   currentThreadId,
   statuses,
   liveTitles,
-  openErrors,
   onShow,
   onShowFresh,
   onListed,
@@ -451,7 +450,7 @@ export const Sidebar: FC<SidebarProps> = ({
   // the mount effect below leans on that: a `refresh` whose identity moved is an effect
   // that re-reads. `onListed` is NOT stable: its identity moves when the page's restore
   // finishes (`app.tsx`'s `pending` goes from an id to null) and whenever a history
-  // fails to load (`show` depends on `openErrors`). Depending on it was a SECOND
+  // fails to load (`show` depends on `sessionErrors`). Depending on it was a SECOND
   // `GET /api/projects` at every page load, one more the moment a refusal was drawn, and
   // a closed-and-reopened host socket on both (measured 2026-09-29). The ref is written
   // by an effect declared FIRST, so it is the current render's callback before either
@@ -590,8 +589,11 @@ export const Sidebar: FC<SidebarProps> = ({
   ///
   /// The rebuild that used to happen here (and whose server-side refusal used to be
   /// caught here) now belongs to the host: it loads its own history once, when it
-  /// is first mounted. A history that will not load comes back through
-  /// `openErrors`, so the sentence still lands on the row that was clicked.
+  /// is first mounted. A history that will not load no longer lands here: the session
+  /// stays on screen and the sentence is drawn above its composer (owner, 2026-10-01).
+  /// What opening the row again does is RE-CREATE the host -- `app.tsx`'s `show` remounts
+  /// a session it still holds a failure for -- which is the retry for a log that would not
+  /// load.
   // `projectPath` is NULL for a TASK, and null is a fact rather than a missing
   // argument: the pin is dropped instead of pointed at something (see `selected`).
   const openThread = async (threadId: string, projectPath: string | null) => {
@@ -1256,11 +1258,9 @@ export const Sidebar: FC<SidebarProps> = ({
                     parked={(statuses[task.threadId] ?? IDLE).parked}
                     liveTitle={liveTitles[task.threadId] ?? null}
                     onOpen={() => void openThread(task.threadId, null)}
-                    error={
-                      rowError?.id === task.threadId
-                        ? rowError.message
-                        : (openErrors[task.threadId] ?? null)
-                    }
+                    // THE ROW'S OWN REFUSAL, and the only one drawn here now: a session's
+                    // own failure is above its composer, not under this row (owner, 2026-10-01).
+                    error={rowError?.id === task.threadId ? rowError.message : null}
                     actions={
                       <ThreadListItemAction
                         data-slot="thread-list-item-archive"
@@ -1302,7 +1302,6 @@ export const Sidebar: FC<SidebarProps> = ({
             statuses={statuses}
             liveTitles={liveTitles}
             rowError={rowError}
-            openErrors={openErrors}
             removeError={projectError?.path === project.path ? projectError.message : null}
             onOpen={(threadId) => void openThread(threadId, project.path)}
             onArchive={(threadId, archived) => void archive(project, threadId, archived)}
@@ -1352,11 +1351,7 @@ export const Sidebar: FC<SidebarProps> = ({
                     parked={(statuses[session.threadId] ?? IDLE).parked}
                     liveTitle={liveTitles[session.threadId] ?? null}
                     onOpen={() => void openThread(session.threadId, project?.path ?? null)}
-                    error={
-                      rowError?.id === session.threadId
-                        ? rowError.message
-                        : (openErrors[session.threadId] ?? null)
-                    }
+                    error={rowError?.id === session.threadId ? rowError.message : null}
                     actions={
                       <ThreadListItemAction
                         data-slot="thread-list-item-archive"
@@ -1528,7 +1523,6 @@ const ProjectSection: FC<{
   /// the same reporter and is read the same way: per row, by id.
   liveTitles: Record<string, string>;
   rowError: RowError;
-  openErrors: Record<string, string>;
   removeError: string | null;
   onOpen: (threadId: string) => void;
   onArchive: (threadId: string, archived: boolean) => void;
@@ -1543,7 +1537,6 @@ const ProjectSection: FC<{
   statuses,
   liveTitles,
   rowError,
-  openErrors,
   removeError,
   onOpen,
   onArchive,
@@ -1614,16 +1607,10 @@ const ProjectSection: FC<{
       parked={(statuses[session.threadId] ?? IDLE).parked}
       liveTitle={liveTitles[session.threadId] ?? null}
       onOpen={() => onOpen(session.threadId)}
-      // The row's own refusal, from EITHER source: this component's (`rowError`, a
-      // row write that failed) or the page's (`openErrors`, a history that would
-      // not load). Same place, because it is the same promise to the reader --
-      // the sentence lands under the row that was clicked, never at the top of
-      // the list for them to match up.
-      error={
-        rowError?.id === session.threadId
-          ? rowError.message
-          : (openErrors[session.threadId] ?? null)
-      }
+      // THE ROW'S OWN REFUSAL -- a row write that failed (archive, unarchive). A
+      // SESSION'S OWN FAILURE IS NOT DRAWN HERE ANY MORE: it stays above that session's
+      // composer, where the conversation it is about still is (owner, 2026-10-01).
+      error={rowError?.id === session.threadId ? rowError.message : null}
       actions={
         <ThreadListItemAction
           data-slot="thread-list-item-archive"
