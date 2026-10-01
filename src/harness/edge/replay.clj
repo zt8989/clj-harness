@@ -1415,11 +1415,32 @@
        (seq steps) (let [i (last steps)] {:cut (inc i) :at i :step-seq i})
        :else       nil))))
 
-(defn- compaction-summary
-  "The message the model reads in a compacted range: one ordinary user message wrapping the
-  summary text, so no consumer has to learn a new message shape."
+(def checkpoint-preamble
+  "The words that turn a summary into a CHECKPOINT: they say it condenses an EARLIER span of
+  this same conversation, and they point the model at the messages that FOLLOW it.
+
+  COPIED VERBATIM FROM THE REFERENCE (`@deepseek-ai/dsh@0.1.5-rc.2`,
+  `packages/compaction/compaction-basic/src/summarizer.ts`, `CHECKPOINT_PREAMBLE`) because its
+  wording is the whole of the decision: 'Continue the task directly from the messages that
+  follow' is the one sentence this harness was missing, and a paraphrase would be a second
+  opinion about a sentence that exists to be recognised.
+
+  WHY IT IS NEEDED AT ALL (owner's incident, thread `a0621fce-...`, 2026-10-01): a summary with
+  no such framing is read as the PRESENT. That session woke from a fold with its own commit
+  17 minutes behind it, read the summary's `# State` (an OLD commit, tickets 'not yet done'),
+  and concluded that a second agent had done the work -- its own two uncommitted edits and its
+  own commit attributed to somebody else. The facts were all in the retained tail; what was
+  missing was a sentence saying that the tail is the newer half."
+  (str/join " "
+            ["This is an automatically generated checkpoint condensing an earlier span of the"
+             "conversation to free up context. Treat the captured context as established background"
+             "and build on it without restating it. Continue the task directly from the messages"
+             "that follow, without acknowledging this checkpoint."]))
+
+(defn compaction-summary
+  "SUMMARY TEXT -> the message the model reads in a compacted range: `checkpoint-preamble`, a blank line, then one ordinary user message wrapping the summary in its tags -- the shape a reader can find (the tag) and a model can place (the preamble)."
   [text]
-  {:role "user" :content (str "<compacted-summary>" text "</compacted-summary>")})
+  {:role "user" :content (str checkpoint-preamble "\n\n<compacted-summary>" text "</compacted-summary>")})
 
 (defn- apply-compaction
   "Replace one range of SURFACE (a vector of {:id :message}) with its summary. The range is

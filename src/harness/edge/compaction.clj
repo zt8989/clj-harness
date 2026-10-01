@@ -31,16 +31,72 @@
             [harness.kernel.llm :as llm]))
 
 (def summary-instruction
-  "What the summarizer is told. It asks for the facts a continuing model needs and for
-  nothing invented -- exact paths, commands, error strings, identifiers, numbers, and what
-  was already decided (including what was tried and failed)."
-  "Summarize the conversation above so another model can continue the work from it. Keep
-exact file paths, commands, error strings, identifiers, numbers, function signatures and
-decisions already made, including anything that was tried and failed. Then, under a heading
-`Already produced`, list the concrete things this range has produced -- branches and
-worktrees created, files written or edited, anything left uncommitted -- verbatim, because a
-model that cannot see what it already made mistakes its own work for somebody else's. Do
-not invent anything. Be concise.")
+  "What the summarizer is told.
+
+  THE SECTION LIST, THE RULES AND THEIR WORDING ARE COPIED FROM THE REFERENCE
+  (`@deepseek-ai/dsh@0.1.5-rc.2`, `packages/compaction/compaction-basic/src/summarizer.ts`,
+  `COMPACTION_INSTRUCTION`). Two things in it are the whole reason for copying rather than
+  paraphrasing, and both are about the SEAM the summary has to be read against:
+
+    - the last two sections are `## Current Work` and `## Next Step`: a summary written under
+      this skeleton cannot be a 'state of the world' that stops at an old commit -- it has to
+      say where the work stood AT THE CHECKPOINT and what the single next action is;
+    - `Do NOT mention this summarization request or that the context was compacted` -- the
+      model is told not to editorialise about provenance. The summary of the owner's incident
+      (thread `a0621fce-...`, 2026-10-01) said 'not created by me -- reported by git now',
+      which is exactly the kind of sentence that made it read its own work as a stranger's.
+
+  OUR ONE ADDITION is the `Already produced` list, which `summary-content` appends to this
+  message from `product-facts` -- the artifacts read off the tool calls. It is kept because its
+  own docstring names the failure it guards ('a model that cannot see what it already made
+  mistakes its own work for somebody else's'), and the reference has no equivalent."
+  (str/join
+   "\n"
+   ["You are now acting as a compaction engine for this AI coding assistant. Condense the"
+    "conversation ABOVE into a structured checkpoint that lets another model resume the work"
+    "with no loss of essential context."
+    ""
+    "Output EXACTLY the Markdown structure below: keep every section, in order. Use terse"
+    "bullets, not prose paragraphs. Write \"(none)\" for an empty section -- never drop a"
+    "section."
+    ""
+    "## Primary Request and Intent"
+    "- [the user's original and evolving goals; quote verbatim where the exact wording matters]"
+    ""
+    "## Key Technical Concepts"
+    "- [technologies, frameworks, patterns, and conventions in play]"
+    ""
+    "## Files and Code"
+    "- [exact path: why it matters, key changes or snippets]"
+    ""
+    "## Errors and Fixes"
+    "- [error: how it was resolved, plus any related user feedback]"
+    ""
+    "## Pending Jobs"
+    "- [explicitly requested work not yet completed]"
+    ""
+    "## Current Work"
+    "- [precisely what was in progress at this checkpoint]"
+    ""
+    "## Next Step"
+    "- [the single next action, directly in line with the most recent request, or \"(none)\"]"
+    ""
+    "## Critical Context"
+    "- [decisions and their rationale, constraints, user preferences, open questions, data"
+    "needed to continue]"
+    ""
+    "Rules:"
+    "- Write concise English engineering prose. Preserve exact file paths, commands, error"
+    "strings, identifiers, numeric values, function signatures, and syntax fragments."
+    "- Capture user feedback and explicit instructions faithfully, especially corrections."
+    "- Do NOT mention this summarization request or that the context was compacted."
+    "- Output only the checkpoint text: do not call any tool or take any other action."
+    "- If the conversation already contains a <compacted-summary> block, it is a PRIOR"
+    "checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones,"
+    "and merge newer information into a single consolidated summary under the same structure."
+    "- The artifacts this range has produced are listed for you at the end of this message"
+    "under `Already produced`, read off the tool calls; do not invent entries and do not drop"
+    "the list."]))
 
 (def ^:private shell-productions
   "The shell shapes that CREATE an artifact a later model must not re-create, as patterns
@@ -354,6 +410,28 @@ not invent anything. Be concise.")
                       {:key :overflow-retries :value n :reason :bad-overflow-retries})))
     n))
 
+(def default-max-tokens
+  "How many OUTPUT tokens one summary call may spend when `config.edn` says nothing: 8192 --
+  the reference's own default (`@deepseek-ai/dsh@0.1.5-rc.2`, compaction-basic's `maxTokens`).
+  A checkpoint that runs into this cap is TRUNCATED, and half a state block is worse than none:
+  the caller refuses it rather than landing it (`harness.edge.http`'s summary call checks the
+  endpoint's own finish reason)."
+  8192)
+
+(defn check-max-tokens!
+  "Validate one configured output cap, or throw naming what is wrong. Split out for the same reason `check-ratios!` is: the refusal can be asserted without a file."
+  [n]
+  (when-not (and (integer? n) (pos? n))
+    (throw (ex-info (str "config.edn's :session :compaction max-tokens must be a positive"
+                         " whole number of output tokens, but it is " (pr-str n))
+                    {:key :max-tokens :value n :reason :bad-compaction-value})))
+  n)
+
+(defn max-tokens
+  "The output cap one summary call carries for this session: `config.edn`'s \":compaction :max-tokens\", defaulting to `default-max-tokens`."
+  [thread-id]
+  (check-max-tokens! (get (block thread-id) :max-tokens default-max-tokens)))
+
 ;; ------------------------------------------------------------------------ the lock
 
 (defn- lifecycle-rows
@@ -611,7 +689,24 @@ not invent anything. Be concise.")
                                           :blocks      blocks})]
         (append "compaction/start" {:compactionId id :instruction instruction})
         (try
-          (let [summary (summarize (:messages head) instruction)]
+          (let [summary (summarize (:messages head) instruction)
+                ;; THE SUMMARY HAS TO COME OUT SMALLER THAN WHAT IT REPLACES -- the check the
+                ;; reference makes (`dsh-compaction-basic`'s `summarizeCompaction`: a framed
+                ;; checkpoint that does not price below the shadowed range is refused). We had
+                ;; only the ENTRY guard (`min-head-tokens`: the head must be worth folding); this
+                ;; is the EXIT one. A summary that is not smaller would leave the pressure exactly
+                ;; where it was and burn a model call doing it, and `.scratch/compaction-shape`
+                ;; has the incident that class of failure caused (four folds in two and a half
+                ;; minutes, every one folding a summary into another). The MESSAGE is priced, not
+                ;; the text: the preamble and the tags are part of what the next request carries.
+                framed  (pressure/estimate-message (replay/compaction-summary summary))]
+            (when (>= framed (:head-tokens head))
+              (throw (ex-info (str "the summary is not smaller than the range it replaces ("
+                                   framed " estimated tokens framed >= " (:head-tokens head)
+                                   " shadowed)")
+                              {:reason :summary-not-smaller
+                               :framed framed
+                               :shadowed (:head-tokens head)})))
             (append "context/compacted"
                     {:compactionId id
                      :summary      summary

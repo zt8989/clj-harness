@@ -76,8 +76,9 @@
            (:instruction (second (first @written))))
         (str "the PROMPT the summarizer was handed is on the start row -- the whole thing, not a"
              " hash of it, so a reader can reconstruct what was asked (owner, 2026-09-28)"))
-    (is (= "<compacted-summary>SUMMARY of 4</compacted-summary>" (:content (first view)))
-        "the projection stands one summary where the four compacted nodes stood")
+    (is (= (:content (replay/compaction-summary "SUMMARY of 4")) (:content (first view)))
+        (str "the projection stands one summary where the four compacted nodes stood, in the one",
+             " shape the fold mints (preamble + tags; `replay/compaction-summary`)"))
     (is (= 3 (count view)) "one summary + the two retained")
     (is (= 6 (count (replay/entries all))) "the conversation still holds every original")))
 
@@ -386,6 +387,83 @@
               "the facts section is really in the prompt the summarizer was handed")
           (is (str/includes? asked made)
               "and it names the file this range's own tool call wrote")))
+      (finally
+        (stop)
+        (io/delete-file log true)
+        (providers/use-provider! thread-id nil)))))
+
+;; ------------------------------------- the exit guards (ticket 05) and the prefix (ticket 07)
+
+(deftest a-summary-that-is-not-smaller-is-refused
+  ;; THE REFERENCE'S EXIT GUARD (`dsh-compaction-basic`'s `summarizeCompaction`: a framed
+  ;; checkpoint that does not price below the shadowed range is refused). We had only the ENTRY
+  ;; guard; without this one a summary that is no shorter lands, the pressure stays where it
+  ;; was, and a model call was burnt discovering it (`.scratch/compaction-shape`: four folds in
+  ;; two and a half minutes, every one folding a summary into another).
+  (let [written (atom [])
+        huge    (apply str (repeat 40000 "x"))
+        thrown  (try
+                  (compaction/perform! (six) {:window 1000 :retain-ratio 0.16
+                                              :append    (fn [k p] (swap! written conj [k p]))
+                                              :summarize (fn [_ _] huge)})
+                  nil
+                  (catch Throwable t t))]
+    (is (instance? Throwable thrown) "the compaction fails")
+    (is (str/includes? (ex-message thrown) "not smaller"))
+    (is (= ["compaction/start" "compaction/end"] (mapv first @written))
+        "the pair closes as a failure -- a compaction that failed is recorded as one")
+    (is (not-any? #(= "context/compacted" (first %)) @written)
+        "and NOTHING was landed: the conversation keeps its history")))
+
+(deftest the-output-cap-defaults-and-refuses-a-number-that-is-not-one
+  ;; The reference caps the summary call (8192 output tokens) and treats a truncated checkpoint
+  ;; as a hard error. The cap is configurable, so it is validated like every other number this
+  ;; harness takes from config.edn: by name.
+  (testing "nobody said anything: the reference's own 8192"
+    (is (= 8192 compaction/default-max-tokens))
+    (is (= compaction/default-max-tokens (compaction/max-tokens "cfg-default"))))
+  (testing "a legal cap passes through"
+    (is (= 4096 (compaction/check-max-tokens! 4096))))
+  (testing "a number that is not a positive whole one is refused, by name"
+    (doseq [bad [0 -1 1.5 :none "8192"]]
+      (let [t (try (compaction/check-max-tokens! bad) nil (catch Throwable e e))]
+        (is (instance? clojure.lang.ExceptionInfo t) (pr-str bad))
+        (is (str/includes? (ex-message t) "max-tokens") (pr-str bad))))))
+
+(deftest a-summary-call-rides-the-conversations-own-prefix
+  ;; THE REFERENCE'S CACHE TRICK (`dsh-compaction-basic`: 'makes the auxiliary call a genuine
+  ;; prefix of the last routed request, so the provider's warm prefix cache is reused'): the
+  ;; system message and the tool table, then the shadowed region, then the instruction.
+  ;;
+  ;; WHAT IS ASSERTED IS THE ARRAY THAT WENT OUT, read off the double's own record of it
+  ;; (`harness.fake`'s opt-in `:calls`): a request's shape is otherwise only observable on the
+  ;; wire.
+  (let [thread-id "compact-prefix"
+        rows      (mapv (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 25))
+        log       (plant! thread-id rows)
+        stop      (http/start! {:port 0})
+        calls     (atom [])
+        tools     [{:type "function" :function {:name "read"
+                                                 :description "d"
+                                                 :parameters {:type "object" :properties {}}}}]]
+    (providers/use-provider! thread-id (fake/scripted [{:content "THE SUMMARY"}] {:calls calls}))
+    (try
+      (let [result (#'http/run-compaction! thread-id (providers/current-provider thread-id)
+                                           (replay/read-records log) 128000
+                                           (compaction/config thread-id)
+                                           {:prefix [{:role "system" :content "THE PROMPT"}]
+                                            :tools  tools})
+            {:keys [messages tools] :as _asked} (last @calls)]
+        (is (some? result) "the compaction ran")
+        (is (some? (last @calls)) "the summary call reached the provider")
+        (is (= "THE PROMPT" (:content (first messages)))
+            "the summary call OPENS with the conversation's own system message")
+        (is (= ["read"] (mapv #(get-in % [:function :name]) tools))
+            "and carries the session's tool table -- the rest of the request's prefix")
+        (is (str/includes? (str (:content (last messages))) "compaction engine")
+            "with the instruction last, as always")
+        (is (not-any? #(= "system" (:role %)) (rest messages))
+            "and the conversation itself is not re-framed: the prefix is what a run is handed"))
       (finally
         (stop)
         (io/delete-file log true)

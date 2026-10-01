@@ -100,8 +100,14 @@
                a caller asks. THE KNOB A WALKTHROUGH NEEDS to watch an answer GROW --
                see the note beside it in the map below."
   ([turns] (scripted turns {}))
-  ([turns {:keys [thinking pace-ms]}]
+  ([turns {:keys [thinking pace-ms calls]}]
    {:protocol :fake :script (atom (vec turns)) :thinking (boolean thinking)
+    ;; WHAT THIS DOUBLE WAS HANDED, when the caller passed an atom as `:calls` (`llm/stream!`
+    ;; conj's {:messages .. :tools ..} into it per call). OPT-IN, so no existing pin pays for
+    ;; it -- and the reason it exists: a REQUEST's shape (what opens it, what it carries, what
+    ;; comes last) is otherwise only observable on the wire, and the traffic log is written by
+    ;; the openai-completions method rather than by a double.
+    :calls calls
     ;; HOW LONG EACH CHUNK OF THE STREAM TAKES, in milliseconds, and zero -- no pause at
     ;; all -- unless a caller asks (a walkthrough that has to SEE an answer grow does;
     ;; the offline suite must not, or every case that streams would pay for it). A REAL
@@ -179,7 +185,13 @@
   (when-let [i (first (keep-indexed (fn [i m] (when (= "reasoning" (:role m)) i)) messages))]
     (throw (ex-info (str "HTTP 422: " (reasoning-role-refusal i)) {:status 422}))))
 (defmethod llm/stream! :fake
-  [{:keys [script thinking] :as provider} messages on-event _thread-id]
+  [{:keys [script thinking calls] :as provider} messages on-event _thread-id]
+  ;; WHAT THIS DOUBLE WAS HANDED, when the caller passed an atom as `:calls`. Opt-in, and it
+  ;; exists because a REQUEST's shape (what opens it, what it carries, what comes last) is
+  ;; otherwise only observable on the wire -- and the traffic log is written by the
+  ;; openai-completions method, not by a double.
+  (when (some? calls)
+    (swap! calls conj {:messages (vec messages) :tools (:tools provider)}))
   ;; TWO FACTS, not one: `:thinking` says this is the KIND of vendor that enforces
   ;; the rule, and :reasoning-effort says THIS request is in thinking mode -- which
   ;; is what the vendor's sentence is conditioned on ("in the thinking mode"). A

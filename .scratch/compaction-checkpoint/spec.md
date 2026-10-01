@@ -138,8 +138,31 @@ uncommitted (23 path(s)):
 
 换成 a0621 那一发，第二段就会出现 `.worktrees/shell-03-07` 与它那两处未提交的 test 文件。
 
+## 已落地：03、04、05、07（照抄参考实现的那四件）
+
+参考实现指 `@deepseek-ai/dsh@0.1.5-rc.2`（上游 `github.com/deepseek-ai/deepseek-harness`）；
+本机拷贝在 `%TEMP%\dsh-ref`。照抄的都是**原句**，不是转述——它们要能被认出来。
+
+- **03 壳**（`replay/checkpoint-preamble`，`replay/compaction-summary`）：检查点前面多了
+  DSH 的 `CHECKPOINT_PREAMBLE` 原文，其中「Continue the task directly from the messages that
+  follow」正是这次缺的那一句。模型面 = 一段 preamble + 空行 + `<compacted-summary>` + 摘要 + 标签收尾。
+- **04 骨架**（`compaction/summary-instruction`）：换成 DSH 的固定八节（末两节 `## Current Work` /
+  `## Next Step`）、空节写 `(none)`、不许提这次压缩、上一次的 `<compacted-summary>` 要合并不要照抄。
+  我们自己的 `Already produced` 清单留着——DSH 没有它，而它挡的是同一个失效。
+- **05 出口守卫**：`perform!` 现在把拼好的检查点消息过估价器，**不小于被折区间就抛**、
+  一个字都不落（`context/compacted` 不写）；摘要调用带 `:max_tokens`（新 `compaction/max-tokens`，
+  默认 8192，坏值按名拒绝），端点回 `finish_reason: length`（被截断）时按失败处理。
+- **07 缓存前缀**：摘要调用现在带**会话自己的 system 消息 + 工具表**（`http/summary-prefix` +
+  `tools/specs`），于是它是上一发请求的真前缀；调用方手里没有这两样（人工 `/compact`、测试）
+  就交空，形状与从前一致。
+
+回归（都走真调用路径，不是手搓数组）：`the-summary-skeleton-ends-at-the-seam`、
+`a-summary-that-is-not-smaller-is-refused`、`the-output-cap-defaults-and-refuses-a-number-that-is-not-one`、
+`a-summary-call-rides-the-conversations-own-prefix`（读的是 `harness.fake` 新开的 `:calls`：
+它把「交给 provider 的那个数组」记下来，因为请求的形状否则只能在线上看）。
+
 ## Comments
 
-2026-10-01 — 01、02 已落地（分支 `compaction-checkpoint`），两张票按仓库规矩从
-`issues/` 删掉：造过什么记在这里与 git 里。03-07 留着等下一轮（03/04 是照抄 DSH 的壳与骨架，
-05 是出口守卫，06 是那 1/3 的调查，07 是缓存前缀）。
+2026-10-01 — 01/02 与 03/04/05/07 都已落地（分支 `compaction-checkpoint`），票按仓库规矩从
+`issues/` 删掉：造过什么记在这里与 git 里。**只剩 06**（live 面比记录折叠大出来的那 1/3）——它是
+调查，不是照抄；在那之前别再拿估价器给压缩记账。

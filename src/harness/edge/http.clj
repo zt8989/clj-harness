@@ -6253,6 +6253,20 @@
   ;; (a person's `/compact`, or a run crossing the threshold), so one lock is the right size.
   (Object.))
 
+(defn- summary-prefix
+  "ARRAY -> its leading `system` messages, as the `:prefix` a summary call rides on -- the half
+  of the request that is not a conversation entry (an unbound session, a manual compaction or a
+  test hands nil, and then the prefix is empty and the summary call goes out in the shape it
+  has always had).
+
+  WHAT IT IS FOR: a summary call carrying the conversation's own system message AND its tool
+  table is a genuine PREFIX of the last routed request, so the vendor's cache is reused and only
+  the instruction and the answer are cold (`run-compaction!`'s `:prefix` / `:tools`; the
+  reference does the same, `dsh-compaction-basic`'s README). Handing in `history` -- the array
+  the kernel was about to send -- is the honest spelling of it: whatever the run was given, the
+  summarizer is given first."
+  [array]
+  (vec (take-while #(= "system" (:role %)) (or array []))))
 (defn- run-compaction!
   "One compaction, against RECORDS with PROVIDER, measuring against WINDOW: summarize (ONE
   model call, bracketed like any other), write the rows, and tell the live session. Returns
@@ -6279,11 +6293,26 @@
         ;; post one below is still just an observer.
         pre       (hook/emit :pre-compact {:thread-id stem})
         summarize (fn [messages instruction]
-                    (let [specs []
+                    (let [specs  (vec (:tools opts))
+                          prefix (vec (:prefix opts))
                           ;; AND THIS SUMMARY IS A MODEL CALL TOO, so it carries the same
                           ;; idle guard the run path carries -- read off the session whose
                           ;; conversation is being summarized.
+                          ;;
+                          ;; IT CARRIES THE SESSION'S OWN TOOLS AND ITS SYSTEM MESSAGE when the
+                          ;; caller has them, and that is the reference's whole trick
+                          ;; (`dsh-compaction-basic`: 'makes the auxiliary call a genuine prefix
+                          ;; of the last routed request, so the provider's KV cache is reused'):
+                          ;; system + tools + the shadowed region IS the front of the conversation,
+                          ;; so the summary call buys a cold prefill for its own tail only. A
+                          ;; caller with no run in hand (the manual route) hands neither and gets
+                          ;; today's shape.
+                          ;;
+                          ;; AND IT CARRIES AN OUTPUT CAP (`compaction/max-tokens`, the reference's
+                          ;; 8192): a checkpoint that runs into the cap is truncated, and the
+                          ;; finish reason below refuses it rather than landing half a state block.
                           p     (assoc provider :tools specs
+                                       :max-tokens (compaction/max-tokens stem)
                                        :idle-timeout-ms (llm-timeout/idle-timeout-ms stem))]
                       (put "model/start" (dissoc (ev/model-start p specs) :type))
                       (try
@@ -6305,9 +6334,22 @@
                                            ;; shape, every recorded tool answer moved behind its
                                            ;; call, and the instruction last -- the same fold and
                                            ;; the same repair the run path uses.
-                                           (compaction/summary-messages messages instruction)
+                                           (compaction/summary-messages (into prefix messages)
+                                                                        instruction)
                                            (fn [_]) stem)]
                           (put "model/end" telemetry)
+                          ;; A CHECKPOINT THE ENDPOINT CUT OFF IS NOT A CHECKPOINT. The vendor says
+                          ;; so in its own finish reason (`length`), and the reference treats it as a
+                          ;; hard error for the same reason (half a state block reads like a whole
+                          ;; one). Refusing here closes the pair with the error and lands no
+                          ;; `context/compacted`, so the conversation keeps its history instead of a
+                          ;; summary nobody can trust.
+                          (when (= "length" (:finish-reason telemetry))
+                            (throw (ex-info (str "the summary hit its output cap ("
+                                                 (compaction/max-tokens stem)
+                                                 " tokens) and is truncated: no checkpoint was landed")
+                                            {:reason :summary-truncated
+                                             :max-tokens (compaction/max-tokens stem)})))
                           (let [content (:content message)]
                             (if (string? content) content (str content))))
                         (catch Throwable t
@@ -6432,7 +6474,13 @@
               _       (when-some [compacted (try
                                             (run-compaction! stem provider records
                                                              (:context-window provider) ratios
-                                                             {:aggressive? true})
+                                                             ;; THE ARRAY THIS RUN WAS HANDED, so the
+                                                             ;; summary call is a genuine prefix of it
+                                                             ;; (`:prefix` / `:tools` in
+                                                             ;; `run-compaction!`).
+                                                             {:aggressive? true
+                                                              :prefix (summary-prefix history)
+                                                              :tools  (tools/specs stem)})
                                             (catch Throwable _ nil))]
                         (emit (ag/compacted-frame compacted)))
               system  (vec (take-while #(= "system" (:role %)) history))
@@ -6486,7 +6534,9 @@
                                                    ;; is what has to come off (`plan`'s `:min-head-tokens`),
                                                    ;; or the fold would buy nothing and burn a summary call.
                                                    {:min-head-tokens (- (:pressureTokens answer)
-                                                                        (:thresholdTokens answer))})]
+                                                                        (:thresholdTokens answer))
+                                                    :prefix (summary-prefix history)
+                                                    :tools  (tools/specs stem)})]
                 ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
                 ;; The rows are written and the session's own model view has already moved, so the
                 ;; conversation IS compacted; the comparison below only decides whether THIS call
@@ -6545,8 +6595,13 @@
                                    ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
                                    ;; threshold must be what comes off, or the compaction is not
                                    ;; worth a summary call (`plan`'s `:min-head-tokens`).
+                                   ;; THE PREFIX IS THE REQUEST THE NEXT CALL WOULD CARRY (the
+                                   ;; live surface: system message first), so the summary call reuses
+                                   ;; the provider's cache for everything but its own tail.
                                    {:min-head-tokens (- (:pressureTokens answer)
-                                                        (:thresholdTokens answer))}))))))))
+                                                        (:thresholdTokens answer))
+                                    :prefix (summary-prefix (pressure/live-surface stem))
+                                    :tools  (tools/specs stem)}))))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
       nil)))

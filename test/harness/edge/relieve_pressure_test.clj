@@ -71,8 +71,10 @@
                 "the summary reached the record")
             (is (some? view) "and the caller is handed an array to send instead")
             (is (< (count view) (count array)))
-            (is (str/starts-with? (str (:content (first view))) "<compacted-summary>")
-                "and it is the compacted conversation, not the one handed in")
+            (is (str/starts-with? (str (:content (first view))) replay/checkpoint-preamble)
+                (str "and it is the compacted conversation, not the one handed in -- the checkpoint",
+                     " opens by saying it condenses an EARLIER span and that the messages after it",
+                     " are the newer half"))
             ;; AND THE RUN IS TOLD IN THE SAME BREATH (`.scratch/compaction-frames`): the frame
             ;; names the compaction the ROWS name, so the card a client draws is the one a rebuild
             ;; hands back afterwards.
