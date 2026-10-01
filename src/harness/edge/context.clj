@@ -18,13 +18,13 @@
   A stacked bar that does not reach its own total is a drawing that lies, and a
   fourth 'other' bucket would be a bucket nobody measured.
 
-  IT IS A PURE FUNCTION OF ITS TWO ARGUMENTS -- the records, and the ARRAY the chosen
-  call was handed (records->context, and see below for why the array is an argument) --
-  for the same reason the two sibling folds are: what can be asserted is the interesting
-  part. THE ARRAY IS NOT FOLDED HERE. Which messages a call carried is one rule, and it
-  lives with the fold that keeps one array per call (`harness.edge.pressure`'s anchor --
-  see `shares`); a second spelling of it here is a second chance to disagree, which is
-  exactly what the conversation bucket used to do. Walking a log is a second, thinner
+  IT IS A PURE FUNCTION OF ITS TWO ARGUMENTS -- the records, and the SIZES the chosen call's array
+  came to (records->context, and see `shares` for why they arrive as an argument) -- for the same
+  reason the two sibling folds are: what can be asserted is the interesting part. THE MESSAGES ARE
+  NOT FOLDED HERE, NOR MEASURED HERE. Which messages a call carried is one rule, and it lives with
+  the fold that keeps one array per call and measures each node once (`harness.edge.pressure`'s
+  band -- `sized` / `anchor-sizes`); a second spelling of it here is a second chance to disagree,
+  which is exactly what the conversation bucket used to do. Walking a log is a second, thinner
   function (log-context), and THE DIRECTORY IS THE CALLER'S.
 
   NOTHING HERE IS RE-DERIVED FROM TODAY'S CATALOG. A session can be switched to
@@ -178,22 +178,23 @@
   [key size] pairs, and the keys are the wire's spelling of each bucket -- system,
   tools, conversation.
 
-  FACE IS THE ARRAY THE CALL WAS HANDED, and it arrives as an argument rather than being
-  folded here. THE SIZES ARE THIS NAMESPACE'S, THE ARRAY IS NOT: which messages a call
-  carried is one rule, kept by the fold that snapshots an array per call (see
-  `harness.edge.pressure/anchor-face`). This split used to spell the rule itself -- the
-  conversation was \"this run's own rows\" -- and ADR 0002 means the history is not among
-  them: on a real session (2026-09-30, `.scratch/context-ring`) the tool table came out at
-  68.7% of a prompt it was under 3% of, and the conversation at a quarter of the window it
-  had almost all of.
+  SIZES IS WHAT THE BAND MEASURED for the array that call was handed -- `{:system n
+  :conversation n}`, in characters, kept as the messages arrived (`harness.edge.pressure/sized`).
+  THEY ARRIVE MEASURED RATHER THAN AS AN ARRAY, and that is the price of this section: every
+  message is measured exactly once, by the fold that can remember it between calls. THIS SPLIT
+  USED TO SPELL THE RULE ITSELF -- the conversation was \"this run's own rows\" -- and ADR 0002
+  means the history is not among them: on a real session (2026-09-30, `.scratch/context-ring`)
+  the tool table came out at 68.7% of a prompt it was under 3% of, and the conversation at a
+  quarter of the window it had almost all of.
 
-  THE THREE PARTITIONS ARE THE ARRAY'S OWN. The system message is the message whose role
-  says so; the tool table is the very value that went into the request body (recorded on
-  the start line, so it is the table that WENT OUT); and the conversation is every other
-  message of the array -- the whole history as the session holds it, the client's new
-  messages, the opening blocks, the skill bodies that rode along, and whatever the kernel
-  had appended by the time the call went out. The injected context is not a fourth bucket:
-  it IS a message, and it is in the conversation.
+  THE THREE PARTITIONS ARE THE ARRAY'S OWN. The system message is the message whose role says
+  so; the tool table is the very value that went into the request body (recorded on the start
+  line, so it is the table that WENT OUT -- and it is THE ONE BUCKET THIS NAMESPACE MEASURES,
+  because its size is a number that line already carries); and the conversation is every other
+  message of the array -- the whole history as the session holds it, the client's new messages,
+  the opening blocks, the skill bodies that rode along, and whatever the kernel had appended by
+  the time the call went out. The injected context is not a fourth bucket: it IS a message, and
+  the band counts it with the conversation.
  
   AN INSTRUCTION UPDATE (role \"developer\", source \"instruction-update\") IS IN THE
   CONVERSATION TOO, and that is a decision, not a default: the `system` bucket is
@@ -206,16 +207,13 @@
   THE KEYS ARE STRINGS, like the trajectory's item kinds: this is an enum-shaped
   value that goes out on the wire and comes back to a client that matches on it, and
   a keyword here would be a value whose spelling changed in transit."
-  [face start-payload]
-  (let [messages (vec face)
-        system   (filter #(= "system" (:role %)) messages)
-        rest     (remove #(= "system" (:role %)) messages)]
-    [["system"       (reduce + 0 (map size-of system))]
-     ["tools"        (if-some [b (:tools-bytes start-payload)]
-                       b
-                       ;; AN OLD RECORD KEEPS THE TABLE, and its size is still the answer.
-                       (size-of (or (:tools start-payload) [])))]
-     ["conversation" (reduce + 0 (map size-of rest))]]))
+  [sizes start-payload]
+  [["system"       (:system sizes)]
+   ["tools"        (if-some [b (:tools-bytes start-payload)]
+                     b
+                     ;; AN OLD RECORD KEEPS THE TABLE, and its size is still the answer.
+                     (size-of (or (:tools start-payload) [])))]
+   ["conversation" (:conversation sizes)]])
 
 (defn- apportion
   "TOKENS split over SHARES by size, so that the parts ADD UP TO TOKENS exactly.
@@ -296,9 +294,9 @@
   to draw is one arc in the fallback colour -- near black in the light theme -- for
   minutes at a time while agents worked.
 
-  THE PERCENTAGE AND THE SPLIT ARE THE SAME CALL'S, which is why FACE is taken rather
-  than the conversation as it stands now: dividing a measured prompt by messages that
-  call was never sent would describe a call nobody made.
+  THE PERCENTAGE AND THE SPLIT ARE THE SAME CALL'S, which is why the SIZES come from that call
+  rather than from a measurement of the conversation as it stands now: dividing a measured prompt
+  by messages that call was never sent would describe a call nobody made.
 
   JUST AFTER A COMPACTION the ring still shows the call that went out BEFORE it, and
   that is decided rather than overlooked (`context-ring` ticket 01 asked for the reason
@@ -309,7 +307,7 @@
   that call WAS sent that much. What a reader wants at that moment is 'did it work',
   which is the meter's answer; the ring answers the question it has always answered --
   how full the last real call was."
-  [st face]
+  [st sizes]
   (let [runs   (trajectory/segments-answer (:segments st))
         chosen (last-reporting-call runs)]
     (if (nil? chosen)
@@ -320,7 +318,7 @@
             used    (get-in usage [:usage :prompt_tokens])
             window  (or (:context-window payload)
                         (window-at (:timeline st) (:ts (:end chosen))))
-            parts   (when (seq face) (apportion used (shares face payload)))]
+            parts   (when sizes (apportion used (shares sizes payload)))]
         (cond-> {:usedTokens used}
           (and (number? window) (pos? window))
           (assoc :windowTokens window
@@ -329,21 +327,21 @@
           (seq parts) (assoc :parts parts))))))
 
 (defn records->context
-  "A whole record + the ARRAY its last reporting call was handed -> its context section,
+  "A whole record + the SIZES its last reporting call's array came to -> its context section,
   folded from a stream: the same answer `state->context` gives, driven one row at a time
   so a session can advance it between reads.
 
   FOLDED FROM A STREAM, and that is not only about memory: the SAME `state-step` is what the
   session registers (`install!`), so a cold read and a live answer are one implementation."
-  [records face]
+  [records sizes]
   ;; THE CTX IS PASSED AS NIL HERE AND IGNORED: the read fold's driver hands a step
   ;; `[value ctx [line-index row]]` (see `harness.edge.pressure/band-step`, which is the
   ;; same shape), and this reader has no use for it -- what it folds is in the rows, and the
-  ;; one array it needs is the FACE argument.
+  ;; one thing it needs counted is the SIZES argument.
   (state->context (reduce (fn [st pair] (state-step st nil pair))
                           (state-init)
                           (map-indexed vector records))
-                  face))
+                  sizes))
 
 (defn install! []
   "Register this reader's fold on BOTH of a session's seams (the birth walk and the write
@@ -356,8 +354,8 @@
     (sessions/unregister-step! :context)))
 
 (defn log-context
-  "A log FILE + the array its last reporting call was handed -> records->context of it. The
+  "A log FILE + the sizes its last reporting call's array came to -> records->context of it. The
   file entry point, the counterpart of harness.edge.stats/log-stats: the caller locates the
   stem and this namespace never learns where the log came from."
-  [f face]
-  (records->context (stats/read-records f) face))
+  [f sizes]
+  (records->context (stats/read-records f) sizes))

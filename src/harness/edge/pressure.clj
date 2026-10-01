@@ -262,27 +262,73 @@
                  (some-> (system-row records) replay/payload)
                  (injected-rows (last (trajectory/run-segments records))))))
 
+(defn- sized
+  "NODES + the sizes already known -> [characters KNOWN']: what the conversation costs in
+  characters, with EACH NODE'S OWN SIZE REMEMBERED by its id.
+
+  WHY IT IS REMEMBERED: the array the next call is handed is this one plus the few messages one
+  call wrote, so measuring it from scratch every time pays for the whole conversation again and
+  again -- `harness.edge.context/size-of` is a JSON encode per message (~50ms over a 2 MB
+  conversation), and the ring's numbers are asked for at every `model/start` and `model/end`.
+  THE KEY IS `[node-id message-id]`, AND IT HAS TO BE UNIQUE PER MESSAGE. The node id alone is
+  NOT: a node of the array is named by the RECORD SEQ it arrived on (`replay/model-nodes`), and a
+  reasoning node is INSERTED in front of the answer it belongs to with that answer's own seq --
+  so two messages of one array can carry the same node id, and keying on it alone lent each of
+  them the other's size (measured on a real record: 2,855,045 characters kept against 2,276,023
+  measured, a quarter too many). The message's own id is what tells them apart, and a message
+  that carries none is told apart by the seq -- two id-less nodes never share one, because an
+  inserted node is given an id. Neither half alone is enough, and `pressure-test/
+  the-rings-sizes-are-the-array-measured-once` is what holds the pair to that.
+
+  WHY A KEY AT ALL: the message map cannot be one. A card-carrying entry is given a new copy by
+  every walk, and hashing a conversation-sized map per message is the cost this exists to avoid.
+
+  WHAT IS KEPT IS ONE NUMBER PER MESSAGE THE SESSION HAS SHOWN THE MODEL. A node that leaves (a
+  compaction drops the range it stands for) simply stops being read; a node whose MESSAGE is
+  rewritten (a prune elides a tool result in place) would make its number a lie, and `band-step`
+  forgets the lot when it sees that fact rather than trying to work out which ones moved."
+  [known nodes]
+  (reduce (fn [[total acc] {:keys [id message]}]
+            (let [k [id (:id message)]]
+              (if-some [n (get acc k)]
+                [(+ total n) acc]
+                (let [n (context/size-of message)]
+                  [(+ total n) (assoc acc k n)]))))
+          [0 known]
+          nodes))
+
 (defn anchor-face
-  "BAND -> the array the LAST REPORTING CALL was handed, as the band kept it -- or nil
-  when no call reported a prompt. THIS IS THE BAND'S `:anchor` SPELLED OUT as the one
-  thing it holds: the conversation as of that call (`:messages`), the system message in
-  force, and that run's own injections.
+  "BAND -> THE ARRAY the last reporting call was handed, as the band kept it -- or nil when no call
+  reported a prompt. The conversation as of that call (`:messages`), the system message in force,
+  and that run's own injections, in the array's own order (`messages-of`).
 
-  IT IS HANDED OUT RATHER THAN FOLDED AGAIN BY WHOEVER WANTS IT. Which messages a call
-  carried is one rule (`messages-of`), and `harness.edge.context/shares` -- the ring's
-  three buckets -- sizes exactly this array: a second spelling of it there is a second
-  chance to disagree about what went out, which is what that split did when it counted
-  the conversation as 'this run's own rows' and left the history out of it. The two
-  halves of the composer's reading come from the same call because they come from the
-  same fold: the vendor's `prompt_tokens` is what the ring divides, and this array is
-  what it splits.
-
-  AN ANCHOR TAKEN BEFORE THIS BAND SAW A SNAPSHOT still answers, with the pieces it has
-  (`:messages` nil reads as no conversation): a reader that gets a thinner array is
-  better served than one that gets nil and draws no split at all."
+  IT IS HERE FOR THE READER THAT MUST NOT TAKE `anchor-sizes` ON TRUST: what `sized` remembers
+  has to BE what this array measures, message for message, and a check of that needs the array
+  itself (`pressure-test/the-rings-sizes-are-the-array-measured-once`). Nothing in the edge reads
+  it -- the ring takes the sizes, and the meter prices through the anchor's own fields."
   [band]
   (when-some [a (:anchor band)]
     (messages-of (:messages a) (:system a) (:injections a))))
+
+(defn anchor-sizes
+  "BAND -> the character totals of the array the LAST REPORTING CALL was handed, as the band kept
+  them -- or nil when no call reported a prompt:
+
+    {:system n :conversation n}
+
+  THE BAND KEEPS THESE AS THE MESSAGES ARRIVE (`sized`), which is the reason they live here
+  instead of being counted by whoever asks. WHICH MESSAGES A CALL CARRIED IS ONE RULE --
+  `messages-of` over the nodes `replay/model-nodes` gives -- and this is that rule's own answer,
+  measured once per message and remembered. `harness.edge.context/shares` (the ring's three
+  buckets) only divides the vendor's number by these.
+
+  THE TOOL TABLE IS NOT ONE OF THEM: its size is a number the call's OWN LINE carries
+  (`:tools-bytes`), and the section that needs it has that line.
+
+  NIL WHEN NO CALL REPORTED, which is also when the ring has no fraction to draw at all -- the two
+  halves of one reading are absent together because they are taken from one call."
+  [band]
+  (:sizes (:anchor band)))
 
 (defn- identity-index
   "Where X sits in V, by IDENTITY. The rows `harness.edge.trajectory` hands back ARE the
@@ -303,12 +349,18 @@
 
 (defn- empty-band []
   {:latest-start nil :start-messages nil :latest-sig nil :latest-mode nil :system nil :run nil
-   :injections [] :anchor nil :timeline-window nil})
+   :injections [] :anchor nil :timeline-window nil
+   ;; THE RING'S SIZES, KEPT AS THE MESSAGES ARRIVE (see `sized`): `:start-sizes` is what the
+   ;; snapshot the call will be priced against costs, and `:message-chars` is what each node of
+   ;; it cost, so the next snapshot pays only for what one call wrote.
+   :start-sizes nil :message-chars {}})
 
 (defn- band-step
-  "ONE ROW of a session's walk -> the meter's band, advanced. CTX is `{:messages (fn [] ..)}`:
-  the conversation AS THE WALK HAS IT SO FAR, as entry messages -- which is what an anchor
-  snapshots, because an anchor is a claim about the PREFIX a call rested on.
+  "ONE ROW of a session's walk -> the meter's band, advanced. CTX is `{:messages (fn [] ..)
+  :nodes (fn [] ..)}`: the conversation AS THE WALK HAS IT SO FAR -- as entry messages, and as
+  NODES (`{:id :message}`: the same array, each message under the record line it arrived on -- half
+  of what the ring's sizes are remembered by, see `sized`). An anchor is a claim about the PREFIX
+  the conversation is snapshotted AT the call rather than read back when somebody asks.
 
   THE ONE RULE, run on both of a session's seams (ticket 03's read stream and ticket 04's
   write stream) and by `meter-of-records` offline, so the live band and the record cannot
@@ -329,6 +381,10 @@
         `:latest-mode` (the delivery mode that run was served with).
     a run's own injection (`skill` / `job` / `injection` / `instruction-update`, no id)
         -> `:injections`.
+    `context/compacted` / `context/pruned` -> THE SIZES ARE FORGOTTEN (`:message-chars`), because
+        a PRUNE rewrites a node's message in place -- what was remembered for that id is no longer
+        what the model reads. A compaction only drops nodes and adds a summary under a fresh id, so
+        it would not need this; one rule for both is easier to hold than two, and both facts are rare.
     `provider/init` / `provider/changed` -> the window in force."
   [band ctx [i row]]
   (let [run-id  (:runId row)
@@ -356,7 +412,18 @@
                               :system     (:system band)
                               :sig        (:latest-sig band)
                               :mode       (:latest-mode band)
-                              :injections (vec (:injections band))})
+                              :injections (vec (:injections band))
+                              ;; THE RING'S SIZES, TAKEN HERE AND NOT WITH THE SNAPSHOT. The
+                              ;; CONVERSATION's total comes from the snapshot it was priced against
+                              ;; (same call, same moment), while the SYSTEM message is measured NOW:
+                              ;; a run's system row lands right behind its `model/start` (only a run's
+                              ;; FIRST call has such a batch), so a snapshot taken at the call would
+                              ;; describe the previous run's prompt. One message, once per reporting
+                              ;; call.
+                              :sizes      {:system       (if-some [s (:system band)]
+                                                          (context/size-of s)
+                                                          0)
+                                           :conversation (:conversation (:start-sizes band))}})
                       band)
       "message"     (if (= "system-prompt" (:source extra))
                       (assoc band :system payload
@@ -374,11 +441,22 @@
       ("provider/init" "provider/changed")
       (assoc band :timeline-window (context/timeline-window [row] row))
       band)]
-      ;; THE SNAPSHOT IS TAKEN AFTER THE ROW IS FOLDED, so a request row is in the conversation it
-      ;; prices (the action's own entries are exactly that: rows the edge wrote for this call).
-      (if asked?
-        (assoc next :start-messages ((:messages ctx)))
-        next))))
+      (let [next (if (or (= "context/compacted" k) (= "context/pruned" k))
+                   (assoc next :message-chars {})
+                   next)]
+        ;; THE SNAPSHOT IS TAKEN AFTER THE ROW IS FOLDED, so a request row is in the conversation
+        ;; it prices (the action's own entries are exactly that: rows the edge wrote for this call).
+        (if asked?
+          (let [[conversation chars] (sized (:message-chars next) ((:nodes ctx)))]
+            (assoc next
+                   :start-messages ((:messages ctx))
+                   :start-sizes    {:conversation (+ conversation
+                                                      (reduce + 0 (map context/size-of
+                                                                      (:injections next))))}
+                                    ;; the system message is NOT part of this: it is measured when
+                                    ;; the anchor is taken (see `:sizes` below).
+                   :message-chars  chars))
+          next)))))
 
 (defn meter-of-records
   "RECORDS -> the METER BAND `state->pressure` eats, folded with `band-step` -- THE SAME STEP

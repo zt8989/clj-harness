@@ -100,14 +100,14 @@
                      :parameters {:type "object" :properties {}}}})])
 
 (defn- context-of
-  "RECORDS -> the section the route assembles, with the array the chosen call was handed
-  taken from the band -- the same two arguments `records->context` takes from
-  `harness.edge.http`. A suite that folded that array itself would be the second spelling of
-  the rule this file exists to keep in one place."
+  "RECORDS -> the section the route assembles, with the SIZES the band kept for the chosen call's
+  array -- the same two arguments `records->context` takes from `harness.edge.http`. A suite that
+  measured that array itself would be the second spelling of the rule this file exists to keep in
+  one place."
   [records]
   (let [records (vec records)]
     (context/records->context records
-                              (pressure/anchor-face (pressure/meter-of-records records)))))
+                              (pressure/anchor-sizes (pressure/meter-of-records records)))))
 
 (defn- tokens-of-parts [answer] (map :tokens (:parts answer)))
 (defn- keys-of-parts [answer] (map :key (:parts answer)))
