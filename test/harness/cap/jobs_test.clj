@@ -348,22 +348,71 @@
         (is (nil? (:endedAt row))
             "a job that is still going has NO ending -- nil rather than a guess, which is the
              difference between 'not over yet' and 'we do not know'"))))
-  (testing "rows come back in id order, and a printed lookalike is not an ending"
+  (testing "rows come back NEWEST FIRST, and a printed lookalike is not an ending"
     (let [t "jt-list-order"
           a (jobs/start! t {:command "echo '[exit 0]'; sleep 30"})
+          ;; A KNOWN GAP, so 'newest first' is a fact and not a race: two jobs started in
+          ;; the same millisecond fall back to the id tie-break, which the second half of
+          ;; the order is asserted through below.
+          _ (Thread/sleep 5)
           b (jobs/start! t {:command "exit 0"})]
       (record-until (:path b) #(re-find #"\[exit" %) 10000)
       (let [rows (jobs/listing t)]
-        (is (= [(:id a) (:id b)] (map :id rows))
-            "ordered by id, the module's own lexical order (`known-ids`, `take-notices!`)")
-        (is (= "[running]" (:status (first rows)))
-            "the command PRINTED an ending; the Writer is still open, so it is still running"))))
+        (is (= [(:id b) (:id a)] (map :id rows))
+            "the later start is the first row (owner, 2026-10-02: 按创建时间倒序)")
+        (is (= "[exit 0]" (:status (first rows))) "b's own ending, read off its record")
+        (is (= "[running]" (:status (second rows)))
+            "a PRINTED an ending; its Writer is still open, so it is still running"))))
   (testing "another session's jobs are not this session's"
     (let [a "jt-list-a" b "jt-list-b"
           ja (jobs/start! a {:command "sleep 30"})
           jb (jobs/start! b {:command "sleep 30"})]
       (is (= [(:id ja)] (map :id (jobs/listing a))))
       (is (= [(:id jb)] (map :id (jobs/listing b)))))))
+
+(deftest a-managed-job-is-a-job-with-no-process-behind-it
+  ;; A BACKGROUND DELEGATION (harness.cap.subagents' `run_in_background`) is a job in
+  ;; everything a reader and a pane care about, but its producer is a future rather than a
+  ;; child process. `start-managed!` is the seam, and this is the claim that it needs no
+  ;; second branch anywhere a job is listed, read, ended, stopped or announced.
+  (let [t "jt-managed"]
+    (testing "it is an ordinary row of the listing while it runs"
+      (let [{:keys [id]} (jobs/start-managed! t {:command "subagent explore: look"})
+            [row]       (jobs/listing t)]
+        (is (= id (:id row)))
+        (is (= "subagent explore: look" (:command row)))
+        (is (= "[running]" (:status row))
+            "no process, and still [running] until the record is ended")
+        (is (integer? (:startedAt row)))
+        (is (nil? (:endedAt row)))))
+    (testing "append! is what the producer said, and finish! ends the record ONCE"
+      (let [{:keys [id append! finish!]} (jobs/start-managed! t {:command "subagent general: think"})]
+        (append! "line one\nline two")
+        (finish! "[exit 0]")
+        (finish! "[exit 1]")
+        ;; THE NOTICE FIRST: reading the ending with `output` is itself a telling (`mark-told!`),
+        ;; so a read before this would consume the notice and the assertion below would be
+        ;; measuring the order of the test rather than the behaviour.
+        (testing "and it is announced like any command's ending"
+          (is (some #(str/includes? (:content %) (str "Background job " id " ended: [exit 0]"))
+                    (jobs/take-notices! t)))
+          (is (= [] (jobs/take-notices! t)) "said once"))
+        (let [answer (jobs/output t id {})]
+          (is (= "[exit 0]" (:status answer)) "the first ending is the one that counts")
+          (is (= ["line one" "line two"] (:lines answer))))))
+    (testing "wait: true releases when the producer ends it"
+      (let [{:keys [id finish!]} (jobs/start-managed! t {:command "subagent explore: wait"})]
+        (future (Thread/sleep 50) (finish! "[exit 0]"))
+        (is (= "[exit 0]" (:status (jobs/output t id {:wait true :timeout 5000}))))))
+    (testing "stop! claims the record and cancels the producer"
+      (let [cancelled (atom false)
+            {:keys [id attach!]} (jobs/start-managed! t {:command "subagent explore: stop"})]
+        (attach! #(reset! cancelled true))
+        (let [answer (jobs/stop! t id)]
+          (is (true? (:stopped? answer)))
+          (is (= "[stopped]" (:ending answer))))
+        (is (true? @cancelled) "the cancel is what close! reaches for")
+        (is (= "[stopped]" (:status (jobs/output t id {}))))))))
 
 (deftest a-commands-own-bytes-are-what-the-registry-and-the-notice-hold
   ;; THE LINE THE SPAWN-SIDE FIX MUST NOT CROSS (harness.infra.shell does the escaping,

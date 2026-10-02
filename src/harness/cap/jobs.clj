@@ -814,6 +814,65 @@
         (delete-record! p)
         (throw t)))))
 
+;; ------------------------------------------------------ jobs no process runs
+;;
+;; A JOB IS NOT ALWAYS A PROCESS. Everything above models a command: the spawn, the two
+;; pipe pumps, the tree a stop kills. A background DELEGATION (harness.cap.subagents'
+;; `run_in_background`) is a job in every way a reader or a pane cares about -- it has an
+;; id, a record that grows, an ending line, a notice, and a `job_output` that can wait --
+;; but what produces it is a conversation running on a future, not a child process.
+;; `start-managed!` is the seam for that one difference: it does everything `start!` does
+;; around the producer, and hands the producer the two verbs it needs to write its own
+;; record and end it.
+;;
+;; IT IS DELIBERATELY SMALL. A managed job is an ORDINARY registry entry -- the same
+;; `:id`, `:path`, `:started-at`, `:writer`, `:ended`, and the same `:command` a notice
+;; names it by -- so `listing`, `output`, `stop!`, `take-notices!` and `records-for` need
+;; no second branch. The only two facts that differ are `:managed?` (there is no process,
+;; so `still-running?` reads the record instead of a handle) and a `:handle` whose
+;; `:close!` cancels the producer.
+
+(defn start-managed!
+  "Register a background job whose producer is NOT a shell process, and answer the handle
+  its producer writes through: `{:id :path :append! :finish! :attach!}`.
+
+  `:append!` writes TEXT to the record, line by line; `:finish!` writes ENDING as the
+  record's LAST line (once, whoever gets there first) and releases everybody waiting on
+  `job_output {wait: true}`. `:attach!` takes the 0-arg fn that CANCELS the producer and
+  keeps it for `:close!`, which is what `stop!` and `shutdown!` reach for.
+
+  THE RECORD IS THE JOB, exactly as for a spawned command (see `start!`): the same
+  directory, the same naming, the same `[exit N]` / `[stopped]` ending -- so `job_output`
+  reads a managed job with no code of its own, and a notice announces it the same way."
+  [thread-id {:keys [command]}]
+  (let [job-id   (next-id! thread-id)
+        p        (record-path thread-id job-id)
+        state    (atom :running)
+        cancel   (atom nil)
+        job      {:id job-id
+                  :managed? true
+                  :handle {:alive? (fn [] (= :running @state))
+                           :close! (fn [] (when-let [f @cancel] (f)))}
+                  :path p
+                  :thread-id thread-id
+                  :command command
+                  :started-at (System/currentTimeMillis)
+                  :writer (AtomicReference. (open-record! thread-id job-id))
+                  :ended (promise)}]
+    (sweep-once!)
+    (ensure-exit-hook!)
+    (swap! registry assoc-in (path thread-id job-id) job)
+    (announce! job)
+    {:id job-id
+     :path p
+     :append! (fn [text]
+                (doseq [line (str/split-lines (str text))]
+                  (append-line! job line)))
+     :finish! (fn [ending]
+                (reset! state :over)
+                (write-last-line! job ending))
+     :attach! (fn [f] (reset! cancel f) nil)}))
+
 ;; --------------------------------------------------------------- reading a job
 ;;
 ;; TWO FACTS, AND THE RECORD ANSWERS BOTH. What a job SAID is its file, and how it
@@ -1044,7 +1103,13 @@
   the pump -- is over too, which is why `alive?` is asked as well: a stop must say 'that was
   not me' about it rather than claim it."
   [job]
-  (and (not (terminal? job)) (boolean ((:alive? (:handle job))))))
+  (and (not (terminal? job))
+       ;; A MANAGED JOB HAS NO PROCESS TO ASK (`start-managed!`): its producer is a future,
+       ;; and while the record is open that future is still writing it. There is no handle
+       ;; whose `alive?` could answer a different thing, so the record is the whole fact.
+       (if (:managed? job)
+         true
+         (boolean ((:alive? (:handle job)))))))
 
 (defn stop!
   "Stop JOB-ID -- it and everything it started. Answers
@@ -1183,11 +1248,13 @@
 
 (defn listing
   "This session's background jobs as
-  `[{:id .. :command .. :status .. :startedAt .. :path ..}]`, ordered by id.
+  `[{:id .. :command .. :status .. :startedAt .. :endedAt .. :path ..}]`, NEWEST FIRST.
 
-  ORDERED BY ID in the module's own lexical sense, the order `known-ids` and
-  `take-notices!` already use -- a second ordering for the same ids would be a second
-  answer to 'which one is first'.
+  ORDERED BY START TIME, NEWEST FIRST, with the id as the tie-break so two jobs that
+  started in the same millisecond still come back in a stable order. An id order (`j1`,
+  `j10`, `j2` …) reads as no order at all once a session has run more than nine
+  commands, and the pane draws a session's work newest-first, exactly as the subagent
+  section beside it does.
 
   THE ROW CARRIES THE RECORD'S PATH, and this is one of the two places the path is
   handed out (`output` is the other, and only when its window missed something): the
@@ -1202,7 +1269,7 @@
   (开始时间 + 持续时间, ticket 01 of `.scratch/task-pane-push`)."
   [thread-id]
   (->> (vals (get-in @registry [thread-id :jobs]))
-       (sort-by :id)
+       (sort-by (fn [job] [(- (long (or (:started-at job) 0))) (:id job)]))
        (mapv (fn [job]
                {:id (:id job)
                 :command (:command job)

@@ -3399,8 +3399,8 @@
              (is (integer? (:startedAt row)))))
          (testing "another session's jobs are not this session's"
            (jobs/start! other {:command "echo other-only; sleep 30"})
-           (is (= (map :id (jobs-of t)) (sort (map :id (jobs-of t))))
-               "ordered by id")
+          (is (apply >= (map :startedAt (jobs-of t)))
+              "NEWEST FIRST (owner, 2026-10-02: 按创建时间倒序); ms ties fall back to id")
            (is (not-any? #(= "echo other-only; sleep 30" (:command %)) (jobs-of t))))
          (testing "this verb serves both methods, and a pair the shape does not have is still 405"
            ;; `jobs` gained its POST in ticket 04 (the case below), so the wrong-method

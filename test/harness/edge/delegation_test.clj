@@ -243,7 +243,7 @@
 (deftest a-delegation-runs-and-only-its-answer-enters-the-conversation
   (let [thread "dg-happy"
         script [{:content ""
-                 :tool-calls [{:id "d1" :name "agent"
+                 :tool-calls [{:id "d1" :name "subagent"
                                :arguments {:name "explore" :prompt explore-task}}]}
                 ;; ^ the delegating round
                 {:content "" :tool-calls [{:id "c1" :name "read"
@@ -260,7 +260,7 @@
               results (frame-of fs "TOOL_CALL_RESULT")
               answer  (->> results (filter #(= "d1" (:toolCallId %))) first :content)]
           (testing "the client sees the delegation as one tool call"
-            (is (= ["agent"] (mapv :toolCallName calls))))
+            (is (= ["subagent"] (mapv :toolCallName calls))))
           (testing "whose result IS the subagent's answer"
             (is (= 1 (count (filter #(= "d1" (:toolCallId %)) results))))
             (is (str/includes? (str answer) "the seam is harness.kernel.tools/run!")))
@@ -288,7 +288,7 @@
 
 (deftest the-subagent-runs-as-its-own-conversation-with-its-own-record
   (let [thread "dg-record"
-        script [{:content "" :tool-calls [{:id "d1" :name "agent"
+        script [{:content "" :tool-calls [{:id "d1" :name "subagent"
                                            :arguments {:name "explore" :prompt explore-task}}]}
                 {:content "" :tool-calls [{:id "c1" :name "read"
                                            :arguments {:path "deps.edn"}}]}
@@ -348,7 +348,7 @@
                                    :builtins
                                    {:subagent-start [["probe-start" {:run (probe :subagent-start)}]]
                                     :subagent-stop  [["probe-stop" {:run (probe :subagent-stop)}]]}})
-        script    [{:content "" :tool-calls [{:id "d1" :name "agent"
+        script    [{:content "" :tool-calls [{:id "d1" :name "subagent"
                                               :arguments {:name "general" :prompt "just answer"}}]}
                    {:content "answered"}
                    {:content "ok"}]]
@@ -383,7 +383,7 @@
 
 (deftest an-unknown-subagent-is-refused-by-name-listing-what-exists
   (let [thread "dg-unknown"
-        script [{:content "" :tool-calls [{:id "d1" :name "agent"
+        script [{:content "" :tool-calls [{:id "d1" :name "subagent"
                                            :arguments {:name "nope" :prompt "hi"}}]}
                 {:content "ok"}]]
     (with-server thread script
@@ -396,7 +396,7 @@
 
 (deftest a-subagent-cannot-reach-outside-its-range-in-a-real-run
   (let [thread "dg-range"
-        script [{:content "" :tool-calls [{:id "d1" :name "agent"
+        script [{:content "" :tool-calls [{:id "d1" :name "subagent"
                                            :arguments {:name "explore" :prompt "write it"}}]}
                 ;; ^ the delegating round
                 {:content "" :tool-calls [{:id "c1" :name "write"
@@ -429,7 +429,7 @@
   ;; from a hang, which is the failure this exists to prevent.
   (let [thread      "dg-parked"
         project-dir (support/temp-dir "delegation-project")
-        script      [{:content "" :tool-calls [{:id "d1" :name "agent"
+        script      [{:content "" :tool-calls [{:id "d1" :name "subagent"
                                                 :arguments {:name "general" :prompt "write it"}}]}
                      ;; ^ the delegating round
                      {:content "" :tool-calls [{:id "c1" :name "write"
@@ -462,7 +462,7 @@
 (def ^:private project-script
   "A delegation from a session that IS bound: one directory for the parent, and its
   subagent resolves against the same one."
-  [{:content "" :tool-calls [{:id "d1" :name "agent"
+  [{:content "" :tool-calls [{:id "d1" :name "subagent"
                               :arguments {:name "explore" :prompt explore-task}}]}
    {:content "it is harness.kernel.tools"}
    {:content "ok"}])
@@ -470,7 +470,7 @@
 (def ^:private readback-script
   "The same delegation where the subagent WORKS -- so its record has a tool call of
   its own to read back, which is the half that tells the two conversations apart."
-  [{:content "" :tool-calls [{:id "d1" :name "agent"
+  [{:content "" :tool-calls [{:id "d1" :name "subagent"
                               :arguments {:name "explore" :prompt explore-task}}]}
    {:content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
    {:content "it is harness.kernel.tools"}
@@ -569,7 +569,7 @@
                    "its own tool call is in it")
                (is (not (contains? (called-names (:messages stem)) "read"))
                    "and the parent's conversation does not hold it")
-               (is (contains? (called-names (:messages stem)) "agent")
+               (is (contains? (called-names (:messages stem)) "subagent")
                    "while the parent's has the delegation and nothing behind it")))))))))
 
 (deftest a-project-removal-releases-a-subagent-with-its-parent

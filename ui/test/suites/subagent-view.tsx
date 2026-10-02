@@ -41,19 +41,26 @@ import { type Case, type Suite } from "../e2e";
 
 const cases: Case[] = [
   {
-    name: "the-agent-arm-says-which-subagent-and-what-it-was-asked",
+    name: "the-subagent-arm-says-which-subagent-and-what-it-was-asked",
     run: async () => {
       // THE ROW A DELEGATION GETS. The default arm answers the first string argument,
       // and for this tool that is the TASK -- so without an arm of its own the row
       // would read `agent · <a paragraph>` and never name the subagent that was picked.
       // The arm is read as text because that is what it is: a projection table, one
       // line per tool.
+      // THE TOOL IS `subagent` NOW (owner, 2026-10-02: agent -> subagent); its OLD name
+      // `agent` is a second label so a record written before the rename still gets the arm.
+      expect(messagePartsSource).toContain('case "subagent":');
+      // THE ROW READS `Sub Agent`, not the wire name -- and the old name maps to the same
+      // words so a conversation recorded before the rename reads the same (owner, 2026-10-02).
+      expect(messagePartsSource).toContain('subagent: "Sub Agent"');
+      expect(messagePartsSource).toContain('agent: "Sub Agent"');
       const arm = /case "agent": \{([\s\S]*?)\n    \}/.exec(messagePartsSource);
-      expect(arm, "no `agent` arm in subjectOf").not.toBeNull();
+      expect(arm, "no `subagent` arm in subjectOf").not.toBeNull();
       const body = arm![1]!;
       expect(body).toContain('stringArg(args, "name")');
       expect(body).toContain('stringArg(args, "prompt")');
-      // NAME FIRST, TASK SECOND, on one line: the row already draws `agent · `, so the
+      // NAME FIRST, TASK SECOND, on one line: the row already draws `Sub Agent · `, so the
       // subject's own separator is what makes the sentence read
       // `agent · explore · find every ns that deps.edn needs`.
       expect(body).toMatch(/\$\{name\} · \$\{task\}/);
@@ -69,12 +76,12 @@ const cases: Case[] = [
       // that id -- never a position, and never the tool's result. A delegation is worth
       // opening WHILE IT RUNS, which is the moment there is no result to wait for.
       expect(messagePartsSource).toContain(
-        'toolName === "agent" ? toolCallId : null,',
+        "delegated ? toolCallId : null,",
       );
       // `settled` IS HANDED OVER, and it is not decoration: it is the page's only
       // knowledge that the call -- and therefore its `delegation` row -- is over.
       expect(messagePartsSource).toMatch(/toolCallId : null,\s*settled,\s*\)/);
-      expect(messagePartsSource).toContain('toolName === "agent" ? delegations.get(toolCallId) : undefined');
+      expect(messagePartsSource).toContain("delegated ? delegations.get(toolCallId) : undefined");
       expect(messagePartsSource).toContain("useContext(ThreadIdContext)");
       // ...and the card's state is never consulted: `settled`, `result` and `status`
       // take no part in `openMirror`.

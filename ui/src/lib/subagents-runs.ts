@@ -65,8 +65,12 @@ export function rowsFromRuns(
       threadId: run.threadId,
       name: run.subagent,
       description: byName.get(run.subagent)?.description ?? null,
-      delegatedAt: run.delegatedAt,
-      finishedAt: run.finishedAt,
+      // NORMALISED TO NULL, and this is not cosmetic: a frame the server did not put an
+      // end on (or a wire predating `:finishedAt`) would hand the row an `undefined`, and
+      // `undefined` is NOT the `null` the two duration arms test for -- the row would try
+      // to subtract nothing from a start and draw `NaN 分 NaN 秒` instead of no duration.
+      delegatedAt: run.delegatedAt ?? null,
+      finishedAt: run.finishedAt ?? null,
       running: run.running,
     }));
 }
