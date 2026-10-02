@@ -123,6 +123,9 @@
             [harness.cap.subagents :as subagents]
             [harness.cap.todos :as todos]
             [harness.cap.goal :as goal]
+            ;; The session's command queue (`.scratch/run-commands`): what the harness is asked
+            ;; to do, as opposed to what the model is asked (that rides `append`).
+            [harness.edge.commands :as commands]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
@@ -1356,6 +1359,10 @@
 ;; again before EVERY model call (ticket 04 of `.scratch/compaction-shape`).
 (declare compact-if-pressured! recover-overflow! relieve-pressure!)
 (declare compact-if-pressured! recover-overflow!)
+;; THE COMMAND MACHINERY LIVES WITH THE FRAMES IT PUSHES (see `goal-send!` and the executor
+;; below), while the route that answers a command-only request is up here with the other
+;; decisions about a run -- so the route names them first.
+(declare drain-commands! execute-command! goal-send! before-llm-with-commands)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1948,7 +1955,12 @@
                                                                                (if (= "read" name)
                                                                                  content
                                                                                  (spill/slip thread-id content)))
-                                                             :before-llm project/before-llm
+                                                             ;; AND THE COMMANDS THIS SESSION WAS SENT
+                                                             ;; ARE TAKEN AT THIS SEAM, BEFORE the injections are
+                                                             ;; derived: a goal a person has just created (or paused,
+                                                             ;; or cleared) is what THIS call is told about, which is
+                                                             ;; the whole point of draining before deriving.
+                                                             :before-llm before-llm-with-commands
                                                              ;; THE EDGE'S HALF OF THE model/start
                                                              ;; SIGNATURE: the byte measure the
                                                              ;; kernel does not own (see
@@ -2043,6 +2055,15 @@
                       ;; answers nil).
                       (when-some [snap (numbers-snapshot thread-id)]
                         (project/remember-numbers! thread-id snap))
+                      ;; AND THE MODEL'S OWN HALF OF THE GOAL REACHES THE WIRE HERE, because this
+                      ;; is the moment a run stops changing it: a `create_goal` / `update_goal` call
+                      ;; inside the run wrote the record and the row, and a strip watching this
+                      ;; conversation would otherwise keep drawing the goal as it was until somebody
+                      ;; reloaded. ONE FRAME PER FINISHED RUN for a session that HAS a goal, and
+                      ;; nothing at all for one that has none -- the payload is the whole answer, so a
+                      ;; repeat costs a client nothing but a redraw it already owed (see `goal-send!`).
+                      (when (goal/goal-for thread-id)
+                        (goal-send! thread-id))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -2781,6 +2802,52 @@
 ;; The door repairs a run that never closed before it reads the record (see the 4b decision
 ;; below); the repair is defined with the read side further down, so it is named here.
 (declare close-off-open-run!)
+(defn- commands-request
+  "The answer to a request that carries COMMANDS and NO QUESTION (`:append` empty) -- the
+  request shape `.scratch/run-commands` decision 1 exists for, and the one that must NOT be
+  answered as 'there is already a run' (it is not a second run: it is a message to the one
+  that is going).
+
+  THREE ANSWERS, and which is which is `harness.edge.commands`'s to say:
+
+    * a command that cannot run without a run in flight -> 409 NAMING IT. `steer` is about
+      'the step in progress' and there is none; an `interrupt` has nothing to ring.
+    * a run of this session IS in flight -> put them in its queue and ACK. The run takes
+      them at its next boundary (`before-llm-with-commands`), which is what makes the
+      order the queue's rather than the socket's.
+    * nothing is running -> run what can be run HERE, in the queue's own priority order,
+      leave the `:wait` commands queued for the next run, and answer what each one did.
+      (`.scratch/run-commands` decision 4 would start a run instead; see the note on
+      `harness.edge.commands/types` for why this build runs them in-process.)
+
+  AN INTERRUPT IS RUNG HERE AND NOT ONLY QUEUED, in both of the last two cases: a command
+  can wait for a boundary, and a person pressing stop cannot."
+  [thread-id commands]
+  (let [refusals (commands/cannot-run-alone thread-id commands)]
+    (cond
+      (seq refusals)
+      (api-response 409 {:threadId thread-id
+                         :error    (str/join " " refusals)
+                         :commands refusals})
+
+      (running? thread-id)
+      (do (commands/enqueue! thread-id commands)
+          (when (some #(= "interrupt" (:type %)) commands) (sessions/cancel! thread-id))
+          (api-response 200 {:threadId thread-id
+                             :runId    (running-run-id thread-id)
+                             :queued   (count commands)}))
+
+      :else
+      (do (commands/enqueue! thread-id commands)
+          (when (some #(= "interrupt" (:type %)) commands) (sessions/cancel! thread-id))
+          (api-response 200 {:threadId thread-id
+                             :runId    nil
+                             :queued   0
+                             :commands (commands/drain! thread-id
+                                                          (fn [command]
+                                                            (execute-command! thread-id command))
+                                                          commands/executable?)})))))
+
 (defn- handle-run
   "The door to the run edge: read the request, decide whether this is a run this home
   answers, and hand the rest over.
@@ -2839,6 +2906,15 @@
       (and (some? held) (not (claims/mine? held)))
       (refuse-served-elsewhere! thread-id held)
 
+
+      ;; 3c. A REQUEST THAT CARRIES THE HARNESS'S WORK AND NOT THE MODEL'S (`.scratch/run-commands`
+      ;; decision 1): `commands`, and no `append`. IT IS NOT A SECOND RUN even when one is
+      ;; going -- it is a message to the run that is -- so it is decided BEFORE the refusal
+      ;; below, which exists to stop two runs of one conversation from interleaving. A request
+      ;; that carries BOTH is a run (`append`) and is refused like one. An `:interrupt` among
+      ;; them still rings the switch, so a stop is never merely queued.
+      (and (seq (:commands input)) (not (seq (:append input))))
+      (commands-request thread-id (vec (:commands input)))
       (running? thread-id)
       (refuse-second-run! thread-id)
 
@@ -3600,7 +3676,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs" "todos"})
+  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs" "todos" "goal"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -4176,6 +4252,38 @@
   logs with 'somebody looked'."
   [stem]
   (api-response 200 {:threadId stem :todos (todos/items-for stem)}))
+
+(defn- goal-wire
+  "THE GOAL'S WIRE SHAPE, in ONE function: `{:threadId .. :goal <snapshot|null> :armed? ..}`.
+  Every reader of a goal goes through it -- the route, the push frame, and (through the same
+  snapshot) the model's own `get_goal` -- so 'the three places carry the same fields' is true
+  by construction rather than by three people remembering (`harness.cap.goal-test` pins the
+  server's half of it, `ui/test/suites/goal.ts` the client's).
+
+  `armed?` IS BESIDE `goal`, NEVER INSIDE IT (spec decision 3): the goal is the RECORD's, and
+  'may this process open the next round by itself' is THIS PROCESS's, so a client that merged
+  them would draw a goal as 'stopped' after a restart nobody asked about. The question mark is
+  part of the name on the wire too: it is a yes/no about this process, not a field of the
+  goal."
+  [thread-id]
+  (let [tid (str thread-id)]
+    {:threadId tid
+     :goal     (goal/goal-for tid)
+     :armed?   (goal/armed? tid)}))
+
+(defn- goal-get
+  "GET /api/threads/<stem>/goal -- the session's goal as the store has it, plus whether
+  THIS process may open the next round of it (`.scratch/goal` decision 4).
+
+  IT IS THE READ SIDE OF THE GOAL, NOT A COMMAND: the panel owes a snapshot the moment it
+  opens (docs/rules/panel-data.md) and a snapshot is a GET. Writes go the other way -- as a
+  `goal` COMMAND in a run request -- which is why there is no POST here at all.
+
+  NO LOCATE, NO 404, NO AUDIT LINE: the goal is a row keyed by the thread id, so a stem this
+  home has never heard of answers `goal: null` exactly as a session that never had one does
+  (`todos-get` makes the same three decisions for the same reasons)."
+  [stem]
+  (api-response 200 (goal-wire stem)))
 
 (defn- jobs-get
   "GET /api/threads/<stem>/jobs -- the background commands THIS PROCESS is running for
@@ -5272,6 +5380,105 @@
         (doseq [ch channels]
           (mux-send! ch (mux-frame thread-id payload)))))
     nil))
+
+(defn- goal-send!
+  "PUSH the session's goal to every connection watching THREAD-ID -- one frame per change,
+  the whole payload each time.
+
+  THE FOURTH KIND OF FRAME ON THE SESSION'S SOCKET (`{:type goal ..}`), beside a window's
+  frames, a run's AG-UI events and the fact family, and it exists for the reason `task-send!`
+  does: a goal is a ROW and a piece of process memory, not a line of the record with a `seq`
+  to number and replay -- so there is no cursor to catch a reader up with and the whole answer
+  is what a change sends. A CLIENT MUST RECOGNISE THE NAME (`ui/src/lib/mux.ts`'s `familyOf`):
+  a frame no family claims falls through to the run family and is refused by the AG-UI client's
+  schema, which takes the whole run down with it.
+
+  A NO-OP WHEN NOBODY IS WATCHING, which is the ordinary case for a change made from a script
+  or a test: `mux/channels-for` answers nothing and no payload is built."
+  [thread-id]
+  (let [channels (mux/channels-for thread-id)]
+    (when (seq channels)
+      (let [payload (assoc (goal-wire thread-id) :type "goal")]
+        (doseq [ch channels]
+          (mux-send! ch (mux-frame thread-id payload)))))
+    nil))
+
+;; ------------------------------------------------------- the commands a session is sent
+;;
+;; ONE EXECUTOR FOR EVERY COMMAND THIS BUILD KNOWS (`.scratch/run-commands`), reached from the
+;; two boundaries a command can arrive at: a RUN's pre-LLM seam (a command sent while a run is
+;; going) and the ROUTE (a command sent when nothing is running here). THE SAME FUNCTION AT
+;; BOTH, so a command means one thing however it arrived.
+
+(defn- run-goal-command!
+  "One `{:type \"goal\" ..}` command -> the verb it names, as a PERSON (`:by :human`).
+
+  THE ACTIONS ARE THE DESIGN'S OWN (spec decision 10): `create` / `edit` / `pause` / `resume` /
+  `clear`, and `edit` carries the objective without touching the phase. `resume` is the one
+  that has to say WHO asked: a person's resume lifts their own pause and clears a blocked goal,
+  while the model's cannot (`harness.cap.goal/resume!` refuses it by name) -- this is that
+  door, and the only one."
+  [thread-id {:keys [action objective max_goal_rounds goal_id revision]}]
+  (let [ref   {:id goal_id :revision revision}
+        knobs (cond-> {} (some? max_goal_rounds) (assoc :max-rounds max_goal_rounds))]
+    (case (str action)
+      "create" (goal/create! thread-id objective knobs)
+      "edit"   (goal/edit! thread-id ref objective knobs)
+      "pause"  (goal/pause! thread-id ref)
+      "resume" (goal/resume! thread-id ref {:by :human})
+      "clear"  (goal/clear! thread-id ref)
+      (throw (ex-info (str "a goal command's action must be one of create, edit, pause, resume,"
+                           " clear -- it is " (pr-str action) ".")
+                      {:reason :unknown-goal-action :action action})))))
+
+(defn- execute-command!
+  "One command -> nil when it was done, or `{:reason .. :error ..}` saying why not. Every
+  refusal is the capability's OWN sentence: this function adds no rule of its own, which is
+  what keeps a command and a tool from answering differently about the same goal."
+  [thread-id command]
+  (try
+    (case (:type command)
+      ;; THE VERB FIRST, THE FRAME AFTER -- and the frame goes out for `clear` too, where the
+      ;; payload is `goal: null`: a strip that was told nothing would keep drawing the goal
+      ;; somebody just cleared.
+      "goal" (do (run-goal-command! thread-id command)
+                 (goal-send! thread-id))
+      (throw (ex-info (str "no executor for a " (pr-str (:type command)) " command")
+                      {:reason :unknown-command :type (:type command)})))
+    nil
+    (catch Throwable t
+      {:reason (or (:reason (ex-data t)) :command-refused)
+       :error  (ex-message t)})))
+
+(defn- drain-commands!
+  "Run everything queued for THREAD-ID, in the queue's own priority order, and answer what
+  each one did -- a vector of `{:type .. :ok true}` / `{:type .. :reason .. :error ..}`."
+  [thread-id]
+  (commands/drain! thread-id (fn [command]
+                            (let [answer (execute-command! thread-id command)]
+                              (when (map? answer) answer)))))
+
+(defn- refusal-note
+  "A refused command as a message the MODEL (and the conversation column) can read.
+
+  A COMMAND A RUN EXECUTED HAS NO HTTP ANSWER TO CARRY A REFUSAL (`.scratch/run-commands`
+  decision 6: the route that would have is gone), so this is where a refusal becomes visible --
+  the same shape and the same seam as a job's ending (`cap.jobs/before-llm`), because both are
+  'the harness has something to say that the person did not type'."
+  [{:keys [type reason error]}]
+  {:role    "user"
+   :content (str "<system-reminder>\na " (pr-str type) " command was refused: " error
+                 "\n(reason: " (name (or reason :refused)) ")\n</system-reminder>")})
+
+(defn- before-llm-with-commands
+  "The run's pre-LLM step: take the commands this session was sent, run them, and then derive
+  the injections the run owes -- IN THAT ORDER, so a goal a person just created (or paused)
+  is what this very call is told about."
+  [history thread-id]
+  (let [outcomes (drain-commands! thread-id)]
+    (as-> history h
+      (project/before-llm h thread-id)
+      (into h (keep (fn [o] (when-not (:ok o) (refusal-note o))) outcomes)))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
@@ -7109,6 +7316,7 @@
         [:get "delegations"] (delegations-get stem)
         [:get "frames"]    (frames-get stem)
         [:get "todos"]    (todos-get stem)
+        [:get "goal"]     (goal-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]
@@ -7214,6 +7422,15 @@
                       (Thread. ^Runnable (fn [] (log/info! :shutdown {:root root}))
                                "harness-shutdown"))))
 
+(defn- install-goal-writer!
+  "Hand `harness.cap.goal` THIS namespace's record writer, so a goal change becomes a `goal/change` fact row on the conversation's own file. A RUN ID OF NIL IS THE HONEST ONE: a goal changes outside any run as often as inside one. IT IS ITS OWN FUNCTION RATHER THAN THREE LINES INSIDE `start!` because a test wants the REAL writer without a socket (harness.edge.goal-http-test), and a goal that landed in a fake record would be a test of the fake."
+  []
+  (goal/set-record-writer!
+   (fn [thread-id kind payload]
+     ;; A RUN ID OF NIL IS THE HONEST ONE: a goal changes outside any run as often as inside one
+     ;; (a person's `/goal resume` after a restart has no run in flight).
+     (log! thread-id nil kind payload))))
+
 (defn start!
   "Start the server and return its stop fn. Default port is 8080.
 
@@ -7271,8 +7488,7 @@
                    ;; here, exactly as the subagent runner above is handed over. A run id of nil is the
                    ;; honest one: a goal changes outside any run as often as inside one (the strip's
                    ;; command runs in a run, but a `/goal resume` after a restart has no run yet).
-                   (goal/set-record-writer! (fn [thread-id kind payload]
-                                              (log! thread-id nil kind payload)))
+                   (install-goal-writer!)
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
                    ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
                    ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
