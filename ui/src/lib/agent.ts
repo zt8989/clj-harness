@@ -28,6 +28,10 @@ import {
   type RunAgentResult,
 } from "@ag-ui/client";
 import { subscribeRun, type RunFrame } from "./mux";
+// THE GOAL'S OWN MODULES: `/goal …` is read out of the outgoing messages below, and the two
+// types are the wire's (a command, and what the edge answers about one).
+import { parseGoalCommand, showGoal } from "./goal-command";
+import { goalShown, type GoalAction, type GoalCommand, type GoalVerdict } from "./goal";
 
 /// THE ENTRIES AN ACTION ADDS TO A CONVERSATION THE SERVER HOLDS: the trailing run of
 /// user messages -- everything after the last message that is not one of the person's
@@ -54,10 +58,134 @@ export function appendOf(messages: readonly Message[]): Message[] {
   return messages.slice(last + 1).filter((message) => message.role === "user");
 }
 
-/// The body a run is: `RunAgentInput` minus the two fields the server owns, plus the
-/// one it takes. Named rather than inlined so the shape the page promises is readable
-/// in one place -- the edge's own table (`docs/architecture/edge.md`) is the other.
-type ActionBody = Omit<RunAgentInput, "messages" | "runId"> & { append: Message[] };
+/// THE COMMAND MESSAGES THIS PAGE HAS ALREADY PUT ON THE WIRE, by message id.
+///
+/// WHY THERE HAS TO BE A MEMO AT ALL. A `/goal …` command leaves NO answer in the conversation
+/// -- the server writes what a command DID, never that somebody asked -- so the message stays the
+/// last user message the client holds, and every LATER send's trailing run still contains it. The
+/// server dedupes a repeated `append` entry by its `:id`; a command has no id to dedupe by, so
+/// the page remembers the ones it has sent. THE COST, stated: a command whose request never
+/// reached the edge is not re-sent by the next send -- the person says it again.
+const sentCommands = new Set<string>();
+
+/// WHAT ONE SEND IS, once `/goal …` has been read out of it: the entries that are questions
+/// (`append`), the commands the rest become, the ids those commands came from, whether `/goal`
+/// alone was among them (the READ verb), and whether NOTHING is left to send.
+///
+/// ONE FUNCTION FOR BOTH DOORS THAT NEED THE ANSWER: `runAgent`, which has to know whether a run
+/// is worth starting at all, and `requestInit`, which builds the body. THEY WERE TWO ONCE, and the
+/// walkthrough (2026-10-02) found where they disagreed: the one that decided whether to run only
+/// recognised a LONE `/goal`, so a second one -- the message stays in the client's list, see the
+/// memo above -- looked like a plain question to it and started a run with nothing in it.
+///
+/// IT ONLY READS THE MEMO. The write is `requestInit`'s, after the fold is on its way out -- a
+/// decision asked twice must not spend the memo once.
+type GoalSend = {
+  append: Message[];
+  commands: GoalCommand[];
+  commandIds: string[];
+  readVerb: boolean;
+  emptied: boolean;
+};
+
+/// THE FENCE (`goal_id`, `revision`) A VERB HAS TO NAME, read from the goal this page is SHOWING
+/// (`lib/goal.ts`'s `goalShown`): a command typed into the composer is about the goal on screen,
+/// exactly as a strip's button is, and `create` is the one verb with no fence.
+function fence(action: GoalAction, threadId: string): Partial<GoalCommand> {
+  const goal = action === "create" ? null : goalShown(threadId);
+  return goal === null ? {} : { goal_id: goal.id, revision: goal.revision };
+}
+
+function goalSend(messages: readonly Message[], threadId: string): GoalSend {
+  const append: Message[] = [];
+  const commands: GoalCommand[] = [];
+  const commandIds: string[] = [];
+  let readVerb = false;
+  let entries = 0;
+  for (const message of appendOf(messages)) {
+    entries += 1;
+    const parsed =
+      typeof message.content === "string" ? parseGoalCommand(message.content) : null;
+    if (parsed === null) {
+      append.push(message);
+      continue;
+    }
+    // A READ VERB IS NEITHER A QUESTION NOR A COMMAND: `/goal` alone opens the strip, and it
+    // sends nothing -- `runAgent` below is where that send is stopped.
+    if (parsed.action === "show") {
+      readVerb = true;
+      continue;
+    }
+    const id = String(message.id);
+    if (sentCommands.has(id)) continue;
+    commandIds.push(id);
+    commands.push({
+      type: "goal",
+      action: parsed.action,
+      ...(parsed.objective === undefined ? {} : { objective: parsed.objective }),
+      ...fence(parsed.action, threadId),
+    });
+  }
+  return {
+    append,
+    commands,
+    commandIds,
+    readVerb,
+    // SOMETHING WAS THERE AND ALL OF IT WAS CONSUMED: a `/goal`, or a command the page has
+    // already sent. An EMPTY append with nothing consumed is not this -- that is a resume, which
+    // carries no new entries at all and must still run.
+    emptied: entries > 0 && append.length === 0 && commands.length === 0,
+  };
+}
+
+/// THE SERVER'S OWN SENTENCE IN AN ANSWER TO A COMMAND-ONLY REQUEST, or null when every command
+/// was carried out. The answer is JSON and small (`.scratch/run-commands`: this build RUNS the
+/// commands in-process rather than starting a run, so there is no stream to read), and a body
+/// this cannot read is not a refusal -- see the wrapper's own note on why the sentence has to
+/// come out here at all.
+function commandRefusal(text: string): string | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const commands =
+    body !== null && typeof body === "object" && "commands" in body
+      ? (body as { commands?: GoalVerdict[] }).commands
+      : undefined;
+  const refused = commands?.find((verdict) => "error" in verdict);
+  return refused !== undefined && "error" in refused ? refused.error : null;
+}
+
+/// WHETHER THIS REQUEST CARRIED THE HARNESS'S OWN WORK INSTEAD OF A QUESTION. It is asked of the
+/// BODY `requestInit` wrote rather than of the answer, because the edge's ACK to a run and its
+/// answer to a command list are BOTH `200 application/json` -- and the two need different
+/// treatment (a run's frames come down the socket; a command's answer is the whole story). The
+/// shape is the design's own: `append` empty, `commands` not (`harness.edge.http/handle-run`'s
+/// 3c), so a body this cannot read is not one.
+function commandsOnly(init: RequestInit): boolean {
+  if (typeof init.body !== "string") return false;
+  try {
+    const body: unknown = JSON.parse(init.body);
+    if (body === null || typeof body !== "object") return false;
+    const { append, commands } = body as { append?: unknown; commands?: unknown };
+    return Array.isArray(commands) && commands.length > 0 && Array.isArray(append) && append.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/// The body a run is: `RunAgentInput` minus the two fields the server owns, plus the two it
+/// takes. Named rather than inlined so the shape the page promises is readable in one place --
+/// the edge's own table (`docs/architecture/edge.md`) is the other.
+type ActionBody = Omit<RunAgentInput, "messages" | "runId"> & {
+  append: Message[];
+  /// THE HARNESS'S OWN WORK, when this action is asking for some instead of (or as well as)
+  /// asking the model (`.scratch/run-commands`): `append` empty plus a command list is the ONE
+  /// body the edge will not answer as "a second run" while one is going. See `requestInit`.
+  commands?: GoalCommand[];
+};
 
 /// THE ID A RUN IS ADDRESSED TO, read off the body this class writes: `requestInit`
 /// sends `RunAgentInput`'s own `threadId`, and the run edge answers an id this home has
@@ -304,6 +432,24 @@ export class HarnessAgent extends HttpAgent {
       try {
         await subscription.declared;
         const started = await send(url, init);
+        // A REQUEST THAT CARRIED ONLY COMMANDS IS ANSWERED WITH JSON AND STARTS NO RUN, so it
+        // must NOT fall through to `runStream` below: that stream ends when the server sends a
+        // terminal frame, and this request has no run to send one -- the page would sit on
+        // "Cancel" forever (the failure mode `runStream`'s own header names). THIS BUILD runs
+        // the commands in-process instead of starting a run for them
+        // (`harness.edge.commands/types`), and that answer is also the only place a REFUSAL on
+        // this door can be said -- the run's reader can read `data:` frames and nothing else, so
+        // a `/goal <目标>` typed against an unfinished goal would have gone silent. Throwing it
+        // makes THIS run report the sentence, the same disposition a 409 from this route gets.
+        if (started.ok && commandsOnly(init)) {
+          const text = await started.text();
+          const refusal = commandRefusal(text);
+          if (refusal !== null) throw new Error(refusal);
+          // NOTHING WILL EVER COME DOWN THIS SUBSCRIPTION -- there is no run behind this
+          // request -- so it is dropped here rather than left holding the conversation open.
+          subscription.unsubscribe();
+          return new Response(text, { status: started.status, headers: started.headers });
+        }
         if (!started.ok || !(started.headers.get("content-type") ?? "").includes("application/json")) {
           // A REFUSAL IS HANDED BACK WHOLE so the base class's error path words it (it reads
           // the body), and a caller that somehow still got a stream keeps reading that.
@@ -338,7 +484,40 @@ export class HarnessAgent extends HttpAgent {
   /// this feature's business.
   protected requestInit(input: RunAgentInput): RequestInit {
     const { messages, runId: _serverOwns, ...rest } = input;
-    const body: ActionBody = { ...rest, append: appendOf(messages) };
+    // WHICH SEAM A `/goal …` LEAVES THROUGH, AND WHY (ticket 08 of `.scratch/goal` demands that
+    // sentence): THIS ONE -- `requestInit`, the request every send goes out through
+    // (`HttpAgent.run` is nothing but `this.fetch(this.url, this.requestInit(e))`). The
+    // composer's submit path is upstream's, and the one LOCAL: insertion point near it
+    // (`thread.aui.tsx`'s `ComposerFrame`) wraps markup rather than deciding what is SENT; this
+    // is the last point at which the OUTGOING MESSAGES are in hand, and every caller -- a first
+    // send, a resume, a retry after a dropped socket -- arrives here without the page having to
+    // enumerate them.
+    //
+    // A COMMAND IS TAKEN OUT OF `append` RATHER THAN SENT AS A QUESTION: the message itself
+    // never reaches the record (`harness.edge.commands` writes what a command DID, never that
+    // somebody asked), and the request STAYS a run request -- the same POST, with `append` empty
+    // and the command on `commands`. That is the one body the run edge does not answer as "a
+    // second run" while one is in flight (`harness.edge.http/handle-run`'s 3c), so a command
+    // typed into a running conversation is queued onto it and a command typed into a quiet one
+    // is run -- the route decides, from the same shape.
+    //
+    // ONE COMMAND PER SEND, WHICH IS THE COMPOSER'S OWN SHAPE: the message a `/goal …` command
+    // came out of is the WHOLE message (the parse says so), so `append` is empty unless a caller
+    // handed over several messages at once. A body carrying BOTH a question and a command would
+    // be a run to the edge (`handle-run`'s 3c asks for an empty `append`), and the command in it
+    // would be ignored -- `commandsOnly` below is what tells the two apart. AND A COMMAND'S FENCE
+    // (`goal_id`, `revision`) COMES FROM WHAT THE PAGE IS SHOWING, not from this class: see
+    // `fence`, which is also what makes `/goal pause` typed into the composer mean the same goal
+    // as the strip's own `pause` button.
+    const send = goalSend(messages, input.threadId);
+    // AND THE COMMANDS THIS REQUEST CARRIES ARE NOW SAID: the memo is spent HERE, where the
+    // decision has actually become a body (`goalSend` only reads it).
+    for (const id of send.commandIds) sentCommands.add(id);
+    const body: ActionBody = {
+      ...rest,
+      append: send.append,
+      ...(send.commands.length === 0 ? {} : { commands: send.commands }),
+    };
     return super.requestInit(body as unknown as RunAgentInput);
   }
 
@@ -386,6 +565,17 @@ export class HarnessAgent extends HttpAgent {
     parameters?: Parameters<HttpAgent["runAgent"]>[0],
     subscriber?: AgentSubscriber,
   ): Promise<RunAgentResult> {
+    // WHETHER A RUN IS WORTH STARTING AT ALL, asked BEFORE the run -- which is the only door that
+    // can stop one: `requestInit` above is called from INSIDE the run, once the bytes are
+    // already being built. A send whose entries were ALL consumed (`goalSend`'s `emptied`: a
+    // `/goal` alone, or a command this page has already put on the wire) leaves a `/goal`-free,
+    // command-free body, and a run started for it would be a model call nobody asked for. A
+    // RESUME is not this: it carries no entries at all, so there was nothing to consume.
+    const send = goalSend(this.messages, this.threadId);
+    // ...AND THE READ VERB STILL ANSWERS SOMETHING: the strip is told to open (`showGoal`), which
+    // is the whole of what `/goal` alone asks for.
+    if (send.readVerb) showGoal();
+    if (send.emptied) return Promise.resolve({ result: undefined, newMessages: [] });
     return super.runAgent(
       parameters,
       cancellationAware(

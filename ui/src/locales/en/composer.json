@@ -50,6 +50,31 @@
       "pending": "pending"
     }
   },
+  "goal": {
+    "phase": {
+      "active": "active",
+      "paused": "paused",
+      "blocked": "blocked",
+      "completed": "completed"
+    },
+    "armed": {
+      "running": "carrying on by itself",
+      "stopped": "stopped — a word from you restarts it"
+    },
+    "rounds": "round {{round}}/{{max}}",
+    "blocked": "{{code}}: {{reason}}",
+    "edit": {
+      "label": "Objective"
+    },
+    "action": {
+      "pause": "Pause",
+      "resume": "Resume",
+      "edit": "Edit",
+      "clear": "Clear",
+      "save": "Save",
+      "cancel": "Cancel"
+    }
+  },
   "error": {
     "details": "Details"
   }
