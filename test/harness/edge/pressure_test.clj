@@ -298,6 +298,24 @@
            (:pressureTokens answer)))
     (is (not (contains? answer :windowTokens)))))
 
+(deftest a-window-handed-in-replaces-the-one-the-record-described
+  ;; THE RUN-START TRIGGER'S OWN QUESTION (`compact-if-pressured!`): a band's window is the
+  ;; PREVIOUS call's model, and the two part company the moment a model is chosen between them
+  ;; (thread `88f8d8eb-…`, 2026-10-02: a restart dropped the session's in-memory override, the
+  ;; record still ended on the 256k model, and the run about to go out declared 1M). The number
+  ;; the caller HAS goes in here; nothing is recomputed from the record.
+  (let [reading {:pressureTokens 215524 :baseline "estimated"
+                 :windowTokens 256000 :percent 84
+                 :thresholdTokens 179200 :retainTokens 40960}]
+    (testing "the run's own window, and the three numbers derived from it"
+      (is (= {:pressureTokens 215524 :baseline "estimated"
+              :windowTokens 1000000 :percent 22
+              :thresholdTokens 700000 :retainTokens 160000}
+             (pressure/with-window reading 1000000))))
+    (testing "a model that declares none is NOT a window: the reading is left alone"
+      (is (= reading (pressure/with-window reading nil)))
+      (is (= reading (pressure/with-window reading 0))))))
+
 ;; ----------------------------------------------------------------- the endpoint
 
 (defn- with-server [thread-id turns f]

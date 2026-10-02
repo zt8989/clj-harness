@@ -611,6 +611,33 @@
   [thread-id messages ratios]
   (state->pressure (or (sessions/fold-value thread-id :pressure) (empty-band)) messages ratios))
 
+(defn with-window
+  "ANSWER + WINDOW -> the same reading with WINDOW in force: the three numbers that need a
+  window before they mean anything (`:percent`, `:thresholdTokens`, `:retainTokens`) are
+  recomputed from `:pressureTokens`, and `:windowTokens` becomes WINDOW.
+
+  THE WINDOW IS HANDED IN HERE RATHER THAN READ, and that is the whole reason this is a
+  function of its own: a band's own window comes off the RECORD (the last call's
+  `:context-window`, or the last `provider/init`), which is the PREVIOUS call's model. A run
+  that goes out under a model chosen since -- a switch, a restart that dropped the session's
+  in-memory override, an edited config -- is then measured against the wrong one, and the
+  difference is a compaction nobody asked for. Measured, 2026-10-02, thread `88f8d8eb-…`:
+  215,524 tokens read at 84% of a 256k window and compacted, on a run whose own first call
+  declared 1M -- 22%.
+
+  NIL IS NOT A WINDOW: a model that declares none leaves the answer exactly as the band gave
+  it, the fallback `log-pressure` has always had. A number the caller HAS and does not hand
+  in is the bug above; a number nobody has is not this function's business."
+  [answer window]
+  (if (and (number? window) (pos? window))
+    (assoc answer
+           :windowTokens    window
+           :percent         (long (Math/round (* 100.0 (/ (double (:pressureTokens answer))
+                                                          (double window)))))
+           :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
+           :retainTokens    (long (Math/floor (* (double window) retain-ratio))))
+    answer))
+
 (defn log-pressure
   "THREAD-ID + the request an edge has ASSEMBLED BUT NOT YET WRITTEN + WINDOW -> the same
   answer. MESSAGES supplies the surface, because the lines for the run in flight are still
@@ -625,17 +652,10 @@
    ;; writer is behind, a session is not held, a registration never happened -- and this call
    ;; sits on the run's own path, inside the try that turns any escape into RUN_ERROR. So
    ;; anything at all degrades to the estimate over MESSAGES.
-   (let [answer (try
+   (with-window (try
                   (band-pressure thread-id messages default-ratios)
-                  (catch Throwable _ (state->pressure (empty-band) messages default-ratios)))]
-     (if (and (number? window) (pos? window))
-       (assoc answer
-              :windowTokens    window
-              :percent         (long (Math/round (* 100.0 (/ (double (:pressureTokens answer))
-                                                             (double window)))))
-              :thresholdTokens (long (Math/floor (* (double window) threshold-ratio)))
-              :retainTokens    (long (Math/floor (* (double window) retain-ratio))))
-       answer))))
+                  (catch Throwable _ (state->pressure (empty-band) messages default-ratios)))
+                window)))
 
 ;; --------------------------------------------------- registering the consumer (tickets 03 / 04)
 ;;

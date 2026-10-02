@@ -195,8 +195,10 @@
         "the opening is still in the model view, verbatim")))
 
 (defn- auto-rows
-  ;; Six 4000-character entries (each ~1008 tokens) and a call whose own line declares WINDOW,
-  ;; so the meter has a window to divide by and a history that may or may not cross 0.7 of it.
+  ;; Six 4000-character entries (each ~1008 tokens) and a call whose own line declares WINDOW --
+  ;; WHAT THE RECORD SAYS, which is the PREVIOUS call's model. The pre-run trigger no longer
+  ;; divides by this number (`pressure/with-window`); `pin!` is what hands it the window this
+  ;; run goes out under, and a fixture that wants the two to agree names the same one twice.
   [window]
   (conj (vec (map (fn [i] (entry i (str "u" i) (apply str (repeat 4000 "a")))) (range 6)))
         ;; THE CALL CARRIES THE RUN'S OWN ID: that is what a real `model/start` row does, and
@@ -207,13 +209,19 @@
         (assoc (row "model/end" {:usage {:prompt_tokens 100 :completion_tokens 5 :total_tokens 105}})
                :runId "r1")))
 
+(defn- pin!
+  "Pin THREAD-ID to a scripted provider that declares WINDOW -- the window THIS RUN goes out
+  under, which is the one the pre-run trigger measures against. TURNS is its script."
+  [thread-id window turns]
+  (providers/use-provider! thread-id (assoc (fake/scripted turns) :context-window window)))
+
 (deftest the-pressure-trigger-compacts-at-the-threshold-and-not-below
   (let [stop (http/start! {:port 0})]
     (try
       (testing "over the threshold: it compacts by itself"
         (let [thread-id "auto-over"
               log       (plant! thread-id (auto-rows 8000))]
-          (providers/use-provider! thread-id (fake/scripted [{:content "AUTO SUMMARY"}]))
+          (pin! thread-id 8000 [{:content "AUTO SUMMARY"}])
           (try
             (#'http/compact-if-pressured! thread-id)
             (let [ks (mapv replay/kind (wait-for-rows log "compaction/end"))]
@@ -226,11 +234,47 @@
       (testing "below it: nothing at all"
         (let [thread-id "auto-under"
               log       (plant! thread-id (auto-rows 100000))]
-          (providers/use-provider! thread-id (fake/scripted [{:content "SHOULD NOT BE USED"}]))
+          (pin! thread-id 100000 [{:content "SHOULD NOT BE USED"}])
           (try
             (#'http/compact-if-pressured! thread-id)
             (let [ks (mapv replay/kind (wait-for-rows log "compaction/start"))]
               (is (not (some #{"context/compacted"} ks)) "no rows, no model call"))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (finally (stop)))))
+
+(deftest the-trigger-measures-the-window-the-run-goes-out-under-not-the-records
+  ;; THE 2026-10-02 INCIDENT, thread `88f8d8eb-…`: the record's newest call declared 256k (the
+  ;; session's in-memory override was dropped by a restart, so the record still ends on the
+  ;; model it had left), the run about to go out declared 1M, and the pre-run trigger divided
+  ;; 215,524 tokens by the 256k and folded 160k of them into a summary at 84% of a window the
+  ;; run was not using. THE RECORD'S WINDOW IS THE PREVIOUS CALL'S MODEL -- so both halves
+  ;; below read the SAME kind of record under two different windows, and the window that
+  ;; decides is the run's.
+  (let [stop (http/start! {:port 0})]
+    (try
+      (testing "the record says 8k and the run says 128k: nothing happens"
+        (let [thread-id "window-run-wider"
+              log       (plant! thread-id (auto-rows 8000))]
+          (pin! thread-id 128000 [{:content "SHOULD NOT BE USED"}])
+          (try
+            (#'http/compact-if-pressured! thread-id)
+            (let [ks (mapv replay/kind (wait-for-rows log "compaction/start"))]
+              (is (not-any? #{"compaction/start" "context/compacted"} ks)
+                  "sixteen times the room the record described: there is nothing to fold"))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (testing "the record says 100k and the run says 8k: it compacts"
+        (let [thread-id "window-run-narrower"
+              log       (plant! thread-id (auto-rows 100000))]
+          (pin! thread-id 8000 [{:content "AUTO SUMMARY"}])
+          (try
+            (#'http/compact-if-pressured! thread-id)
+            (let [ks (mapv replay/kind (wait-for-rows log "compaction/end"))]
+              (is (some #{"compaction/start"} ks)
+                  "the record says there is room; the run about to go out has none"))
             (finally
               (providers/use-provider! thread-id nil)
               (io/delete-file log true)))))

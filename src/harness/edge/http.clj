@@ -6651,9 +6651,16 @@
 
 (defn- compact-if-pressured!
   "AUTO COMPACTION (ticket 04): at the start of a run, BEFORE it derives its request, measure
-  the pressure against the window the record describes and compact when it is at or over the
-  threshold. Below the threshold, nothing happens at all -- no rows, no model call.
-  `harness.edge.pressure` owns the threshold and where the window comes from.
+  the pressure against THE WINDOW THIS RUN WILL GO OUT UNDER and compact when it is at or over
+  the threshold. Below the threshold, nothing happens at all -- no rows, no model call.
+  `harness.edge.pressure` owns the threshold and `with-window` is where the window goes in.
+
+  THE WINDOW IS THE RUN'S OWN PROVIDER'S, NOT THE RECORD'S. The record describes the PREVIOUS
+  call's model, and the two disagree the moment a model is chosen between them -- a switch, a
+  restart that dropped the session's in-memory override, an edited config. Measuring against
+  the record then compacts a conversation that fits: thread `88f8d8eb-…`, 2026-10-02, read 84%
+  of the 256k the record still described and folded 160k tokens into a summary, on a run whose
+  own first call declared 1M (22%).
 
   FAILS SOFT: a report-only meter must never become a dead run, so anything wrong here is
   logged and the run carries on uncompacted.
@@ -6671,13 +6678,23 @@
   (try
     (locking compaction-lock
       (when-some [f (replay/find-log (home/projects-dir) stem)]
-        (let [ratios (compaction/config stem)
+        (let [ratios   (compaction/config stem)
+              ;; THE WINDOW THIS RUN WILL GO OUT UNDER, which is not the window the record
+              ;; describes (see `pressure/with-window`), so the run's provider is resolved HERE
+              ;; -- once, for both readings below AND for `run-compaction!` at the bottom, which
+              ;; used to resolve it a second time.
+              provider (providers/current-provider stem)
+              window   (:context-window provider)
               ;; 1. THE CHEAP CHECK (ticket 03): the meter band answers 'how full is the next
               ;;    request' WITHOUT reading the record, so a session nowhere near the
               ;;    threshold never touches the file -- which is almost every run. THE SURFACE
               ;;    IS THE REQUEST the next call would carry, system message and all
               ;;    (`harness.edge.pressure/live-surface`), not the conversation.
-              quick  (pressure/band-pressure stem (pressure/live-surface stem) ratios)]
+              ;;    THE RATIOS ARE THE HOME'S (`compaction/config`), the same pair the reading
+              ;;    below and `plan` itself are handed -- only the WINDOW is replaced.
+              quick    (pressure/with-window
+                         (pressure/band-pressure stem (pressure/live-surface stem) ratios)
+                         window)]
           (when (and (:thresholdTokens quick)
                      (>= (:pressureTokens quick) (:thresholdTokens quick)))
             ;; 2. AT OR OVER THE THRESHOLD, and only now is the record worth reading: the
@@ -6687,11 +6704,13 @@
                   pruned  (prune-results! stem records)
                   records (or (:records pruned) records)
                   ;; 3. RE-MEASURE over what the model would now be handed.
-                  answer  (pressure/records->pressure records (pressure/live-surface stem) ratios)]
+                  answer  (pressure/with-window
+                           (pressure/records->pressure records (pressure/live-surface stem) ratios)
+                           window)]
               (when (and (:thresholdTokens answer)
                          (>= (:pressureTokens answer) (:thresholdTokens answer))
                          (not (compaction/lock-active? records)))
-                (when-some [provider (providers/current-provider stem)]
+                (when provider
                   (run-compaction! stem provider records (:windowTokens answer) ratios
                                    ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
                                    ;; threshold must be what comes off, or the compaction is not

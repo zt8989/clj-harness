@@ -7139,6 +7139,12 @@
     "prune-e2e"
     [{:content "DONE"}]
     (fn []
+      ;; THE RUN'S OWN WINDOW. The pre-run trigger measures against the PROVIDER's declared
+      ;; window now, not the one the record's last call declared (`pressure/with-window`), so
+      ;; the pin has to say 10000 -- the same number the `model/start` line below writes, as it
+      ;; would in production. (`with-server` pinned the double's own 128000.)
+      (providers/use-provider! "prune-e2e" (assoc (fake/scripted [{:content "DONE"}])
+                                                  :context-window 10000))
       (let [tid   "prune-e2e"
             f     (log-file tid)
             giant (apply str (repeat 60000 "x"))   ;; ~15000 tokens, over a 10000-window's 7000
