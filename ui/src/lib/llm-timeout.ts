@@ -22,7 +22,7 @@ export type TimeoutValue = {
   readonly attempt?: unknown;
   readonly limit?: unknown;
   readonly retrying?: unknown;
-  readonly emitted?: unknown;
+  readonly answered?: unknown;
 };
 
 /// What the card draws, once the value has been read.
@@ -31,7 +31,7 @@ export type TimeoutView = {
   readonly attempt: number;
   readonly limit: number;
   readonly retrying: boolean;
-  readonly emitted: boolean;
+  readonly answered: boolean;
 };
 
 /// A non-negative finite number, or null for anything else.
@@ -46,7 +46,7 @@ function numberOrNull(value: unknown): number | null {
 /// deliberate. `idleMs`, `attempt` and `limit` are what the card's sentence SAYS ("500ms",
 /// "retry 1/3"), so a frame missing one would be a card claiming something the server never
 /// said -- and drawing nothing is the honest answer, exactly as `injectionView` answers null
-/// for a frame with no text. `retrying` and `emitted` fall back to `false`, which is the safe
+/// for a frame with no text. `retrying` and `answered` fall back to `false`, which is the safe
 /// direction: the row then says the run is not being retried, which is what an unreadable
 /// flag beside a frame like this most likely means.
 export function timeoutView(value: unknown): TimeoutView | null {
@@ -61,17 +61,20 @@ export function timeoutView(value: unknown): TimeoutView | null {
     attempt,
     limit,
     retrying: v.retrying === true,
-    emitted: v.emitted === true,
+    answered: v.answered === true,
   };
 }
 
 /// Which of the THREE ENDINGS the server announced, which is what the expanded card's
 /// sentence is about.
 ///
-/// THE ORDER THE CASES ARE ASKED IN MATTERS. A timeout AFTER the call had already put
-/// something on the wire is never retried, so `emitted` is read first; the other two only
-/// describe a call that had said nothing yet, and they differ in whether another attempt
-/// follows this one.
+/// THE ORDER THE CASES ARE ASKED IN MATTERS. A timeout AFTER the call had already BEGUN ITS
+/// ANSWER -- text, or a tool call -- is never retried, so `answered` is read first; the other
+/// two only describe a call that had said nothing yet, and they differ in whether another
+/// attempt follows this one. THINKING IS NOT ANSWERING (2026-10-02): a call that had only put
+/// reasoning on the wire is retried exactly like one that had said nothing at all, which is
+/// the server's own rule (`harness.kernel.loop/answered`) and reaches this module as
+/// `answered false` -- the retrying card, not the 'not retried' one.
 ///
 /// A DISCRIMINANT RATHER THAN A KEY, because the words belong to the catalogs and the call
 /// sites that name them (`thread.json`, through `t(...)`) want LITERAL keys -- i18next is
@@ -81,7 +84,7 @@ export type TimeoutOutcome = "partial" | "retrying" | "exhausted";
 
 /// The ending VIEW describes -- see `TimeoutOutcome`.
 export function timeoutOutcome(view: TimeoutView): TimeoutOutcome {
-  if (view.emitted) return "partial";
+  if (view.answered) return "partial";
   if (view.retrying) return "retrying";
   return "exhausted";
 }

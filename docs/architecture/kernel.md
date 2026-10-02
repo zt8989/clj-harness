@@ -81,12 +81,14 @@ drive! :
 把两条包起来的是 `harness.kernel.loop/model-call!`，它是「失败也要闭合」这唯一一件事的落点。
 
 **一次调用空闲超过 `:llm :idle-timeout-ms`（默认 30s，2026-09-29 前是 500ms）就当作断线**，`harness.kernel.loop/model-call-watched`
-在等这次调用的同时也在等这个 deadline：什么都没发过就重试（默认 3 次，即最多 4 次尝试），已经发过
-半截内容就结束这个 run——重试会把半截答案在客户端上再接一遍。真正的**断开**发生在读取层
+在等这次调用的同时也在等这个 deadline：**答案还没开口就重试**（默认 3 次，即最多 4 次尝试）——一个字都没发过，
+或**只发过思考**都算（`harness.kernel.loop/answered` 只认正文与工具调用：思考不是答案，2026-10-02 起）；
+**已经有正文或工具调用上了线就结束这个 run**——重试会把半截答案在客户端上再接一遍（被放弃的那次思考会
+留在屏幕上，帧发出去收不回，而推理帧本来就不进记录）。真正的**断开**发生在读取层
 （`harness.kernel.llm/idle-guarded-lines` 关掉响应体）；kernel 这一侧的 deadline 覆盖的是「一个什么都
 不说的 provider」。**clock 由 `:model/start` 上弦**，不从这次尝试开始算：在那之前是 harness 自己的
 活（resolve 工具表会启动 MCP server）。每次超时都往会话里发一帧 CUSTOM `llm-timeout`（`attempt` /
-`limit` / `retrying` / `emitted`），**不落盘**——`harness.edge.http/wire-only-frame?` 让它只广播、不记行。
+`limit` / `retrying` / `answered`），**不落盘**——`harness.edge.http/wire-only-frame?` 让它只广播、不记行。
 **被放弃的那次尝试是整条丢掉的，不只是不再听**：谁先写 `gate` 谁说了算（`harness.kernel.loop/announced!`），
 于是它此后的回答既不进 history、不进这个 run 的账，也不落记录——迟到的回答是没人等的回答，收下它就会毒
 下一次尝试的请求（带 `tool_calls` 的 assistant 消息后面没有 tool 消息，任何 OpenAI 形状的厂商都拒）。

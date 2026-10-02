@@ -37,39 +37,41 @@ const cases: readonly Case[] = [
         attempt: 1,
         limit: 3,
         retrying: true,
-        emitted: false,
+        answered: false,
       });
       expect(first).toEqual({
         idleMs: 500,
         attempt: 1,
         limit: 3,
         retrying: true,
-        emitted: false,
+        answered: false,
       });
       expect(timeoutOutcome(first!)).toBe("retrying");
 
-      // THE BUDGET IS SPENT: nothing emitted, no retry left, the run is ending. The same
+      // THE BUDGET IS SPENT: nothing answered, no retry left, the run is ending. The same
       // numbers, and the sentence is the other one.
       const spent = timeoutView({
         idleMs: 500,
         attempt: 4,
         limit: 3,
         retrying: false,
-        emitted: false,
+        answered: false,
       });
       expect(spent!.retrying).toBe(false);
       expect(timeoutOutcome(spent!)).toBe("exhausted");
 
-      // AND THE CASE THE ORDER OF THE TWO QUESTIONS EXISTS FOR: the call had ALREADY put
-      // part of an answer on the wire before it went quiet, so there is no retry no matter
-      // what the budget says -- a second attempt would append to the message the first one
-      // opened, and the client would read the half-written answer twice.
+      // AND THE CASE THE ORDER OF THE TWO QUESTIONS EXISTS FOR: the call had ALREADY begun
+      // its ANSWER on the wire -- text or a tool call -- before it went quiet, so there is no
+      // retry no matter what the budget says: a second attempt would append to the message the
+      // first one opened, and the client would read the half-written answer twice. THINKING is
+      // not that answer, and the server sends `answered false` for a call that had only
+      // thought (`harness.kernel.loop/answered`).
       const partial = timeoutView({
         idleMs: 500,
         attempt: 2,
         limit: 3,
         retrying: false,
-        emitted: true,
+        answered: true,
       });
       expect(timeoutOutcome(partial!)).toBe("partial");
 
@@ -103,11 +105,11 @@ const cases: readonly Case[] = [
         attempt: 1,
         limit: 3,
         retrying: false,
-        emitted: false,
+        answered: false,
       });
       expect(
-        timeoutView({ idleMs: 500, attempt: 1, limit: 3, retrying: "yes", emitted: 1 }),
-      ).toEqual({ idleMs: 500, attempt: 1, limit: 3, retrying: false, emitted: false });
+        timeoutView({ idleMs: 500, attempt: 1, limit: 3, retrying: "yes", answered: 1 }),
+      ).toEqual({ idleMs: 500, attempt: 1, limit: 3, retrying: false, answered: false });
     },
   },
   {
@@ -120,7 +122,7 @@ const cases: readonly Case[] = [
       const card = {
         type: "data" as const,
         name: TIMEOUT_PART,
-        data: { idleMs: 500, attempt: 1, limit: 3, retrying: true, emitted: false },
+        data: { idleMs: 500, attempt: 1, limit: 3, retrying: true, answered: false },
       };
 
       // THE CONTRACT: a card-only message crosses the wire as NOTHING. This is what makes

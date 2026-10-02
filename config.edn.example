@@ -95,8 +95,11 @@
 
  ;; THE IDLE GUARD. A model call that says nothing for `:idle-timeout-ms` (default 30 s) is
  ;; treated as a dead connection: the response body is closed, the call is abandoned, and --
- ;; when it had not yet produced a single frame -- tried again, up to `:idle-timeout-retries`
- ;; times. THE DEADLINE IS GENEROUS ON PURPOSE (it was 500 ms until 2026-09-29): half a second
+ ;; when its ANSWER had not yet begun -- tried again, up to `:idle-timeout-retries` times.
+ ;; THINKING COUNTS AS NOT YET ANSWERING (2026-10-02): an attempt that had only streamed
+ ;; reasoning is tried again exactly like one that had said nothing, while text or a tool call
+ ;; on the wire ends the run instead.
+ ;; THE DEADLINE IS GENEROUS ON PURPOSE (it was 500 ms until 2026-09-29): half a second
  ;; cut off vendors that were merely slow to their first byte, and the answer that arrived
  ;; afterwards poisoned the attempt that followed. `0` for either knob turns it off (no
  ;; deadline / no retry), which is what a session talking to a vendor that never answers -- or
