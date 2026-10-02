@@ -525,14 +525,22 @@ const GeneralPage: FC<{
           it changes this browser, not this harness. */}
       <LanguageRow />
 
-      {/* THE SENSITIVE PATHS ARE THE SECOND THING ON THIS PAGE THAT IS NOT ABOUT A MODEL,
-          and the only control here that changes what a tool call may DO rather than what a
-          run talks to. It sits with the language because that is the same kind of fact: a
-          setting of THIS HOME, not of this session. */}
-      <SensitivePathsRow />
     </div>
   );
 };
+
+// ------------------------------------------------------------------ Security
+//
+// THE SENSITIVE PATHS ARE NOT A MODEL SETTING and not this session's: they are THIS HOME's,
+// on top of the built-in list. A PAGE of its own rather than a section of General, because it
+// is the one control that changes what a tool call may DO rather than what a run talks to --
+// and because 'where do I say what is secret here' deserves the same answer as every other
+// question about this session. The row itself lives in components/security-paths.tsx.
+const SecurityPage: FC = () => (
+  <div data-slot="settings-page-security" className="flex flex-col gap-4">
+    <SensitivePathsRow />
+  </div>
+);
 
 // -------------------------------------------------------------------- Models
 
@@ -1714,18 +1722,24 @@ const SessionsPage: FC = () => {
 /// and because a list of definitions plus a form that rewrites a file is not a row in
 /// somebody else's report.
 ///
-/// `general` / `models` / `mcp` / `subagents` / `sessions`.
+/// SECURITY IS THE SIXTH, and it was a section of General until it outgrew it: the sensitive
+/// list is THIS HOME's (not this session's), and it is the one control here that changes what
+/// a tool call may DO rather than what a run talks to. It gets the same answer as the others:
+/// "where do I say what is secret here".
+///
+/// `general` / `models` / `mcp` / `security` / `groups` / `subagents` / `sessions`.
 ///
 /// SESSIONS IS THE FIFTH, and it is the one page about the LIST rather than about the
 /// configuration: what conversations this home keeps, and filing them away or taking them back
 /// in batches. It is here rather than in the sidebar because a batch is not a row action -- the
 /// sidebar's own verb is per row, and it stays there.
-type Page = "general" | "models" | "mcp" | "groups" | "subagents" | "sessions";
+type Page = "general" | "models" | "mcp" | "security" | "groups" | "subagents" | "sessions";
 
 const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "general", label: (t) => t("page.general") },
   { id: "models", label: (t) => t("page.models") },
   { id: "mcp", label: (t) => t("page.mcp") },
+  { id: "security", label: (t) => t("page.security") },
   { id: "groups", label: (t) => t("page.groups") },
   { id: "subagents", label: (t) => t("page.subagents") },
   { id: "sessions", label: (t) => t("page.sessions") },
@@ -1946,6 +1960,10 @@ export const SettingsPanel: FC<{
                 <McpPanel threadId={threadId} />
               </section>
             )}
+            {/* NO `threadId`: the sensitive list belongs to THIS HOME, not to a session.
+                A page of its own now (see SecurityPage); components/security-paths.tsx draws
+                the built-in half as not deletable and the custom half as the person's own. */}
+            {page === "security" && <SecurityPage />}
             {/* NO `threadId` EITHER: config.edn's :session is this HOME's, and which group a
                 given session resolves is the server's business, not this page's. It reads the
                 CATALOG from the panel because the model picker names vendors and ids that
