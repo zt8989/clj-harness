@@ -800,7 +800,12 @@ const ProviderForm: FC<{
         )}
         {draft.models.map((row, i) => (
           <ModelRowEditor
-            key={`${i}-${row.id}`}
+            // THE KEY IS THE POSITION, NOT THE ID -- the id is what this very row's
+            // input edits, so a key carrying it remounts the row on every keystroke
+            // and the field drops focus after each character. Rows are added at the
+            // tail and removed whole; they are never reordered, so the index is
+            // stable for as long as the row is on screen.
+            key={i}
             row={row}
             // The LAST model cannot go: a vendor with no models cannot be selected
             // at all, so the form would be building something the file refuses.
