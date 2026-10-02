@@ -131,3 +131,28 @@ turn/end         {steps, messages, seqFrom, seqTo}   ← 进记录
    这条规则整个删掉。
 3. **同一个 run 里两条人的消息**不能各开一段：`one-run` 本来就会在一个段里开多个轮。判据是
    「这一段已经有返回侧的东西了」（`:streaming` / `:returned`），不是「已经有轮了」。
+
+### 票 03（UI 一半）与票 04 落地（2026-10-02）
+
+| 文件 | 改了什么 |
+|---|---|
+| `ui/src/lib/feed.ts` | `TurnRow` 类型 + `WindowFrame.turns` |
+| `ui/src/lib/window.ts` | `Window.turns`（四个合并函数都带上，`applied` / `aligned` 的 identity 判据也认它） |
+| `ui/src/lib/turn-rows.ts` | 新 store：一轮的账 + 每条 entry 的记录行号，按 message id 记住；`turnOfMessage` 是「这条消息在哪一轮」的唯一答案 |
+| `ui/src/lib/turns.ts` | `turnBounds` 改成问 `turnOf`（记录说的）；新增 `turnStepBounds`（一轮里的**助手**那些消息）；`turnCounts` / `turnStepsFrom` 删掉 |
+| `ui/src/components/turn-steps.tsx` | 所有选择器改成读 store（`useTurnOf`），步数直接读行里的数 |
+| `ui/src/app.tsx` | `commit` 与两条 hydration 路都把 turns 交给 store |
+| `src/harness/kernel/session.clj` | **写流的 live step 现在拿到真行号**（以前是 nil）——见下面第 5 个坑 |
+
+### 又踩了四个坑
+
+4. **一轮里有人的那条消息**：记录的边界站在它界定的东西**前面**（ADR 0017），所以 `turnBounds` 给出的轮从**问题**开始，而摘要行是**助手**那些消息的事。于是多了 `turnStepBounds`：轮里的助手那段才是折叠的对象，它的第一条画摘要行。
+5. **写流的 live step 以前拿到的是 nil 行号**（`harness.kernel.session/row-written!` 的注释就写着「offset 未知」）。`harness.edge.stats` 不看它，所以一直没露出来；`harness.edge.turns` 要**写下这一轮开在哪一行**，于是整个轮都是 `{:from nil}`，客户端一条都认不出来。修法是把流监听拿到的 `:seq`（写入落地的那个 offset，`ADR 0007` 保证它已经是真的）传下去。
+6. **`useSyncExternalStore` 里每次 new 一个 `[]`** 就是每次一个新的快照 —— React 无限重渲染（线上就是 React error #185）。`turnRows` 对「还没有轮」的那个答案是一个冻结的常量。
+7. **hydration 那扇门不走 `commit`**：`app.tsx` 的 `read` 适配器自己把窗口交给 host，于是 turns 从没进过 store —— 打开一场旧会话时摘要行不在（重开一次就没了），只有跑过一次的会话才对。三处都要说一句。
+
+### 判据（票 03 / 04）
+
+- `ui`：`npm run typecheck`、`npm run build` 都过；`npm test` **226 用例全绿**（含改写过的 `suites/turns.ts`）。
+- 后端：trajectory / sessions / stats / mux / normalized / replay **150 用例 / 677 断言全绿**；`http-test` 见上。
+- **真浏览器走查**（`node scripts/dev.mjs --scripted` + 本机 Playwright）：发一句「看看这个项目」，一轮折叠成一条摘要行，读作 **「2 步」**，与记录里那条 `turn/end` 行的 `steps` 相等；页面没有 React 报错。

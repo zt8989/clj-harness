@@ -25,7 +25,7 @@
 // to happen.
 import type { TFunction } from "i18next";
 
-import type { WindowEntry, WindowFrame } from "./feed";
+import type { TurnRow, WindowEntry, WindowFrame } from "./feed";
 
 /// What a frame does to the window, as a value rather than as a side effect: the host
 /// decides what to do about it (fetch, reconnect, say something), and the rules below
@@ -65,6 +65,9 @@ export type Window = {
   /// `settled`, `unfinished`) -- the one fact in a window that is not about position.
   readonly state: string | null;
   /// HOW MANY TIMES THIS WINDOW CHANGED. Ours, not the server's, and not a position.
+  /// THE TURNS THE RECORD HAS (ADR 0017), as the newest frame carried them. This is what says
+  /// which entries belong together and how much each turn did -- the read side folds NOTHING.
+  readonly turns: readonly TurnRow[];
   readonly revision: number;
 };
 
@@ -77,6 +80,26 @@ function newest(a: number | null, b: number | null): number | null {
   if (a === null) return b;
   if (b === null) return a;
   return Math.max(a, b);
+}
+
+/// WHETHER TWO TURN LISTS SAY THE SAME THING. `applied` returns the window it was given, by
+/// identity, when a frame changes nothing -- and the turn list is part of that answer: a frame
+/// that moved it without this would be a change the renderer never saw.
+function sameTurns(a: readonly TurnRow[], b: readonly TurnRow[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((one, index) => {
+      const other = b[index];
+      return (
+        other !== undefined &&
+        one.turnId === other.turnId &&
+        one.from === other.from &&
+        one.to === other.to &&
+        one.steps === other.steps &&
+        one.messages === other.messages
+      );
+    })
+  );
 }
 
 const idOf = (entry: WindowEntry): string | null => {
@@ -201,6 +224,7 @@ export function windowFrom(frame: WindowFrame): Window {
     cursor: frame.cursor ?? frame.baseSeq ?? null,
     generation: frame.generation ?? null,
     state: frame.state ?? null,
+    turns: frame.turns ?? [],
     revision: 1,
   };
 }
@@ -247,15 +271,23 @@ export function applied(window: Window, frame: WindowFrame): { window: Window; e
   // THE CURSOR ONLY MOVES FORWARD AND ONLY TO A NUMBER THE SERVER SENT. A frame whose
   // entries are all still in the writer's queue carries no cursor, and the old one
   // stands: it is the honest answer to "what have I been told about".
+  const turns = frame.turns ?? window.turns;
   const cursor = newest(window.cursor, frame.cursor ?? null);
   const state = frame.state ?? window.state;
   const generation = frame.generation ?? window.generation;
-  if (!grown.changed && cursor === window.cursor && state === window.state && generation === window.generation) {
+  if (
+    !grown.changed &&
+    cursor === window.cursor &&
+    state === window.state &&
+    generation === window.generation &&
+    sameTurns(turns, window.turns)
+  ) {
     return { window, effect: { kind: "none" } };
   }
   return {
     window: {
       ...window,
+      turns,
       entries: grown.changed ? grown.entries : window.entries,
       cursor,
       generation,
@@ -280,6 +312,7 @@ export function prepended(window: Window, frame: WindowFrame): Window {
     baseSeq: frame.baseSeq ?? window.baseSeq,
     hasMore: frame.hasMore ?? false,
     generation: frame.generation ?? window.generation,
+    turns: frame.turns ?? window.turns,
     revision: window.revision + 1,
   };
 }
@@ -344,7 +377,8 @@ export function aligned(window: Window, frame: WindowFrame): { window: Window; e
       !grown.changed &&
       cursor === window.cursor &&
       state === window.state &&
-      generation === window.generation
+      generation === window.generation &&
+      sameTurns(frame.turns ?? window.turns, window.turns)
     ) {
       return { window, effect: { kind: "none" } };
     }
@@ -355,6 +389,7 @@ export function aligned(window: Window, frame: WindowFrame): { window: Window; e
         cursor,
         generation,
         state,
+        turns: frame.turns ?? window.turns,
         revision: window.revision + 1,
       },
       effect: { kind: "none" },

@@ -290,7 +290,7 @@
   (`harness.edge.replay/entries`), and this one SHOWS it, because 'what the model saw' is
   this reader's question.
 
-  PUBLIC, like `stats/incomplete?` and `stats/user-ids`, because a SECOND reader needs
+  PUBLIC, like `stats/incomplete?`, because a SECOND reader needs
   exactly this split: harness.edge.context counts the messages of the run the last
   reporting call belongs to (the system message against everything else), and 'which
   records are one run, and which side of it is a message on' is one rule -- a second
@@ -791,8 +791,7 @@
   not listed, because a client restates its whole conversation on every run.
 
   AN INJECTION IS NOT A TURN: the opening enters as ordinary user messages, and a turn
-  belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule
-  `stats/user-ids` counts turns with too).
+  belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule).
 
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the

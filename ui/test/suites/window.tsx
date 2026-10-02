@@ -68,6 +68,7 @@ const held = (entries: WindowEntry[], base: number, hasMore: boolean, cursor: nu
   generation: "gen-1",
   state: "running",
   revision: 1,
+  turns: [],
 });
 
 /// AN APPEND FRAME AS THE SERVER SENDS ONE: the entries that landed after the reader's

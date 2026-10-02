@@ -15,15 +15,10 @@ import { expect } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
 import { translator } from "../support/locale";
-import {
-  turnBounds,
-  turnConclusion,
-  turnCounts,
-  turnIsSettled,
-  turnStepsFrom,
-  turnSummaryLabel,
-  type TurnMessage,
-} from "../../src/lib/turns";
+import { turnBounds, turnConclusion, turnIsSettled, turnSummaryLabel } from "../../src/lib/turns";
+import type { TurnMessage, TurnOf } from "../../src/lib/turns";
+import { forgetTurnRows, noteTurnRows, turnOfMessage, turnRows } from "../../src/lib/turn-rows";
+import type { TurnRow } from "../../src/lib/feed";
 import { forgetTurnNumbers, noteTurnEnd, serverTurnNumbers } from "../../src/lib/turn-numbers";
 import type { FactFrame } from "../../src/lib/mux";
 
@@ -58,41 +53,56 @@ function assistant(status: string, calls = 0): TurnMessage {
 
 const user: TurnMessage = { role: "user" };
 
+/// WHAT THE RECORD SAYS ABOUT THE FIXTURE (ADR 0017): two turns, each with the numbers its own
+/// `turn/end` row carried. `from` / `to` are RECORD LINE NUMBERS -- that is what `lib/turn-rows.ts`
+/// compares an entry's offset against, and it is the whole of the boundary.
+const ROWS: readonly TurnRow[] = [
+  { turnId: "t1", from: 10, to: 20, steps: 3, messages: 3 },
+  { turnId: "t2", from: 30, to: 40, steps: 1, messages: 1 },
+];
+
+/// WHICH MESSAGE ID THE RECORD PUTS IN WHICH TURN -- the answer `turnOfMessage` computes from the
+/// window's rows and each entry's offset. Spelled out here so the boundary cases below are about
+/// the UI's use of the answer, not about the lookup.
+const IN_TURN: Readonly<Record<string, string>> = { m1: "t1", m2: "t1", m3: "t1", m5: "t2" };
+const turnOf: TurnOf = (message) => IN_TURN[message.id ?? ""];
+
 /// Two turns: a user message, three assistant steps, then a second user message
-/// and one answer. The shape every case below reads.
+/// and one answer. The shape every case below reads. THE IDS ARE THE ONES THE WINDOW HANDS THE
+/// RUNTIME (`WindowEntry.message.id`), because that is the name `turnOf` is asked with.
 const THREAD: readonly TurnMessage[] = [
-  user, // 0
-  assistant("complete", 1), // 1  } first turn
-  assistant("complete", 2), // 2  }
-  assistant("complete"), // 3     } (the answer)
-  user, // 4
-  assistant("complete"), // 5     second turn, a single message
+  { ...user, id: "m0" }, // 0
+  { ...assistant("complete", 1), id: "m1" }, // 1  } first turn
+  { ...assistant("complete", 2), id: "m2" }, // 2  }
+  { ...assistant("complete"), id: "m3" }, // 3     } (the answer)
+  { ...user, id: "m4" }, // 4
+  { ...assistant("complete"), id: "m5" }, // 5     second turn, a single message
 ];
 
 const cases: Case[] = [
   {
-    name: "a-turn-is-a-run-of-adjacent-assistant-messages",
+    name: "a-turn-is-the-run-the-record-puts-a-message-in",
     run: async () => {
-      // Every index of a turn answers with the same boundaries, and they are
-      // found by walking the LIST: the user messages are what end a turn, so a
-      // turn cannot be defined by a field somebody has to keep in step.
-      expect(turnBounds(THREAD, 1)).toEqual({ first: 1, last: 3 });
-      expect(turnBounds(THREAD, 2)).toEqual({ first: 1, last: 3 });
-      expect(turnBounds(THREAD, 3)).toEqual({ first: 1, last: 3 });
+      // Every index of a turn answers with the same boundaries, and they come from the RECORD:
+      // `turnOf` is what the window's `turn/start` / `turn/end` rows say, and the list is only
+      // asked which messages are in it.
+      expect(turnBounds(THREAD, 1, turnOf)).toEqual({ first: 1, last: 3 });
+      expect(turnBounds(THREAD, 2, turnOf)).toEqual({ first: 1, last: 3 });
+      expect(turnBounds(THREAD, 3, turnOf)).toEqual({ first: 1, last: 3 });
 
       // A turn of one message is one message: there is nothing to fold behind a
       // header, which is what keeps a plain answer plain.
-      expect(turnBounds(THREAD, 5)).toEqual({ first: 5, last: 5 });
+      expect(turnBounds(THREAD, 5, turnOf)).toEqual({ first: 5, last: 5 });
 
-      // A user message is its own bounds -- the fold never sees one (only
-      // assistant messages call these), but returning a neighbour's turn from an
-      // index that is not an assistant message would be a silent lie.
-      expect(turnBounds(THREAD, 4)).toEqual({ first: 4, last: 4 });
-      expect(turnBounds(THREAD, 0)).toEqual({ first: 0, last: 0 });
+      // A message the record puts in NO turn is its own bounds -- the fold never sees one
+      // (only assistant messages call these), but handing it a neighbour's turn would be a
+      // silent lie about where the record put it.
+      expect(turnBounds(THREAD, 4, turnOf)).toEqual({ first: 4, last: 4 });
+      expect(turnBounds(THREAD, 0, turnOf)).toEqual({ first: 0, last: 0 });
 
       // Out of range does not throw: the runtime can render a message whose
       // neighbour has just been evicted, and a crash there would take the page.
-      expect(turnBounds(THREAD, 99)).toEqual({ first: 99, last: 99 });
+      expect(turnBounds(THREAD, 99, turnOf)).toEqual({ first: 99, last: 99 });
     },
   },
   {
@@ -137,34 +147,20 @@ const cases: Case[] = [
     },
   },
   {
-    name: "the-summary-line-counts-the-turns-own-steps",
+    name: "the-summary-line-prints-the-records-own-step-count",
     run: async () => {
-      // ONE STEP IS ONE ASSISTANT MESSAGE on this side of the wire: the client cannot see
-      // requests, only what they left behind, and a request leaves one message. So a turn's
-      // steps are the run of assistant messages `turnBounds` found, and the user message
-      // that started the turn is not one of them.
-      expect(turnCounts(THREAD, 1, 3)).toEqual({ steps: 3 });
-      expect(turnCounts(THREAD, 5, 5)).toEqual({ steps: 1 });
+      // THE NUMBER IS THE RECORD'S (ADR 0017). A turn's `turn/end` row carries `steps`, the window
+      // hands it over with the turn (`TurnRow.steps`), and the line prints it. There is no count on
+      // this side any more -- which is the point of the decision: the client used to count adjacent
+      // assistant messages and agreed with the record everywhere except a request the vendor made
+      // us send twice.
+      expect(ROWS[0]?.steps, "what the record said the first turn did").toBe(3);
+      expect(ROWS[1]?.steps).toBe(1);
 
-      // AND THE PARTS DO NOT CHANGE IT: reasoning, text and a tool call in one message are
-      // still ONE request. What a request answered with is not a second step -- the record's
-      // `step/start` rows say the same thing, one per request.
-      const parts: TurnMessage = {
-        role: "assistant",
-        status: { type: "complete" },
-        parts: [{ type: "reasoning" }, { type: "text" }, { type: "tool-call" }],
-      };
-      expect(turnCounts([user, parts], 1, 1)).toEqual({ steps: 1 });
-
-      // A message with no parts at all (a step whose parts were evicted, an answer with
-      // nothing in it) is still a request that went out.
-      const bare: TurnMessage = { role: "assistant", status: { type: "complete" } };
-      expect(turnCounts([user, bare], 1, 1)).toEqual({ steps: 1 });
-
-      // The line itself is just the step count now (`.scratch/step-events`, ticket 05): the
-      // message half said this same number, and the tool-call half said less. The count goes
-      // through i18next's `count`, so English's singular form is pinned here too -- a
-      // hand-rolled rule would have said `1 steps`.
+      // The line itself is just that count (`.scratch/step-events`, ticket 05): the message half
+      // said this same number, and the tool-call half said less. It goes through i18next's `count`,
+      // so English's singular form is pinned here too -- a hand-rolled rule would have said
+      // `1 steps`.
       expect(turnSummaryLabel(72, en)).toBe("72 steps");
       expect(turnSummaryLabel(1, en)).toBe("1 step");
 
@@ -221,16 +217,33 @@ const cases: Case[] = [
     },
   },
   {
-    name: "one-owner-per-turn-the-servers-number-only-for-the-turn-it-closed",
+    name: "the-record-says-which-turn-a-message-is-in",
     run: async () => {
-      // THE CHOICE ADR 0006 DECISION 5 ASKS FOR, as a value: when a turn folds there is ONE
-      // owner, and which one it is depends on the turn -- not on which reading is trusted.
-      expect(turnStepsFrom(3, 1, true), "the turn the server just closed: its number wins").toBe(1);
-      expect(turnStepsFrom(3, 1, false), "an older turn: the read side").toBe(3);
-      expect(turnStepsFrom(3, undefined, true), "nothing heard (a page that opened later)").toBe(3);
-      // A ZERO FROM THE SERVER IS A NUMBER, not 'nothing heard': a turn that closed with no steps
-      // at all is still an answer, which is why the check is `undefined` and not falsy.
-      expect(turnStepsFrom(2, 0, true)).toBe(0);
+      // THE READER EVERY SELECTOR ASKS (ADR 0017): a message is placed by the RECORD LINE its entry
+      // arrived in, against the `from` .. `to` range of a `turn/start` / `turn/end` pair -- never
+      // by what its neighbours look like.
+      forgetTurnRows("t-rows");
+      noteTurnRows("t-rows", ROWS, [
+        { seq: 11, message: { id: "m1" } },
+        { seq: 12, message: { id: "m2" } },
+        { seq: 31, message: { id: "m5" } },
+      ]);
+      expect(turnOfMessage("t-rows", "m1")?.turnId).toBe("t1");
+      expect(turnOfMessage("t-rows", "m5")?.turnId).toBe("t2");
+      expect(turnOfMessage("t-rows", "m5")?.steps, "the numbers ride the row too").toBe(1);
+
+      // A MESSAGE THE RECORD PLACES IN NO TURN GETS NO TURN. A conversation recorded before the
+      // decision has no rows at all; a message whose line has not landed has nothing to compare;
+      // and an id this window is not holding is not placed by guessing.
+      expect(turnOfMessage("t-rows", "m0"), "the record put it in none").toBeUndefined();
+      expect(turnOfMessage("t-rows", "m9"), "an id this window does not hold").toBeUndefined();
+      noteTurnRows("t-rows", [], [{ seq: 11, message: { id: "m1" } }]);
+      expect(turnOfMessage("t-rows", "m1"), "no rows, no turn").toBeUndefined();
+      noteTurnRows("t-rows", ROWS, [{ seq: null, message: { id: "m1" } }]);
+      expect(turnOfMessage("t-rows", "m1"), "a line still in the writer's queue").toBeUndefined();
+
+      forgetTurnRows("t-rows");
+      expect(turnRows("t-rows"), "and forgetting is forgetting").toEqual([]);
     },
   },
   {

@@ -27,6 +27,20 @@ export type WindowEntry = { seq: number | null; message: unknown };
 /// `append` (entries after the reader's cursor), `page` (the page in front of a reader's
 /// oldest entry), `tail` (the newest page, for a reader with no cursor), `end` (the
 /// window is over, with a `reason` a person can be told).
+/// ONE TURN THE RECORD HAS WRITTEN DOWN (ADR 0017). `from` and `to` are RECORD LINE NUMBERS -- the
+/// `turn/start` row that opened the turn and the `turn/end` row that closed it -- and `steps` /
+/// `messages` are what that closing row carried.
+///
+/// `to` / `steps` / `messages` ARE ABSENT WHILE THE TURN IS STILL OPEN: the record has not said
+/// them yet, and a zero here would be a number nobody wrote.
+export type TurnRow = {
+  turnId: string;
+  from: number;
+  to?: number;
+  steps?: number;
+  messages?: number;
+};
+
 export type WindowFrame = {
   type: "window" | "append" | "page" | "tail" | "end";
   entries?: readonly WindowEntry[];
@@ -40,6 +54,10 @@ export type WindowFrame = {
   /// as well as page answers: a failure that starts mid-run has to reach whoever is
   /// looking, and since ticket 06 a live connection is what is looking.
   record?: RecordHealth | null;
+  /// THE TURNS THE RECORD HAS (ADR 0017), as the server folded them from its `turn/start` /
+  /// `turn/end` rows: what this window's entries belong to, and how much each turn did. `[]` for a
+  /// record with no such rows -- every conversation recorded before that decision.
+  turns?: readonly TurnRow[];
 };
 
 /// What `GET .../page` answers: the frame, plus WHERE IT WAS READ FROM -- `live` true

@@ -114,6 +114,7 @@ import { CompactionCards } from "@/components/compaction-card";
 import { TimeoutCards } from "@/components/llm-timeout-card";
 import { RecordNotice } from "@/components/record-notice";
 import { readsOf, repositoryFrom } from "@/lib/thread-messages";
+import { noteTurnRows } from "@/lib/turn-rows";
 import { newId } from "@/lib/id";
 import { TrajectoryView } from "@/components/trajectory-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -268,6 +269,10 @@ function sessionHistory(
           onRecord(page.record ?? null);
           const opened = windowFrom(page);
           onWindow(opened);
+          // THE RECORD'S TURNS COME WITH THE PAGE (ADR 0017): the host hands the messages to the
+          // runtime and this store the answer to 'which turn is each of them in' -- the hydration
+          // door is not `commit`, so it has to say so itself.
+          noteTurnRows(threadId, opened.turns, opened.entries);
           return repositoryFrom(
             opened.entries.map((entry) => entry.message),
             readsOf(page.state),
@@ -290,6 +295,7 @@ function sessionHistory(
       }
       const opened = windowFrom(page);
       onWindow(opened);
+      noteTurnRows(threadId, opened.turns, opened.entries);
       return repositoryFrom(
         opened.entries.map((entry) => entry.message),
         readsOf(page.state),
@@ -519,9 +525,14 @@ function useWindowFeed(args: {
       held.current = next;
       setView(next);
       onState(next.state);
+      // THE TURNS THE RECORD HAS, handed over WITH the entries (ADR 0017): the window is the only
+      // place the two are in one hand, and `lib/turn-rows` is where the UI later asks which turn a
+      // message belongs to. It is not part of the import below -- `turns` is a fact about the
+      // conversation, not a message the model was handed.
+      noteTurnRows(threadId, next.turns, next.entries);
       importWindow(next);
     },
-    [importWindow, onState],
+    [importWindow, onState, threadId],
   );
 
   const controls = useCallback(

@@ -296,9 +296,11 @@
 
 (defn row-written!
   "ROW was just handed to the writer for THREAD-ID -- advance every registered live step.
-  ROW is `[line-index record]`, the same shape a read fold is handed; the line index is nil
-  here (the offset is not known when the row is handed over), which is why a live step must
-  not depend on it.
+  ROW is `[line-index record]`, the same shape a read fold is handed, and THE LINE INDEX IS THE
+  OFFSET THE WRITE LANDED ON: the caller is the stream's own listener, which is handed that
+  offset (`harness.infra.stream/kept!`) by the write that just returned (ADR 0007). A consumer
+  that numbers something by it -- `harness.edge.turns` writes down which line a turn opened on --
+  has nothing else to go on.
 
   A SESSION THIS PROCESS DOES NOT HOLD IS LEFT ALONE, and that is safe: the fold that
   installs one at build has every row written so far -- the meter's band is seeded by that
@@ -1408,7 +1410,11 @@
 ;; A LINE WITH NO ROW IS NOT THIS READER'S: the record's own header is pushed as bytes
 ;; (`harness.edge.http/header-line!`), never went through `row-written!`, and still does not.
 (record-stream/listen-every!
- (fn [{:keys [thread-id row]}]
+ (fn [{:keys [thread-id row] :as item}]
    (when row
-     (row-written! thread-id [nil row])
+     ;; THE LINE INDEX IS THE OFFSET THE WRITE LANDED ON (ticket 04 of `.scratch/record-stream`
+     ;; puts it on the item, ADR 0007 makes it true by the time this runs), and a consumer that
+     ;; numbers something by it -- `harness.edge.turns` writes down WHICH LINE a turn opened on --
+     ;; has nothing else to go on. It used to be handed `nil` here.
+     (row-written! thread-id [(:seq item) row])
      (record-grew! thread-id))))
