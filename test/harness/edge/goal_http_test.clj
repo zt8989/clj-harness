@@ -65,6 +65,10 @@
   (reset! (var-get #'sessions/watchers) {})
   (let [f (io/file (log-file tid))] (when (.exists f) (.delete f))))
 
+;; THE REAL SESSION SEAMS, so `goal-from-records` is the session's own reader rather than the
+;; kernel's default ('no record reader is installed') -- the fold and the row are compared here,
+;; and a comparison against a default would prove nothing.
+(use-fixtures :once (fn [f] (let [td (sessions/install!)] (f) (td))))
 (use-fixtures :each
   (fn [f]
     (clean!)
@@ -229,3 +233,115 @@
              (goal/goal-of-records (replay/read-records (log-file tid))))
           "three commands, three rows, one answer")
       (is (= 3 (count (replay/read-records (log-file tid))))))))
+
+;; ------------------------------------------------------------- the round driver
+;;
+;; THE DRIVER IS DECIDED, NOT TIMED. Its tests call the decision directly with a recording
+;; opener in place of `start-run`, which is why they can pin all four gates and the brake
+;; without a provider anywhere in sight.
+
+(defn- note
+  "Run some kernel events through `note-tool-event`, as the run loop does."
+  [state & events]
+  (reduce (fn [s ev] (#'http/note-tool-event s ev)) state events))
+
+(defn- opened-by
+  "An `open!` that records what it was asked to start instead of starting it."
+  [opened]
+  (fn [input run-id] (swap! opened conj {:input input :run-id run-id}) nil))
+
+(deftest the-progress-criterion-is-a-file-changing-tool-that-did-not-throw
+  (let [entered (fn [name] {:type :tool/pre-execute :id "c1" :name name :outcome :pass})]
+    (is (false? (#'http/changed-a-file? (note {} (entered "read"))))
+        "a round that only READ is the loop this brake exists to stop")
+    (is (false? (#'http/changed-a-file? (note {} (entered "bash"))))
+        "bash is the stated cost: a push made through it does not count")
+    (is (true? (#'http/changed-a-file? (note {} (entered "write")))))
+    (is (true? (#'http/changed-a-file? (note {} (entered "replace")))))
+    (testing "but a call whose execution threw changed nothing"
+      (is (false? (#'http/changed-a-file?
+                      (note {} (entered "edit")
+                            {:type :tool/execute :id "c1" :name "edit" :error "no such anchor"})))))
+    (testing "and a call parked for approval never ran at all"
+      (is (false? (#'http/changed-a-file?
+                      (note {} {:type :tool/pre-execute :id "c2" :name "write"
+                                    :outcome :needs-approval})))))))
+
+(deftest only-a-normal-ending-is-a-normal-ending
+  (is (true? (#'http/ended-normally? {:terminal "RUN_FINISHED"})))
+  (is (false? (#'http/ended-normally? {:terminal "RUN_ERROR"})) "a failure is not a round")
+  (is (false? (#'http/ended-normally? {:terminal "RUN_CANCELLED"})))
+  (is (false? (#'http/ended-normally? {})) "a run that never reached a terminal is not a round")
+  (testing "an interrupt ends on RUN_FINISHED too, and is still not a round"
+    (is (false? (#'http/ended-normally?
+                 (note {:terminal "RUN_FINISHED"} {:type :run/interrupt}))))))
+
+(deftest an-active-armed-goal-with-progress-opens-the-next-round
+  (#'http/commands-request tid [(goal-command "create" :objective "keep going")])
+  (let [opened (atom [])]
+    (#'http/drive-next-round! tid "r-run-1" true (opened-by opened))
+    (is (= 1 (count @opened)) "one round opened")
+    (is (= tid (get-in (first @opened) [:input :threadId])))
+    (let [turn (get-in (first @opened) [:input :append 0])]
+      (is (= "user" (:role turn)) "a round opens with a REAL user message")
+      (is (str/includes? (:content turn) "<goal"))
+      (is (str/includes? (:content turn) "keep going"))
+      (is (str/includes? (:content turn) "round 1/"))
+      (is (= "r-run-1-goal-round-1" (:id turn)) "and it is named, so it cannot enter twice"))
+    (testing "and the round is COUNTED IN THE RECORD before the run starts"
+      (is (= 1 (:rounds (goal/goal-for tid))))
+      (is (= 1 (:rounds (goal/goal-from-records tid))) "a restart folds it back")
+      (is (= "active" (:phase (goal/goal-for tid)))))))
+
+(deftest nothing-opens-when-the-goal-is-not-being-pushed
+  (let [opened (atom [])
+        open!  (opened-by opened)]
+    (#'http/commands-request tid [(goal-command "create" :objective "gated")])
+    (testing "paused -- a person stopped it"
+      (let [g (goal/goal-for tid)]
+        (#'http/commands-request tid [(goal-command "pause" :goal_id (:id g)
+                                                   :revision (:revision g))])
+        (#'http/drive-next-round! tid "r1" true open!)
+        (is (empty? @opened))
+        (is (= 0 (:rounds (goal/goal-for tid))))))
+    (testing "active but DISARMED -- a rebuild, a restart, a fork"
+      (let [g (goal/goal-for tid)]
+        (#'http/commands-request tid [(goal-command "resume" :goal_id (:id g)
+                                                   :revision (:revision g))]))
+      (is (true? (goal/armed? tid)))
+      (goal/disarm! tid)
+      (#'http/drive-next-round! tid "r2" true open!)
+      (is (empty? @opened) "nobody has said 'carry on' to this process"))
+    (testing "completed -- it is over"
+      (let [g (goal/goal-for tid)]
+        (goal/complete! tid {:id (:id g) :revision (:revision g)}))
+      (#'http/drive-next-round! tid "r3" true open!)
+      (is (empty? @opened)))))
+
+(deftest the-fuse-is-max-rounds-and-it-leaves-the-phase-alone
+  (#'http/commands-request tid [(goal-command "create" :objective "short fuse"
+                                             :max_goal_rounds 1)])
+  (let [opened (atom [])]
+    (#'http/drive-next-round! tid "r1" true (opened-by opened))
+    (is (= 1 (count @opened)) "the first round is allowed")
+    (#'http/drive-next-round! tid "r2" true (opened-by opened))
+    (is (= 1 (count @opened)) "the second is not: rounds is at max-rounds")
+    (is (= "active" (:phase (goal/goal-for tid)))
+        "and the phase is untouched, so the strip can say it has run as many rounds as it may")
+    (is (= 1 (:rounds (goal/goal-for tid))))))
+
+(deftest zero-progress-blocks-the-goal-and-opens-nothing
+  (#'http/commands-request tid [(goal-command "create" :objective "spinning")])
+  (let [opened (atom [])]
+    (#'http/drive-next-round! tid "r1" false (opened-by opened))
+    (is (empty? @opened) "the driver does NOT open the next round")
+    (let [g (goal/goal-for tid)]
+      (is (= "blocked" (:phase g)))
+      (is (= "no-progress" (get-in g [:blocked :code])))
+      (is (false? (goal/armed? tid)) "and it stops pushing"))
+    (testing "a person's resume clears it and the NEXT round may open"
+      (let [g (goal/goal-for tid)]
+        (#'http/commands-request tid [(goal-command "resume" :goal_id (:id g)
+                                                   :revision (:revision g))]))
+      (#'http/drive-next-round! tid "r2" true (opened-by opened))
+      (is (= 1 (count @opened))))))

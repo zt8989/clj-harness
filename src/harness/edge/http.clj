@@ -1362,7 +1362,8 @@
 ;; THE COMMAND MACHINERY LIVES WITH THE FRAMES IT PUSHES (see `goal-send!` and the executor
 ;; below), while the route that answers a command-only request is up here with the other
 ;; decisions about a run -- so the route names them first.
-(declare drain-commands! execute-command! goal-send! before-llm-with-commands)
+(declare drain-commands! execute-command! goal-send! before-llm-with-commands
+         note-tool-event changed-a-file? ended-normally? drive-next-round! start-run)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1968,6 +1969,10 @@
                                                              :tool-signature context/tool-signature})]
                 (loop []
                   (when-let [ev (async/<!! events)]
+                    ;; WHAT THIS ROUND DID AND HOW IT ENDED, collected as it happens: the round
+                    ;; driver asks those two questions at `:run/done`, and by then the events are
+                    ;; gone (`note-tool-event` is where each answer is kept).
+                    (swap! state note-tool-event ev)
                     ;; WHETHER THIS RUN'S END LEAVES THE TURN OWING ANYTHING, AND WHERE ITS RANGE
                     ;; ENDS (ADR 0006 decision 3). The terminal EVENT arrives before the frame it
                     ;; becomes, so the next line written for this thread IS that frame's line --
@@ -2064,6 +2069,14 @@
                       ;; repeat costs a client nothing but a redraw it already owed (see `goal-send!`).
                       (when (goal/goal-for thread-id)
                         (goal-send! thread-id))
+                      ;; AND THE NEXT ROUND, IF THE GOAL SAYS SO (`.scratch/goal` decision 9).
+                      ;; LAST, and after the frame above: this may OPEN A RUN, and a run started
+                      ;; before this one has finished talking to its clients would be a second run
+                      ;; of one conversation (the very thing `refuse-second-run!` exists for -- the
+                      ;; terminal frame has already cleared the registry, which is what makes this
+                      ;; moment the right one).
+                      (when (ended-normally? @state)
+                        (drive-next-round! thread-id run-id (changed-a-file? @state) start-run))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -5479,6 +5492,86 @@
     (as-> history h
       (project/before-llm h thread-id)
       (into h (keep (fn [o] (when-not (:ok o) (refusal-note o))) outcomes)))))
+
+;; ---------------------------------------------------------------- the round driver
+;;
+;; A RUN THAT ENDED NORMALLY, AND A GOAL THAT IS STILL ACTIVE: open the next round, or stop
+;; and say why (`.scratch/goal` decision 9). This is the heaviest and most dangerous part of
+;; the feature -- the SERVER choosing to spend money -- so the four brakes all live here, in
+;; one function, and none of them is optional.
+
+(def ^:private file-editing-tools
+  "THE TOOLS WHOSE SUCCESS IS 'A FILE CHANGED' -- the whole of the driver's evidence that a round made progress. A list rather than a rule, and the cost is stated in the design: A ROUND THAT PUSHED THINGS FORWARD WITH `bash` (a `git apply`, a build that wrote a generated file) counts as NO PROGRESS, and the goal is blocked for it. That is the price of the cheap criterion, and it is recoverable in one word from a person (`/goal resume`). The other direction is worse, and is why the list is not 'anything that is not `read`': a model that keeps READING files is exactly the loop this brake exists to stop."
+  #{"write" "edit" "replace" "insert" "undo_last_replace"})
+
+(defn- note-tool-event
+  "STATE + ONE KERNEL EVENT -> STATE. The driver asks a finished round two questions, and this is where the answers are collected, one event at a time: (1) did it CHANGE A FILE -- one of `file-editing-tools`, entered with outcome `:pass` (the design's own criterion) and not thrown out of execution? A `replace` that refused a stale anchor changed nothing, and counting it as progress is how a model that keeps failing would keep the driver going; (2) did it end ON ITS OWN TWO FEET -- `:run/interrupt` means a person has a decision to make."
+  [state ev]
+  (case (:type ev)
+    :run/interrupt   (assoc state :interrupted? true)
+    :tool/pre-execute
+    (if (and (= :pass (:outcome ev)) (contains? file-editing-tools (:name ev)))
+      (update state :edits (fnil conj #{}) (:id ev))
+      state)
+    :tool/execute
+    (if (and (some? (:error ev)) (contains? (:edits state #{}) (:id ev)))
+      (update state :failed-edits (fnil conj #{}) (:id ev))
+      state)
+    state))
+
+(defn- changed-a-file?
+  "Did the round STATE describes change one? THE ZERO-PROGRESS QUESTION, and it is about THIS round only -- `note-tool-event` collects into the run's own state, which dies with the run."
+  [state]
+  (boolean (seq (remove (:failed-edits state #{}) (:edits state #{})))))
+
+(defn- ended-normally?
+  "Did this run reach a terminal of its OWN (a finished answer), rather than a person stopping it or a failure? `:terminal` is the frame the emitter sent; an INTERRUPT also ends on RUN_FINISHED (`harness.kernel.loop`), so the event is what tells the two apart."
+  [state]
+  (and (= "RUN_FINISHED" (:terminal state)) (not (:interrupted? state))))
+
+(defn- drive-next-round!
+  "THREAD-ID's run RUN-ID has finished: decide whether a goal round opens after it, and open
+  it. OPEN! is the door that starts a run -- the caller passes `start-run` -- which is what
+  lets a test watch the decision without a provider.
+  
+  THE FOUR GATES, each of which SILENTLY STOPS (nothing written, nothing started):
+  
+    active    a paused, blocked or completed goal is one somebody stopped -- for now, or for
+              good -- and the driver does not argue with that.
+    armed     this process's permission, which a restart, a rebuild and a fork all drop, and
+              only a person's message or `resume` puts back.
+    rounds    `rounds < max-rounds`, the fuse. Reaching it leaves the phase ALONE (still
+              active), so the strip can say 'it has run as many rounds as it may'.
+    progress  the round that just ended changed a file. THIS IS THE ONE THAT ACTS: a round
+              that changed nothing gets the goal BLOCKED with `no-progress` -- the reference's
+              642M-token accident is why (`.scratch/goal` decision 9).
+  
+  THE COUNT LANDS IN THE RECORD BEFORE THE RUN STARTS (`note-round!`), so a process that dies
+  mid-round folds back the round it opened rather than losing it."
+  [thread-id run-id progress? open!]
+  (let [g (goal/goal-for thread-id)]
+    (when (and g (= "active" (:phase g)) (goal/armed? thread-id))
+      (cond
+        (>= (long (:rounds g)) (long (:max-rounds g)))
+        (do (log/info! :goal/rounds-exhausted
+                       {:thread-id thread-id :goal (:id g) :rounds (:rounds g)})
+            nil)
+
+        (not progress?)
+        (do (goal/block! thread-id {:id (:id g) :revision (:revision g)}
+                         {:code      "no-progress"
+                          :reason    "the round that just finished changed no file"
+                          :immediate? true})
+            (log/warn! :goal/no-progress {:thread-id thread-id :run-id run-id :goal (:id g)})
+            nil)
+
+        :else
+        (let [g    (goal/note-round! thread-id {:id (:id g) :revision (:revision g)})
+              turn (assoc (goal/round-turn g) :id (str run-id "-goal-round-" (:rounds g)))]
+          (log/info! :goal/round-opened {:thread-id thread-id :run-id run-id
+                                         :goal (:id g) :round (:rounds g)})
+          (open! {:threadId (str thread-id) :append [turn]}
+                 (str (java.util.UUID/randomUUID))))))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
