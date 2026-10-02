@@ -439,8 +439,10 @@
     :providers  the vendor catalog, {name entry}, laid over the built-in table
     :ui         the interface's own settings (today just :language)
     :security   the paths this home declares sensitive -- a file tool parks on them
-    :session    how a session runs: :editing / :compaction / :llm / :approval /
-                :skills / :instructions / :subagents (what harness.edn held)
+    :session    how a session runs -- the DEFAULT group, which serves every model:
+                :editing / :compaction / :llm / :approval / :skills / :instructions /
+                :subagents (what harness.edn held), plus :groups -- named per-model
+                overrides of those blocks, each naming the models it serves
     :mcp        the outside programs whose tools join this session: {:servers {..}}
 
   ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
@@ -479,6 +481,105 @@
   "The keys config.edn's :mcp section may carry. One: :servers, the {name declaration}
   map mcp.edn used to hold."
   #{:servers})
+
+(def ^:private session-section-keys
+  "The keys config.edn's :session section may carry: the seven session keys above,
+  plus :groups -- the per-model overrides. The seven are what the DEFAULT group says
+  (every model is served by the file), and a group a session's model matches says its
+  own instead."
+  (conj session-keys :groups))
+
+(def ^:private session-group-keys
+  "The keys ONE entry of config.edn's :session :groups may carry:
+
+    :name      what to call it -- a non-empty string, unique among the groups
+    :models    the models it serves, [{:provider :openrouter :model ...} ..]
+    the six session keys it overrides (:editing / :compaction / :llm / :approval /
+    :skills / :instructions), each merged key by key over the default group's
+
+  :subagents IS NOT HERE, and that is a decision rather than an omission: a subagent
+  definition is a fact about the HOME (the roster the delegation tool reads and the
+  panel draws), not about whichever model serves a session. It keeps its own settings
+  page, and a group that names it fails by name rather than quietly carrying a key
+  nothing reads."
+  #{:name :models :editing :compaction :llm :approval :skills :instructions})
+
+(defn- check-session-groups
+  "The :session :groups value -> nil, or a named failure about its SHAPE.
+
+  A group is a map with a :name, the :models it serves, and any of the six session
+  blocks it overrides. What a BLOCK MEANS is its consumer's business (see
+  check-config); what this checks is the skeleton -- a list of named maps, each naming
+  at least one model. A group with no name or no models is a row nothing can pick out
+  and nothing can match, and it would sit there looking authoritative.
+
+  A NAMED SET OF KEYS for the reason every other section's is: a typo in a group must
+  fail by name rather than leave a model quietly served by the default group."
+  [groups path]
+  (when (some? groups)
+    (when-not (sequential? groups)
+      (fail (str path "'s :session :groups is " (pr-str groups)
+                 ", not a list of groups; write :groups [{:name <name> :models"
+                 " [{:provider :openrouter :model <id>}]}] to name per-model overrides,"
+                 " or leave the key out")
+            {:path path :section :session :value groups}))
+    (let [seen (atom [])]
+      (doseq [g groups]
+        (when-not (map? g)
+          (fail (str path "'s :session :groups has an entry that is " (pr-str g)
+                     ", not a map; one group is {:name <name> :models [{:provider :x"
+                     " :model <id>}]}")
+                {:path path :section :session :value g}))
+        (let [unknown (sortable (remove session-group-keys (keys g)))]
+          (when (seq unknown)
+            (fail (str path "'s :session :groups entry " (pr-str (:name g)) " carries "
+                       (pr-str unknown) "; one group is made of "
+                       (str/join " / " (sort (map str session-group-keys))))
+                  {:path path :section :session :unknown unknown})))
+        (if-not (and (string? (:name g)) (not (str/blank? (:name g))))
+          (fail (str path "'s :session :groups has an entry named " (pr-str (:name g))
+                     "; give every group a :name -- a non-empty string a person reads")
+                {:path path :section :session :name (:name g)})
+          (do
+            (when (some #{(:name g)} @seen)
+              (fail (str path "'s :session :groups names " (pr-str (:name g))
+                         " twice; a group's name is how a person picks it out of the list")
+                    {:path path :section :session :name (:name g)}))
+            (swap! seen conj (:name g))))
+        (let [ms (:models g)]
+          (if-not (and (sequential? ms) (seq ms))
+            (fail (str path "'s :session :groups " (pr-str (:name g))
+                       " must name the models it serves: :models [{:provider :x"
+                       " :model <id>}] -- a non-empty list")
+                  {:path path :section :session :name (:name g) :models ms})
+            (doseq [m ms]
+              (when-not (map? m)
+                (fail (str path "'s :session :groups " (pr-str (:name g)) " :models has an"
+                           " entry that is " (pr-str m) ", not a map; declare one as"
+                           " {:provider :x :model <id>}")
+                      {:path path :section :session :value m}))
+              (let [bad (sortable (remove #{:provider :model} (keys m)))]
+                (when (seq bad)
+                  (fail (str path "'s :session :groups " (pr-str (:name g))
+                             " :models entry carries " (pr-str bad) "; one is"
+                             " {:provider :x :model <id>}")
+                        {:path path :section :session :unknown bad})))
+              (when-not (and (string? (:model m)) (not (str/blank? (:model m))))
+                (fail (str path "'s :session :groups " (pr-str (:name g))
+                           " :models entry names no model; give it :model -- the id that"
+                           " vendor declares")
+                      {:path path :section :session :model (:model m)}))
+              (let [p (:provider m)]
+                (when-not (or (nil? p) (keyword? p) (and (string? p) (not (str/blank? p))))
+                  (fail (str path "'s :session :groups " (pr-str (:name g))
+                             " :models entry has :provider " (pr-str p)
+                             "; it is a vendor name")
+                        {:path path :section :session :provider p}))))))
+        (doseq [k (sortable (remove #{:name :models} (keys g)))]
+          (when-not (map? (get g k))
+            (fail (str path "'s :session :groups " (pr-str (:name g)) " " (pr-str k)
+                       " must be a map, not " (pr-str (get g k)))
+                  {:path path :section :session :key k})))))))
 
 (defn- check-config
   "A parsed config.edn -> the same map, or a named failure about its SHAPE.
@@ -546,13 +647,17 @@
   ;; harness.edge.compaction on the ratios). It is here because a typo in a key that decides
   ;; how a session runs is INVISIBLE otherwise: the session simply behaves as if nothing
   ;; had been written, which is the failure the closed top level exists to prevent.
-  (doseq [[section keys-of] {:session session-keys :mcp mcp-keys}]
+  (doseq [[section keys-of] {:session session-section-keys :mcp mcp-keys}]
     (when-let [m (get raw section)]
       (let [unknown-keys (sortable (remove keys-of (keys m)))]
         (when (seq unknown-keys)
           (fail (str path "'s " (pr-str section) " carries " (pr-str unknown-keys)
                      "; it is made of " (str/join " / " (sort (map str keys-of))))
                 {:path path :section section :unknown unknown-keys})))))
+  ;; :session :groups -- ONE STRUCTURE DEEPER than the sections themselves, so it gets
+  ;; its own check: a list of NAMED groups, each naming the models it serves. What an
+  ;; overridden BLOCK means is still its consumer's business, exactly as for :session.
+  (check-session-groups (get-in raw [:session :groups]) path)
   raw)
 
 (defn- read-config-text
@@ -607,17 +712,72 @@
 ;; point: both sections come out of the file `config` already reads, with the same
 ;; freshness and the same shape check, so there is no second reader to keep in step.
 
+(declare active-provider)
+
+(defn- merge-session-blocks
+  "BASE with OVER laid over it, KEY BY KEY inside each block: a group that names only
+  {:editing {:grep false}} keeps the default group's :mode rather than replacing the
+  whole block. It is the same one-level merge :editing already gets against its own
+  defaults, and for the same reason -- a person editing one knob should not have to
+  restate every other one. A block only one side names is carried whole."
+  [base over]
+  (merge-with (fn [a b] (if (and (map? a) (map? b)) (merge a b) b)) base over))
+
+(defn- group-serves?
+  "Does GROUP serve PROVIDER's MODEL? A :models entry matches on the model id, and on
+  :provider too when the entry names one -- leaving the provider out says 'this id,
+  from whoever serves it'."
+  [group provider model]
+  (boolean
+   (some (fn [m]
+           (and (= (:model m) model)
+                (or (nil? (:provider m))
+                    (= (keyword (name (:provider m))) provider))))
+         (:models group))))
+
+(defn- matching-group-overrides
+  "The blocks the groups serving THREAD-ID lay over the default group, merged in file
+  order -- a later matching group wins a key an earlier one also named. {} when the
+  session names no groups, when none match, or when the model cannot be resolved at
+  all (an unconfigured home, a model this catalog does not declare): the default group
+  is always the floor, so a session whose model cannot be worked out is served by the
+  default group rather than by nothing."
+  [thread-id groups]
+  (if (and thread-id (seq groups))
+    (try
+      (let [{:keys [provider model]} (active-provider thread-id)]
+        (reduce (fn [acc g]
+                  (if (group-serves? g provider model)
+                    (merge-session-blocks acc (dissoc g :name :models))
+                    acc))
+                {} groups))
+      (catch Throwable _ {}))
+    {}))
+
 (defn session-config
-  "What this home's :session section says -- how a session runs: the seven keys
-  harness.edn used to hold, with their names and their shapes unchanged.
+  "What this home's :session section says for THREAD-ID -- how a session runs.
+
+  THE DEFAULT GROUP IS THE :session SECTION ITSELF: its :editing / :compaction /
+  :llm / :approval / :skills / :instructions / :subagents are what every model is
+  served by. Its :groups are PER-MODEL overrides, each naming the models it serves; the
+  ones whose :models match THREAD-ID's resolved model lay their own blocks over the
+  default group, key by key (see merge-session-blocks).
 
   ABSENT IS THE EMPTY MAP, which is what every reader wants ('says nothing') and is the
   rule `config` applies to a missing file too. WHAT A KEY MEANS IS NOT THIS NAMESPACE'S
   BUSINESS: harness.cap.editing refuses an :editing block it cannot use and
   harness.edge.compaction refuses ratios that are not fractions, each with a sentence
-  naming the key -- see check-config for why an unknown KEY is still refused here."
-  []
-  (or (:session (config)) {}))
+  naming the key -- see check-config for why an unknown KEY is still refused here.
+
+  A NIL THREAD-ID ASKS THE HOME'S OWN ANSWER -- the default group with no session's
+  model to match. The roster and an offline tool want that. Otherwise the model comes
+  from the ordinary tiers (`active-provider`), so a session that switched model in the
+  composer is served by that model's group with no restart."
+  ([] (session-config nil))
+  ([thread-id]
+   (let [s (:session (config))]
+     (merge-session-blocks (dissoc s :groups)
+                           (matching-group-overrides thread-id (:groups s))))))
 
 (defn mcp-servers
   "The :servers map this home's :mcp section declares, or nil when it declares none.
@@ -1772,6 +1932,22 @@
              sel
              [:input :output]))))
 
+(defn render-config
+  "X -> a shape JSON can carry, EVERYWHERE: keywords become their names, sets become
+  sorted string vectors. The session blocks the settings form edits are an open shape
+  whose keys and values the form reads and writes literally, so `wire` -- which renders
+  NAMED fields -- is not what this needs: a block has to survive the round trip whole,
+  and a keyword left as a keyword is a value `json/write-str` has no spelling for.
+
+  Sorted sets, for the reason `wire` sorts them: two otherwise identical answers must
+  not differ run to run."
+  [x]
+  (walk/postwalk (fn [v]
+                   (cond (keyword? v) (name v)
+                         (set? v)     (mapv render-config (sort-by str v))
+                         :else        v))
+                 x))
+
 ;; ------------------------------------------------------- what a picker offers
 
 (def reasoning-efforts
@@ -2100,7 +2276,7 @@
        ";;   :ui         the interface's own settings (today just :language)\n"
        ";;   :security   the paths this home declares sensitive -- a file tool parks on them\n"
        ";;   :session    how a session runs: editing / compaction / llm / approval /\n"
-       ";;               skills / instructions / subagents\n"
+       ";;               skills / instructions / subagents, plus :groups (per-model overrides)\n"
        ";;   :mcp        the outside programs whose tools join this session\n"
        ";; Empty is a working state: the built-in vendors still stand, and a run with no\n"
        ";; default tier says which shape to write. See docs/architecture/providers.md.\n"
@@ -2353,6 +2529,115 @@
     (check-config whole (config-path))
     (write-config! whole)
     next))
+
+(def ^:private default-group-keys
+  "The keys the settings form edits as the DEFAULT GROUP -- the session keys minus
+  :subagents, which has a page of its own, and minus :groups, which is the list below
+  it. A SET rather than a vector: it is used as `(remove default-group-keys ..)` and
+  `(select-keys s ..)`, and a vector in either place would index instead of test."
+  #{:editing :compaction :llm :approval :skills :instructions})
+
+(defn session-config-for-panel
+  "What the settings form's Session behaviour page reads: the session section AS THE
+  FILE HOLDS IT, not as a session resolves it --
+
+    {:default {the six blocks as written} :groups [..] :path \"..\"}
+
+  AS WRITTEN, because that is what the form edits and what a save writes: `~` in a
+  path, a block the default group does not have, a group that names two models -- all
+  of it has to survive the round trip, and a resolved answer would have flattened
+  exactly those facts. Read fresh, like everything in this file."
+  []
+  (let [s (:session (config))]
+    {:default (select-keys s default-group-keys)
+     :groups  (vec (:groups s))
+     :path    (config-path)}))
+
+(defn- canonical-session-block
+  "One session block as the WIRE gives it -> the EDN the file holds. The wire has no
+  keywords, so :editing :mode -- the only keyword VALUE a session block carries today --
+  is put back. Everything else is numbers, booleans, strings and lists of strings."
+  [k block]
+  (if-not (map? block)
+    block
+    (case k
+      :editing (cond-> block (string? (:mode block)) (update :mode keyword))
+      block)))
+
+(defn- canonical-session-group
+  "One group as the WIRE gives it -> the EDN the file holds: each :provider put back as
+  a keyword, and each overridden block canonicalized. :name and :models are carried, and
+  a key this namespace does not recognise is carried too, so check-config refuses it by
+  name rather than the form dropping it silently."
+  [g]
+  (if-not (map? g)
+    g
+    (let [blocks (reduce-kv (fn [m k v] (assoc m k (canonical-session-block k v)))
+                            {}
+                            (dissoc g :name :models))
+          models (when (sequential? (:models g))
+                   (mapv (fn [m]
+                           (if (and (map? m) (string? (:provider m)))
+                             (update m :provider keyword)
+                             m))
+                         (:models g)))]
+      (cond-> (assoc blocks :name (:name g))
+        (some? models) (assoc :models models)))))
+
+(defn set-session-config!
+  "CHANGE -> the :session map now written. CHANGE has two halves, either of which may be
+  left out:
+
+    :default  {block ..} -- a block set to its value, or written as null to REMOVE it:
+              'leave it alone' and 'stop saying it' are different requests, and only one
+              of them has a value. A key outside the six fails by name.
+    :groups   [{:name .. :models [..] ..} ..] -- replaces the whole list; [] removes
+              them.
+
+  The same writer every other settings form keeps (`change-session!`): the whole config
+  is checked before anything is written, the file is replaced atomically with one
+  generation of backup, and every other key -- :subagents included -- is carried through
+  untouched.
+
+  THE TWO STRINGS THE WIRE CANNOT CARRY ARE PUT BACK HERE (canonical-session-block): a
+  group's :provider and an :editing :mode. A file that said {:mode \"hashline\"} would be
+  a block no consumer recognises, so the round trip has to name the keywords at one end
+  or the other. What each block MEANS is still its consumer's business -- the shape
+  check is check-config's, the same one a hand-edited file meets."
+  [change]
+  (let [unknown (sortable (remove #{:default :groups} (keys change)))]
+    (when (seq unknown)
+      (fail (str "does not understand " (pr-str (mapv name unknown))
+                 "; it takes default (the blocks every model is served by) and groups"
+                 " (the per-model overrides)")
+            {:unknown unknown})))
+  (let [{:keys [default groups]} change]
+    (when-not (or (nil? default) (map? default))
+      (fail (str ":default is " (pr-str default) ", not a map of session blocks")
+            {:value default}))
+    (let [unknown (sortable (remove default-group-keys (keys default)))]
+      (when (seq unknown)
+        (fail (str ":default carries " (pr-str (mapv name unknown)) "; the default group"
+                   " is made of " (str/join " / " (sort (map name default-group-keys)))
+                   " -- :subagents has its own page, and :groups is the list beside it")
+              {:unknown unknown})))
+    (when (some? groups)
+      (when-not (sequential? groups)
+        (fail (str ":groups is " (pr-str groups) ", not a list of groups")
+              {:value groups})))
+    (change-session!
+     (fn [s]
+       (let [s (if (some? default)
+                 (reduce-kv (fn [m k v]
+                              (if (nil? v)
+                                (dissoc m k)
+                                (assoc m k (canonical-session-block k v))))
+                            s default)
+                 s)]
+         (if (some? groups)
+           (let [gs (mapv canonical-session-group groups)]
+             (if (empty? gs) (dissoc s :groups) (assoc s :groups gs)))
+           s))))))
 (defn put-provider!
   "ID + ENTRY (the form's shape, see `entry-from-wire`) + optional API-KEY -> the
   catalog entry that is now in config.edn's :providers.

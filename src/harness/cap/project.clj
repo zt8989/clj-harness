@@ -832,27 +832,25 @@
 
 (defn harness-config
   "The session configuration in force for THREAD-ID: the :session section of this home's
-  config.edn -- how a session runs, the seven keys harness.edn used to hold, with their
-  names and their shapes unchanged.
+  config.edn -- how a session runs: the seven keys harness.edn used to hold, with their
+  names and their shapes unchanged, overlaid by whatever THREAD-ID's MODEL matches.
 
-  ONE LEVEL, AND THAT IS THE WHOLE READ. There used to be two: the configuration home's
-  harness.edn, overlaid by the bound project's .harness/harness.edn. THE PROJECT LEVEL IS
-  GONE (.scratch/config-merge/spec.md decision 2) -- it is a shape we may bring back one
-  day, and the shape to bring back is 'the same section in two files, shallow, project
-  wins', not a second file name. So this answer no longer depends on the binding at all,
-  and .harness/harness.edn is a file nothing reads.
-
-  THREAD-ID IS STILL THE ARGUMENT because every caller has a session, and because the
-  answer becomes per-session again the day a project level comes back: carrying it now
-  keeps the seam the shape of the thing that will sit behind it.
+  ONE LEVEL OF FILE, PLUS THE MODEL'S GROUP. The file is the configuration home's
+  config.edn, and nothing else: there used to be a project level (the bound project's
+  .harness/harness.edn), and it is GONE (.scratch/config-merge/spec.md decision 2) --
+  a shape we may bring back one day, as 'the same section in two files, shallow,
+  project wins', not a second file name. What THREAD-ID adds is which of config.edn's
+  :session :groups serves its model: the matching groups' blocks are laid over the
+  default group's, key by key. A model nothing matches simply gets the default group.
 
   THE READ IS FRESH (harness.cap.providers re-reads the file on every call, the config.edn
-  discipline), so editing config.edn moves the fence with no restart. A missing section is
-  the empty map; a section that EXISTS and is broken is a NAMED failure out of
-  providers/check-config -- and that distinction is the one the fence depends on."
+  discipline), so editing config.edn -- or switching a session's model in the composer --
+  moves the answer with no restart. A missing section is the empty map; a section that
+  EXISTS and is broken is a NAMED failure out of providers/check-config -- and that
+  distinction is the one the fence depends on."
   ([] (harness-config nil))
-  ([_thread-id]
-   (providers/session-config)))
+  ([thread-id]
+   (providers/session-config thread-id)))
 
 (defn harness-config-path
   "The absolute path of the file harness-config reads: what a failure sentence names when

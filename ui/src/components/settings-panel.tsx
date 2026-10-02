@@ -52,6 +52,7 @@ import { Button } from "@/components/ui/button";
 import { McpPanel } from "@/components/mcp-panel";
 import { BASELINE_LABELS, DefinitionButtons } from "@/components/subagent-list";
 import { SessionsBatchPanel, type SessionFilter } from "@/components/session-management";
+import { GroupsPage } from "@/components/session-groups";
 import {
   Dialog,
   DialogContent,
@@ -1857,12 +1858,13 @@ const SessionsPage: FC = () => {
 /// configuration: what conversations this home keeps, and filing them away or taking them back
 /// in batches. It is here rather than in the sidebar because a batch is not a row action -- the
 /// sidebar's own verb is per row, and it stays there.
-type Page = "general" | "models" | "mcp" | "subagents" | "sessions";
+type Page = "general" | "models" | "mcp" | "groups" | "subagents" | "sessions";
 
 const PAGES: { id: Page; label: (t: Translate) => string }[] = [
   { id: "general", label: (t) => t("page.general") },
   { id: "models", label: (t) => t("page.models") },
   { id: "mcp", label: (t) => t("page.mcp") },
+  { id: "groups", label: (t) => t("page.groups") },
   { id: "subagents", label: (t) => t("page.subagents") },
   { id: "sessions", label: (t) => t("page.sessions") },
 ];
@@ -2082,6 +2084,12 @@ export const SettingsPanel: FC<{
                 <McpPanel threadId={threadId} />
               </section>
             )}
+            {/* NO `threadId` EITHER: config.edn's :session is this HOME's, and which group a
+                given session resolves is the server's business, not this page's. It reads the
+                CATALOG from the panel because the model picker names vendors and ids that
+                `GET /api/providers` already answered -- a second listing here would be a second
+                answer free to disagree with the one a run is served by. */}
+            {page === "groups" && <GroupsPage registry={registry} />}
             {/* NO `threadId`, and that is the page's own claim rather than an
                 omission: a subagent is defined for the HOME, not for the session
                 looking at it. The sidebar's block and this form read the same file
