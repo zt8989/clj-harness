@@ -123,6 +123,41 @@ export function parkStaysLast<T>(messages: readonly T[]): readonly T[] {
   // reasoning that led to the question is read before the question.
   return [...messages.slice(0, parked), ...trailing, messages[parked] as T];
 }
+
+/// ------------------------------------------------------ and a result with no call is not a card
+///
+/// A WINDOW MAY OPEN ON A TOOL RESULT. `GET /api/threads/<stem>/page` cuts a page at an ARRIVAL
+/// boundary, so the tail page a sidebar click opens can begin with the RESULT of a call whose
+/// `assistant` message lies on the page in front of it -- the one 显示更早 fetches and nothing has
+/// fetched yet. Upstream cannot pair the two, and does not leave it at that: a `role: "tool"`
+/// message its converter has no call for makes it INVENT one (`conversions.js`, the
+/// `if (updated) continue` fallthrough), reading the name off
+/// `getString(rawMessage, "name") ?? getString(rawMessage, "toolName") ?? "tool"`. THE WIRE'S TOOL
+/// MESSAGE CARRIES NEITHER -- `harness.edge.ag_ui`'s `TOOL_CALL_RESULT` frame is
+/// `{messageId, toolCallId, content, role}` -- so the invented call is named the literal `tool`,
+/// with `args: {}`, and `components/message-parts.tsx` draws `TOOL_LABELS[toolName] ?? toolName`:
+/// a card for a tool that does not exist (owner's report, 2026-10-02, session `4f1f48d5`; the
+/// tail page of 17 of the 39 threads this home could open that day began this way).
+///
+/// SO A HEADLESS RESULT IS NEVER HANDED TO THE CONVERTER. Not the same card under a truer name --
+/// there is no call to draw, and the args such a card shows are the ones nobody has. Nothing is
+/// lost by dropping it: the page in front of this one holds the call AND its result together, and
+/// 显示更早 is what fetches it.
+///
+/// ONLY THE LEADING RUN, and that is all of them: a record opens on the person's `user` message
+/// (measured -- every one of this home's 76 logs whose first message row is not the `system`
+/// block), and a result always follows the call it answers, so a `tool` message at the window's
+/// front has nothing in front of it to be paired with. The WINDOW is untouched -- only what is
+/// imported is -- so 显示更早 still extends from the same `baseSeq`.
+export function dropOrphanResults<T>(messages: readonly T[]): readonly T[] {
+  let cut = 0;
+  while (cut < messages.length && (messages[cut] as { role?: unknown } | null)?.role === "tool") {
+    cut++;
+  }
+  // NOTHING TO DROP -- the common case by far, and it is handed straight back.
+  return cut === 0 ? messages : messages.slice(cut);
+}
+
 /// The converted history a restore hands the runtime: `fromAgUiMessages` rebuilds text,
 /// reasoning and tool calls -- and reads back a parked run's `metadata.custom.agui.interrupts` --
 /// but its output is still the loose `ThreadMessageLike` shape; the repository wants the
@@ -140,7 +175,10 @@ export function toThreadMessages(agUiMessages: readonly unknown[], reads: Reads)
   // THE CONVERSION'S OWN ORDER IS NOT ALWAYS THE SERVER'S, and the park is the one message that
   // has to be last (`parkStaysLast`, above): a page following a run can be handed a conversation
   // whose thinking arrived after the question. A no-op on every other shape.
-  const converted = parkStaysLast(keepCardParts(agUiMessages, fromAgUiMessages(agUiMessages)));
+  // A WINDOW THAT OPENS ON A RESULT IS NOT HANDED ONE (see `dropOrphanResults`), so the converter
+  // has a call for every result it is given.
+  const paired = dropOrphanResults(agUiMessages);
+  const converted = parkStaysLast(keepCardParts(paired, fromAgUiMessages(paired)));
   const last = converted.length - 1;
   return converted.map((message, index) => {
     // THE STATUS A REBUILT MESSAGE ARRIVES WITH IS ITS OWN, and only the LAST one's is

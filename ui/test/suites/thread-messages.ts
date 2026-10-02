@@ -157,6 +157,57 @@ const cases: Case[] = [
       expect(toThreadMessages(alreadyLast, null).map((m) => m.id)).toEqual(["u1", "r59", "m60"]);
     },
   },
+  {
+    name: "a-window-that-opens-on-a-tool-result-drops-it-instead-of-inventing-a-tool",
+    run: async () => {
+      // THE TAIL PAGE'S FIRST ENTRY CAN BE A RESULT (owner's report, 2026-10-02, session
+      // `4f1f48d5`): `GET /api/threads/<stem>/page` cuts at an ARRIVAL boundary, so the call this
+      // result answers sits on the page in front of it, and 显示更早 is what would fetch that page.
+      // Handed to the adapter, the result is paired with nothing and the adapter INVENTS the
+      // call -- named the literal "tool", because a wire tool message carries no name at all
+      // (`harness.edge.ag_ui`'s `TOOL_CALL_RESULT` frame is `{messageId, toolCallId, content,
+      // role}`). The page draws `TOOL_LABELS[toolName] ?? toolName`, so that invention is a card
+      // for a tool that does not exist. Both halves are pinned here: the invention upstream
+      // really makes, and what this module hands over instead.
+      const headless = [
+        {
+          id: "t1",
+          role: "tool",
+          toolCallId: "c1",
+          content: "`2816` is not an anchor, so NOTHING was written.",
+        },
+        { id: "r1", role: "reasoning", content: "I used the line number instead of an anchor." },
+        { id: "m2", role: "assistant", content: "Reading that region to get the anchor." },
+      ];
+
+      /// The call names a converted window holds, whether or not they came off the wire.
+      const toolNamesIn = (messages: readonly unknown[]): (string | undefined)[] =>
+        messages.flatMap((message) => {
+          const content = (message as { content?: unknown } | null)?.content;
+          if (!Array.isArray(content)) return [];
+          return content
+            .filter((part) => (part as { type?: unknown })?.type === "tool-call")
+            .map((part) => (part as { toolName?: string }).toolName);
+        });
+
+      // WHAT THE CONVERTER MAKES OF IT UNPROMPTED: a call, and the name it wears.
+      expect(toolNamesIn(fromAgUiMessages(headless))).toEqual(["tool"]);
+
+      // THE HEADLESS RESULT IS NOT HANDED OVER AT ALL -- no card, and nothing else moved.
+      const messages = toThreadMessages(headless, "settled");
+      expect(messages.map((m) => m.id)).toEqual(["r1", "m2"]);
+      expect(toolNamesIn(messages)).toEqual([]);
+
+      // A RESULT THE WINDOW CAN PAIR IS UNTOUCHED: it lands on the call it answers, as always.
+      const paired = [...entries, { id: "t1", role: "tool", toolCallId: "c1", content: "ok" }];
+      const kept = toThreadMessages(paired, null);
+      expect(kept.map((m) => m.id)).toEqual(["u1", "m1"]);
+      expect(callOf(kept)?.result).toBe("ok");
+
+      // ...AND THE COMMON WINDOW, one that opens on the person's own message, is untouched too.
+      expect(toThreadMessages(entries, null).map((m) => m.id)).toEqual(["u1", "m1"]);
+    },
+  },
 ];
 
 export const threadMessagesSuite: Suite = { name: "thread-messages", cases };

@@ -606,7 +606,15 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// through the real `deliver` with a stand-in socket), and one source read -- the snapshot, the
 /// frame, the two facts and the reconnect, with no timer anywhere. A press, a fold and a real run
 /// are the browser walkthrough's half.
-const EXPECTED_CASES = 225;
+///
+/// 225 -> 226: the `thread-messages` suite's fourth, for THE WINDOW THAT OPENS ON A TOOL RESULT
+/// (`.scratch/tool-card-boundary/`). `GET /api/threads/<stem>/page` cuts at an ARRIVAL boundary,
+/// so the window a sidebar click opens can begin on the result of a call whose `assistant`
+/// message is on the page in front of it. Upstream pairs it with nothing and INVENTS a call named
+/// the literal `tool` -- a wire tool message carries no name at all -- which the page draws as a
+/// card for a tool that does not exist. The case pins that invention and the new rule side by
+/// side, plus the two shapes the rule must not touch.
+const EXPECTED_CASES = 226;
 
 
 let total = 0;
