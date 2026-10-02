@@ -5966,6 +5966,62 @@
       (api-response 400 {:error error})
       (api-response 200 (providers/wire (:ok answer) (keys (:ok answer)))))))
 
+(defn- conversation-tokens
+  "THREAD-ID's conversation as a NEXT request would carry it, in estimated tokens -- the
+  reading `harness.edge.pressure` already takes for the run-start trigger, taken HERE OFF THE
+  RECORD and not off the live session.
+
+  WHY THE RECORD: this answers a question whose answer may be NO (`window-veto`), and
+  `sessions/messages` is a GET-OR-CREATE -- asking it would build and claim a session on the
+  way to a refusal, so a press the edge turns down would still have taken the conversation
+  over. Reading the file leaves nothing behind.
+
+  NIL WHEN NOBODY CAN SAY -- no log yet, or a stem that names two (a NAMED failure, and not a
+  reason to refuse anybody). A reading nobody could take is not a fact about a
+  conversation."
+  [thread-id]
+  (try
+    (if-some [f (replay/find-log (home/projects-dir) thread-id)]
+      (:pressureTokens (pressure/records->pressure (replay/read-records f)))
+      0)                                   ; no log yet: an empty conversation fits everything
+    (catch Throwable _ nil)))
+
+(defn- window-veto
+  "A veto for `providers/swap-override!` (its third argument): REFUSE a change that would move
+  this session onto a model whose window the conversation it ALREADY HAS does not fit.
+
+  WHY IT IS A REFUSAL AND NOT A COMPACTION (owner, 2026-10-02). The run-start trigger would
+  see the pressure over the threshold and fold -- but a compaction keeps `retain-ratio` of the
+  NEW window verbatim and hands THE REST to the summarizer, and that rest is now bigger than
+  the window, so the summary call is refused before it is ever sent. What is left is
+  `recover-overflow!`, which keeps only the newest indivisible unit: the run does go out, and
+  most of a long conversation is gone with nobody having been asked. A move down to a window
+  that cannot hold what the session already has is therefore turned down where it is ASKED --
+  nothing is written, the session keeps the model it was on, the record is untouched.
+
+  ONLY A MOVE TO A NARROWER WINDOW IS REFUSED (`next < now`), deliberately: a session already
+  over its own model's window is a session in trouble, and refusing, say, a reasoning-effort
+  change would leave a person no way to touch the picker at all. FROM WIDE TO NARROW is the
+  move this guards, and the run-start trigger measures the rest.
+
+  A MODEL THAT DECLARES NO WINDOW IS NEVER REFUSED: silence is not zero (`harness.cap.
+  providers` says so everywhere else), and there would be nothing to compare against.
+
+  IT IS CALLED INSIDE `swap-override!`'s LOOP, so it judges the selection that is about to be
+  written and not one this route read a moment earlier -- two presses of the picker land here
+  at once, and the second one's question is about ITS selection."
+  [thread-id]
+  (fn [served _before]
+    (let [next (:context-window served)
+          used (conversation-tokens thread-id)]
+      (when (and (number? next) (pos? next) (number? used) (>= used next))
+        (let [now (:context-window (providers/active-provider thread-id))]
+          (when (or (nil? now) (< next now))
+            (str (:model served) " declares a " next "-token window, and this session's next"
+                 " request is already about " used " tokens: switching to it would leave a"
+                 " request that cannot be sent. Pick a model with a larger window, or fork this"
+                 " session (or start a new one) first.")))))))
+
 (defn- model-post
   "POST /api/model {threadId, provider?, model?, reasoning-effort?, clear?} --
   change THIS session's selection, and answer the resolution that is now in force.
@@ -5977,6 +6033,12 @@
   before anything is written -- a change that cannot be served is not a change,
   and writing first would leave the session holding a configuration every later
   run fails on.
+
+  AND IT IS REFUSED FOR A SECOND REASON: a move DOWN to a model whose window this
+  conversation does not already fit (`window-veto`). That one is not about whether the change
+  can be SERVED -- it can -- but about what the session would be left holding: a request too
+  big to send, with the only ways out being the brutal ones. See the veto for why a compaction
+  is not one of them.
 
   WHY IT WRITES ITS OWN LOG LINE INSTEAD OF USING THE PROVIDER OUTBOX. This route
   IS the edge, so it writes at the moment of the change, exactly as
@@ -6036,7 +6098,7 @@
               ;; between -- this route runs on an http-kit thread, so two presses of the
               ;; picker can overlap -- and this line would then record a before->after
               ;; pair that never happened.
-              (let [answer (try {:ok (providers/swap-override! thread-id change)}
+              (let [answer (try {:ok (providers/swap-override! thread-id change (window-veto thread-id))}
                                 (catch Throwable t {:error (ex-message t)}))]
                 (if-some [error (:error answer)]
                   (api-response 400 {:error error})

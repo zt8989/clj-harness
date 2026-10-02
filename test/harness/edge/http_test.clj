@@ -4951,6 +4951,82 @@
        (testing "and a body that is not JSON"
          (is (= 400 (.statusCode (api-call :post "/api/model" "not json at all")))))))))
 
+(defn- talkative-record!
+  "Write THREAD-ID a record whose conversation is worth about MESSAGES x 2008 estimated tokens."
+  ;; 8000 characters at the meter's four-characters-a-token rule, plus a block and a role's
+  ;; framing: `estimate-message` prices one of these rows at 8000/4 + 4 + 4 = 2008.
+  [thread-id messages]
+  (let [f (log-file thread-id)]
+    (.mkdirs (.getParentFile f))
+    (spit f (str (str/join "\n"
+                           (map (fn [i]
+                                  (row-json {:ts (System/currentTimeMillis) :runId "r1"
+                                             :kind "message" :source "client" :id (str "u" i)
+                                             :payload {:role "user"
+                                                       :content (apply str (repeat 8000 "a"))}}))
+                                (range messages)))
+                 "\n")
+          :encoding "UTF-8")
+    f))
+
+(deftest a-switch-down-to-a-window-the-conversation-does-not-fit-is-refused
+  ;; OWNER, 2026-10-02: "从大到小，如果上下文已经超过小的窗口直接报错". ADR 0016 has the reasoning;
+  ;; the shape of it is that a compaction CANNOT rescue this move (the summarizer would be
+  ;; handed more than the window) and what is left is `recover-overflow!`, which keeps only
+  ;; the newest indivisible unit -- most of a long conversation, gone with nobody asked.
+  ;;
+  ;; THROUGH REAL RESOLUTION (`with-resolved-config`): a pinned provider answers for the
+  ;; provider outright, and this route's whole question is what the CATALOG says a model's
+  ;; window is. The fixture's windows: alpha-small 200000 (the default tier), alpha-big
+  ;; 1000000, beta-plain 128000, alpha-bare -- which declares none at all.
+  (with-resolved-config
+   [{:content "never called"}]
+   (fn []
+     (let [id  "http-window"
+           fit "http-window-fits"]
+       (try
+         (talkative-record! id 100)   ;; about 200,800 tokens: past alpha-small AND beta-plain
+         (talkative-record! fit 4)    ;; about 8,032: nothing to refuse
+         (testing "a model whose window the conversation ALREADY exceeds is refused, by name"
+           (let [resp (api-call :post "/api/model"
+                                (json/write-str {:threadId id :provider "beta"
+                                                 :model "beta-plain"}))
+                 body (read-json resp)]
+             (is (= 400 (.statusCode resp)))
+             (is (str/includes? (:error body) "beta-plain"))
+             (is (str/includes? (:error body) "128000") "the window it cannot hold is named")
+             (is (nil? (providers/override-for id))
+                 (str "a refused press writes nothing, so the session keeps the model it had "
+                      "-- and the record is not touched either"))))
+         (testing "a WIDER window is not refused: it is the move DOWN this guards"
+           (is (= 200 (.statusCode (api-call :post "/api/model"
+                                             (json/write-str {:threadId id
+                                                              :model "alpha-big"})))))
+           (is (= {:model "alpha-big"} (providers/override-for id))))
+         (testing "a conversation that FITS moves down freely"
+           (is (= 200 (.statusCode (api-call :post "/api/model"
+                                             (json/write-str {:threadId fit :provider "beta"
+                                                              :model "beta-plain"})))))
+           (is (= {:provider :beta :model "beta-plain"} (providers/override-for fit))))
+         (testing "and a model that declares NO window is never refused -- silence is not zero"
+           (is (= 200 (.statusCode (api-call :post "/api/model"
+                                             (json/write-str {:threadId id
+                                                              :model "alpha-bare"})))))
+           (is (= {:model "alpha-bare"} (providers/override-for id))))
+         (testing "but leaving a model that declares none is judged again, conservatively"
+           ;; The model in force says nothing about a window, so there is none to show that the
+           ;; conversation fits -- and `alpha-small`'s 200,000 cannot hold 200,800. The way out is
+           ;; a window that DOES fit (`alpha-big` above) or a fork, not a model that is merely
+           ;; quieter about its counts.
+           (is (= 400 (.statusCode (api-call :post "/api/model"
+                                             (json/write-str {:threadId id
+                                                              :model "alpha-small"}))))))
+         (finally
+           (providers/set-override! id nil)
+           (providers/set-override! fit nil)
+           (io/delete-file (log-file id) true)
+           (io/delete-file (log-file fit) true)))))))
+
 (deftest clearing-the-session-tier-puts-it-back-on-the-tiers-below
   (with-bare-server
    (fn []

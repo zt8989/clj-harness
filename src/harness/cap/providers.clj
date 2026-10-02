@@ -1469,20 +1469,41 @@
   throw there would abandon a write that had nothing wrong with it. A change that cannot
   be served writes NOTHING, and the session keeps what it had.
 
+  A THIRD ARGUMENT LETS THE CALLER REFUSE THE CHANGE (`veto`), and it is asked INSIDE the loop
+  for exactly the reason the resolve is: it has to see the selection that is ABOUT TO BE
+  WRITTEN. A veto read by the caller, before it got here, would be answering about a
+  configuration a concurrent press may already have replaced. VETO is
+  `(fn [resolved before] -> nil | a sentence)`: nil lets the change through, a sentence REFUSES
+  it -- thrown, so nothing is written and the session keeps what it had. The question is the
+  caller's because it is not about providers: `POST /api/model` asks whether the conversation
+  at hand fits the window of the model it would be left on, and a window is all this namespace
+  knows about that.
+
+  IT GUARDS WHAT IS CHOSEN, NOT WHAT IS CLEARED. CHANGE nil resolves nothing here -- that is
+  what makes a clear always work -- so a caller that wants to police a return to the default
+  tier has to ask about it itself.
+
   CHANGE nil clears the override, and the answer is then {:after nil}. `set-override!` is
   the same store without the transition, and stays for the callers that only want to set
   a value."
-  [thread-id change]
-  (loop []
-    (let [m      @session-overrides
-          before (get m thread-id)
-          sel    (when change (selection (merge before change)))
-          ;; Throws when the change cannot be served -- before anything is written.
-          served (when sel (resolve-override sel))]
-      (if (compare-and-set! session-overrides m
-                            (if sel (assoc m thread-id sel) (dissoc m thread-id)))
-        {:before before :after sel :resolved (:resolved served)}
-        (recur)))))
+  ([thread-id change] (swap-override! thread-id change nil))
+  ([thread-id change veto]
+   (loop []
+     (let [m       @session-overrides
+           before  (get m thread-id)
+           sel     (when change (selection (merge before change)))
+           ;; Throws when the change cannot be served -- before anything is written.
+           served  (when sel (resolve-override sel))
+           ;; AND THE CALLER MAY STILL SAY NO, on the selection this iteration is about to
+           ;; write. Its throw abandons the write, which is the point: the answer is no, not
+           ;; 'try again' -- so it is raised rather than retried.
+           refusal (when (and served veto) (veto (:resolved served) before))]
+       (if refusal
+         (throw (ex-info refusal {:reason :vetoed :before before :after sel}))
+         (if (compare-and-set! session-overrides m
+                               (if sel (assoc m thread-id sel) (dissoc m thread-id)))
+           {:before before :after sel :resolved (:resolved served)}
+           (recur)))))))
 
 (defn effective-provider
   "The provider for THREAD-ID, without a run request: the default and session

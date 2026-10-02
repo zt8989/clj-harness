@@ -1794,6 +1794,43 @@
             "and the session keeps exactly what it had")
         (finally (providers/set-override! "p-bad" nil))))))
 
+(deftest a-callers-veto-refuses-the-change-and-writes-nothing
+  ;; THE THIRD ARGUMENT. It is a closure rather than a flag because the QUESTION belongs to the
+  ;; caller -- `POST /api/model` asks whether the conversation at hand fits the window of the
+  ;; model it would be left on, and this namespace has never heard of a conversation -- while
+  ;; the ANSWER has to be about the selection that is about to be written, which only this
+  ;; function knows. See its docstring.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (try
+        (providers/swap-override! "p-veto" {:model "alpha-small"})
+        (testing "the veto is asked with the selection about to be written, and the tier before it"
+          (let [seen (atom nil)]
+            (providers/swap-override! "p-veto" {:model "alpha-large"}
+                                      (fn [resolved before]
+                                        (reset! seen [(:model resolved) before])
+                                        nil))
+            (is (= ["alpha-large" {:model "alpha-small"}] @seen))
+            (is (= {:model "alpha-large"} (providers/override-for "p-veto"))
+                "nil from the veto lets the change through")))
+        (testing "a sentence REFUSES it: thrown, and nothing is written"
+          (let [thrown (try (providers/swap-override! "p-veto" {:model "alpha-small"}
+                                                      (fn [_ _] "that window is too small for it"))
+                            nil
+                            (catch Throwable t t))]
+            (is (some? thrown))
+            (is (= "that window is too small for it" (ex-message thrown)))
+            (is (= {:model "alpha-large"} (providers/override-for "p-veto"))
+                "the session keeps exactly what it had")))
+        (testing "clearing is not vetoed -- a clear resolves nothing, so nothing is asked"
+          (let [asked (atom 0)]
+            (is (nil? (:after (providers/swap-override! "p-veto" nil
+                                                         (fn [_ _] (swap! asked inc)
+                                                           "never asked")))))
+            (is (zero? @asked))
+            (is (nil? (providers/override-for "p-veto")))))
+        (finally (providers/set-override! "p-veto" nil))))))
+
 ;; ------------------------------------------- what a provider says it serves
 
 (deftest a-providers-listing-is-read-off-its-own-shape
