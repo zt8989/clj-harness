@@ -1109,7 +1109,7 @@
 (def ^:private job-list-description
   (str "List this session's background jobs and the records earlier runs left behind, one row"
        " per RECORD: the id, which run it was (`this run`, or the stamp in its filename), how it"
-       " went, and where the record is -- plus the command, for a job THIS process still holds. "
+       " went -- plus the command, for a job THIS process still holds. "
        "Ids beginning with `j` are JOBS (something to read, wait for, stop); ids beginning with"
        " `c` are records a FOREGROUND call spilled (`bash` keeps one when its output did not fit"
        " the answer) -- they have no job behind them, so nothing can be stopped and no id can be"
@@ -1133,15 +1133,21 @@
   THE RUN IS NAMED FOR WHAT IT IS: this process's stamp reads `this run`, because the raw stamp
   (`20260924T193221314-5376`) is a filename fragment whose only job is to be unique. ANOTHER
   run's stamp is printed raw, because a reader who wants to go looking in that directory has
-  nothing else to go on."
+  nothing else to go on.
+
+  THE PATH IS NOT ON THE ROW (owner, 2026-10-02). Where a record sits under this home is
+  the repo's shape, not a model's next move: the reader that wants the FILE is `job_output`,
+  which hands the path out itself at the one moment it is worth anything -- when the window
+  it is about to send is not the whole record (`.scratch/job-receipt-no-path`, the same
+  judgement `job` and `job_kill` already make). A row here is an ID, so what it carries is
+  what a caller needs to ASK with: which job, how it went, and what the command was."
   [row]
   (str (:id row)
        " · " (if (:this-run? row) "this run" (:run row))
        " · " (:status row)
        " · " (if-let [command (:command row)]
                (jobs/command-line command)
-               "(no command kept -- a record holds what it said)")
-       " · " (:path row)))
+               "(no command kept -- a record holds what it said)")))
 
 (defn- t-job-list
   "`job_list`'s body: the rows harness.cap.jobs reads off the session's own directory, as the
