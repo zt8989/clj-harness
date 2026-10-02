@@ -299,6 +299,9 @@
       (is (str/includes? proj "Relative paths in the file tools resolve against it"))
       (is (str/includes? proj "bash runs with it as its working directory"))
       (is (str/includes? proj "Absolute paths are never redirected")))
+    (testing "the fence is a WRITE guard: the block says reads are not fenced"
+      (is (str/includes? proj "A WRITE path (write, edit, replace, insert)"))
+      (is (str/includes? proj "READS (read, grep, glob) are NOT limited by this fence")))
     (testing "the fence names its free paths, derived from where the fence reads them"
       (is (str/includes? proj "parks for human approval"))
       (is (str/includes? proj (str dir " -- this project")))
@@ -327,7 +330,7 @@
     (let [proj (block (:text (assemble-run "sp-proj-strict")) "project")]
       (is (str/includes? proj (str "bound to: " dir)))
       (is (str/includes? proj ":approval {:strict true}"))
-      (is (str/includes? proj "paths inside it park too"))
+      (is (str/includes? proj "a WRITE inside it parks too (reads are unaffected)"))
       (is (not (str/includes? proj (str dir " -- this project")))
           "the project directory is NOT in the free list -- that would be the lie"))
     (support/wipe-session!)))
@@ -338,7 +341,7 @@
       (is (str/includes? proj "not bound to any project directory"))
       (is (str/includes? proj "resolve against the process's working directory"))
       ;; 'free path' rather than 'park': the SENSITIVE sentence says 'parks for human
-      ;; approval too', and it IS said here -- it is the one rule that does not come from a
+      ;; approval', and it IS said here -- it is the one rule that does not come from a
       ;; project. What must not appear is the FENCE's own sentence, which describes a rule
       ;; that is not in force.
       (is (not (str/includes? proj "free path")) "no fence talk: there is no fence")

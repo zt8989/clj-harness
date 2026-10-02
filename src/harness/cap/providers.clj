@@ -438,7 +438,8 @@
                 :reasoning-effort), or a provider DESCRIBED inline
     :providers  the vendor catalog, {name entry}, laid over the built-in table
     :ui         the interface's own settings (today just :language)
-    :security   the paths this home declares sensitive -- a file tool parks on them
+    :security   the paths this home ADDS to the built-in sensitive list -- a file tool
+                parks on them; the built-in list is always in force on top of these
     :session    how a session runs: :editing / :compaction / :llm / :approval /
                 :skills / :instructions / :subagents (what harness.edn held)
     :mcp        the outside programs whose tools join this session: {:servers {..}}
@@ -456,7 +457,9 @@
 
   :security IS THE SECOND DEPARTURE, AND A BIGGER ONE: it is not about a model, a session
   or an interface at all -- it is THIS HOME'S SAFETY NET, the paths a file tool must park a
-  human on even when they sit inside the project fence. It rides this file because it is the
+  human on -- these are ADDITIONS to the built-in list (see `default-sensitive-paths`),
+  not a whole list: writing `[]` removes nothing, and the built-in list is ALWAYS in
+  force, so no custom value can switch the guard off. It rides this file because it is the
   same home's configuration, and because the settings panel ALREADY writes this file: a list
   the panel cannot write is not a list a person keeps up to date. Which calls it affects is
   harness.cap.project's business, not this one's."
@@ -465,7 +468,9 @@
 (def ^:private security-keys
   "The keys config.edn's :security section may carry. One today, and a NAMED SET rather
   than a bare check for the reason :ui's keys are one: a typo in a safety list must fail
-  by name rather than sit there guarding nothing."
+  by name rather than sit there guarding nothing. The value is the CUSTOM half -- what
+  this home adds to the built-in list -- not a whole list, so `[]` is valid and means
+  'the home adds nothing' rather than 'guard nothing'."
   #{:sensitive-paths})
 
 (def ^:private session-keys
@@ -524,9 +529,9 @@
               {:path path :language tag}))))
   ;; :security -- ONE KEY, AND IT IS A LIST OF PATHS. Checked here, with the rest of the
   ;; file, rather than at the point of use: this is the shape check `config` runs on every
-  ;; read, so a malformed list fails on the next call BY NAME -- while the same list read
-  ;; as empty by a lenient reader would be a guard that switched itself off, which is the
-  ;; one failure mode a safety net may not have.
+  ;; read, so a malformed list fails on the next call BY NAME. The value is the CUSTOM half
+  ;; (what this home adds to the built-in list); an empty list is valid and means 'added
+  ;; nothing', not 'guard nothing' -- the built-in list is always in force.
   (when-let [security (:security raw)]
     (let [unknown-security (sortable (remove security-keys (keys security)))]
       (when (seq unknown-security)
@@ -685,40 +690,68 @@
   (str/replace-first path #"^~(?=/|$)" (fn [_] (home/user-home))))
 
 (defn- configured-sensitive-paths
-  "The `:security :sensitive-paths` value in force, as [paths source] -- SOURCE being
-  :config when this home wrote a list and :default when it wrote none.
+  "This home's CUSTOM sensitive paths -- what config.edn's :security :sensitive-paths
+  names, as written (`~` and all). These are the ADDITIONS to the built-in list, not a
+  whole list: a home that names none contributes nothing, and the built-in list still
+  stands (see sensitive-paths).
 
   READ FRESH, like every other value in this file, and SHAPE-CHECKED -- but by
   check-config, which `config` runs over the whole file: a malformed value has already
   failed by name by the time it gets here, so there is exactly ONE shape rule for this
-  key rather than a checker and a lenient reader that disagree."
+  key rather than a checker and a lenient reader that disagree.
+
+  A MISSING KEY AND AN EMPTY LIST MEAN THE SAME THING -- 'this home added nothing' -- and
+  neither turns the guard off: the built-in list answers for the home either way. That is
+  the change from the old shape, where writing `[]` switched the whole thing off -- a
+  credential list a one-line edit could erase was not a guard."
   []
   (let [paths (get-in (config) [:security :sensitive-paths])]
-    (if (nil? paths)
-      [default-sensitive-paths :default]
-      [(mapv identity paths) :config])))
+    (if (or (nil? paths) (seq paths))
+      (mapv identity paths)
+      [])))
 
+(defn- distinct-by-paths
+  "P with duplicates dropped, comparing by the machine form (home expanded, canonical)
+  so a custom entry that repeats a built-in one is not listed twice. Order is preserved
+  (first occurrence wins), which keeps the built-in half in front when nothing custom
+  repeats it -- display order only; the park rule is overlap, so order changes nothing."
+  [paths]
+  (let [seen (java.util.LinkedHashSet.)
+        add! (fn [p]
+               (let [k (expand-home p)]
+                 (when-not (.contains seen k)
+                   (.add seen k)
+                   p)))]
+    (vec (keep add! paths))))
+
+(defn- effective-sensitive-paths
+  "The sensitive list in force: the built-in list, then this home's custom additions --
+  both AS WRITTEN. The built-in half is never dropped, so nothing a person writes here can
+  remove a credential path; the custom half is what the settings panel edits."
+  []
+  (distinct-by-paths (into (vec default-sensitive-paths) (configured-sensitive-paths))))
 (defn sensitive-paths-config
   "What this home's sensitive list IS, for a caller that has to SHOW it:
 
-    {:paths [~/.ssh/ ..] :source :default|:config :defaults [..]}
+    {:paths [~/.ssh/ ..] :builtin [~/.ssh/ ..] :custom [..]}
 
-  :paths is the list AS WRITTEN -- `~` and all -- because that is what a person edits and
-  what the file would hold; the expanded form is a machine fact, and it is `sensitive-paths`
-  that answers it. :defaults rides along so 'restore the built-in list' is the client's own
-  action rather than a second request, and so the panel can say what the built-in list IS
-  instead of describing it."
+  :paths is the list in force (built-in then custom), AS WRITTEN -- `~` and all -- because
+  that is what a person reads and what the file would hold; the expanded form is a machine
+  fact, and it is `sensitive-paths` that answers it. :builtin rides along so the panel can
+  show the built-in half as NOT DELETABLE, and `custom` is the half the panel edits -- so
+  'restore the built-in list' has no meaning here (it can never be removed), and 'clear my
+  own list' is the only button that makes sense."
   []
-  (let [[paths source] (configured-sensitive-paths)]
-    {:paths paths :source source :defaults default-sensitive-paths}))
+  {:paths   (effective-sensitive-paths)
+   :builtin (vec default-sensitive-paths)
+   :custom  (configured-sensitive-paths)})
 
 (defn sensitive-paths
   "The paths a file tool must park a human on for THIS HOME, `~` expanded, in the order
-  they are written. WHICH calls those are, and why the fence needs this second and tighter
+  built-in then custom. WHICH calls those are, and why the fence needs this second and tighter
   rule at all, is harness.cap.project's business."
   []
   (mapv expand-home (:paths (sensitive-paths-config))))
-
 (def builtin-raw
   "The providers this harness knows out of the box, so a config.edn naming one
   needs no :providers entry at all.
@@ -2300,11 +2333,10 @@
   not a list of strings is refused by name and the file is left exactly as it was. The
   WHOLE config is checked too (`check-config`), so a `:security` a typo broke fails here
   rather than being written.
-
-  AN EMPTY LIST IS A DECISION, NOT A MISTAKE: it says 'this home guards nothing', and it is
-  how a person turns the built-in list off without editing this namespace. There is
-  deliberately no 'clear' back to the defaults for the same reason :ui has none -- writing
-  the defaults IS the way back, and the panel has them in hand (`sensitive-paths-config`)."
+  AN EMPTY LIST IS VALID, NOT A MISTAKE: it says 'this home adds nothing to the built-in list',
+  and the built-in list stays in force. There is no way to switch the built-in list off -- a
+  credential list a one-line edit could erase was not a guard -- and the panel's 'clear my own
+  list' is the only button that makes sense."
   [paths]
   (when-not (and (sequential? paths) (every? string? paths))
     (fail (str ":sensitive-paths is " (pr-str paths) ", not a list of paths; send a JSON"

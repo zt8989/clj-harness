@@ -423,18 +423,18 @@
 
 (deftest a-subagent-is-told-when-a-call-would-need-a-human-it-cannot-ask
   ;; The other half of "a subagent has nobody watching it": a call the fence would
-  ;; park for a person does not park here. It comes back as information, so the
+  ;; The other half of "a subagent has nobody watching it": a WRITE the fence would park
   ;; subagent carries on with what it has instead of leaving a card nobody is looking
   ;; at and a run stopped forever. A park in a subagent would be indistinguishable
   ;; from a hang, which is the failure this exists to prevent.
   (let [thread      "dg-parked"
         project-dir (support/temp-dir "delegation-project")
         script      [{:content "" :tool-calls [{:id "d1" :name "agent"
-                                                :arguments {:name "general" :prompt "read it"}}]}
+                                                :arguments {:name "general" :prompt "write it"}}]}
                      ;; ^ the delegating round
-                     {:content "" :tool-calls [{:id "c1" :name "read"
-                                                :arguments {:path "../outside.txt"}}]}
-                     {:content "I could not read it"}
+                     {:content "" :tool-calls [{:id "c1" :name "write"
+                                                :arguments {:path "../outside.txt" :content "x"}}]}
+                     {:content "I could not write it"}
                      ;; ^ the SUBAGENT: told it needs a human it cannot ask
                      {:content "understood"}]]
     (try

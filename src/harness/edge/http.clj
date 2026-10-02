@@ -5878,23 +5878,22 @@
       (api-response 200 {:language (name (language/resolved))}))))
 
 (defn- security-wire
-  "providers/sensitive-paths-config -> the shape that may leave this process: the list as
-  WRITTEN under `sensitive-paths`, where it came from under `source`, and the built-in list
-  under `defaults`.
+  "providers/sensitive-paths-config -> the shape that may leave this process: the list in
+  force (built-in then custom) under `sensitive-paths`, the built-in half under
+  `builtin`, and THIS HOME's own additions under `custom`.
 
   THE WRITTEN FORM, NOT THE EXPANDED ONE, and that is the point of this route: a client
   edits what the file would hold, so `~/.ssh/` is what it has to be shown. What the park
   rule compares against (providers/sensitive-paths, `~` expanded) is a machine fact, and a
-  panel showing it would be showing paths nobody typed."
+  panel showing it would be showing paths nobody typed. builtin rides along so the panel can
+  show the built-in half as NOT DELETABLE; custom is the half the panel edits."
   []
-  (let [{:keys [paths source defaults]} (providers/sensitive-paths-config)]
-    {:sensitive-paths paths :source (name source) :defaults defaults}))
-
+  (let [{:keys [paths builtin custom]} (providers/sensitive-paths-config)]
+    {:sensitive-paths paths :builtin builtin :custom custom}))
 (defn- security-get
   "GET /api/security -- the paths THIS HOME declares sensitive, as the park rule reads
-  them: the list, where it came from (:config when this home wrote one, :default when it
-  wrote none), and the built-in list beside it so a client can offer 'restore the default
-  list' without a second request.
+  them: the list in force (built-in then custom), the built-in half under `builtin`, and
+  THIS HOME's own additions under `custom` -- the half the panel edits.
 
   A ROUTE OF ITS OWN, for the reason /api/language is one: this is a fact about the HOME
   rather than about a session, so it is asked with no threadId at all and has no per-session
@@ -5912,12 +5911,16 @@
 
   THE WHOLE LIST IS REPLACED, because that is what the request says: a list is edited by
   adding and removing entries, and a client that sends the list it wants has said everything
-  there is to say. AN EMPTY ARRAY IS A DECISION -- 'this home guards nothing' -- while a
-  body that names no list at all is refused by name, so the two cannot look the same.
+  there is to say. AN EMPTY ARRAY IS A DECISION -- 'this home adds nothing to the built-in
+  list' -- while a body that names no list at all is refused by name, so the two cannot
+  look the same.
 
   A REFUSED VALUE IS A 400 WITH THE SERVER'S SENTENCE and nothing is written, the rule
   POST /api/language and POST /api/model keep. The answer is the list READ BACK rather than
-  the list that was sent, so a caller never has to guess what its own value meant."
+  the list that was sent, so a caller never has to guess what its own value meant.
+  WHAT IS WRITTEN IS THE CUSTOM HALF ONLY: the built-in list is never in the request and
+  never dropped -- a custom of `[]` does not turn the guard off, it empties this home's
+  own additions."
   [req]
   (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)}
                     (catch Throwable _ {:bad true}))
@@ -5927,8 +5930,8 @@
       (api-response 400 {:error "request body is not valid JSON"})
 
       (not (and (map? ok) (contains? ok :sensitive-paths)))
-      (api-response 400 {:error (str "missing sensitive-paths; send the whole list, [] to"
-                                      " guard nothing")})
+      (api-response 400 {:error (str "missing sensitive-paths; send your custom list, [] to",
+                                      " add nothing")})
 
       :else
       (let [answer (try {:ok (providers/set-sensitive-paths! (:sensitive-paths ok))}

@@ -6,15 +6,15 @@
   },
   "security": {
     "title": "Sensitive paths",
-    "hint": "Paths this home calls sensitive — cloud and infrastructure credentials, key material, container and package-manager credentials. A file tool aimed at one of them (read, write, edit, glob, grep) parks for your approval, even inside the project. They live in config.edn's :security: what is listed here is the whole rule, and an empty list says this home guards nothing.",
-    "fromConfig": "This list is this home's own (config.edn's :security :sensitive-paths).",
-    "fromDefault": "These are the built-in paths — this home has written none of its own.",
-    "empty": "This home guards no path: the built-in list is off.",
+    "hint": "Paths this home calls sensitive, ON TOP OF the built-in list — cloud and infrastructure credentials, key material, container and package-manager credentials. A file tool aimed at one of them parks for your approval: reads (read, grep, glob) are held only by this list, no longer by the project fence, while writes stay inside the project fence. They live in config.edn's :security: what is listed below is only what you added — the built-in half can be neither deleted nor switched off.",
+    "fromBuiltin": "Built-in paths (always in force, not deletable)",
+    "builtinTag": "built-in",
+    "empty": "You have added none of your own. The built-in list is still in force.",
     "loading": "Reading the sensitive paths…",
     "add": "Add",
     "placeholder": "~/.ssh/ or /an/absolute/path",
     "remove": "Remove {{path}}",
-    "restore": "Restore the built-in list"
+    "clear": "Clear my own list"
   },
   "page": {
     "general": "General",

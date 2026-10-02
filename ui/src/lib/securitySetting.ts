@@ -1,9 +1,17 @@
-// GET and POST /api/security: the paths THIS HOME declares sensitive.
+// GET and POST /api/security: the paths THIS HOME declares sensitive -- ON TOP OF the
+// built-in list, which is always in force.
 //
-// THE SERVER OWNS THE LIST. It lives in config.edn's `:security :sensitive-paths` (or in
-// the built-in list, when that file names none), and the fence that parks a call is derived
-// from it there -- so the page never keeps a copy of its own: it reads this route and
-// writes this route, the same discipline `lib/languageSetting.ts` keeps for the language.
+// THE SERVER OWNS THE LIST. The built-in half lives in the server's `default-sensitive-paths`
+// and can never be switched off; the custom half lives in config.edn's
+// `:security :sensitive-paths` and is what this route writes. The fence that parks a call is
+// built-in UNION custom, derived on the server -- so the page keeps no copy of its own: it
+// reads this route and writes this route, the same discipline `lib/languageSetting.ts`
+// keeps for the language.
+//
+// WHAT THE PANEL EDITS IS THE CUSTOM HALF. `sensitive-paths` is answered as the union IN
+// FORCE (what the fence actually parks on), `builtin` is the half the panel shows but
+// cannot delete, and `custom` is the half the add/remove buttons write. Sending `[]` does
+// NOT turn the guard off -- it empties this home's own additions, the built-in list stays.
 //
 // THE LIST IS SHOWN AS WRITTEN. `~/.ssh/` is what a person typed and what the file holds;
 // the expanded absolute form is a machine fact the server keeps to itself, because a row
@@ -23,13 +31,12 @@ type Translate = TFunction<"errors">;
 
 /// What this home's sensitive list IS, as `GET /api/security` answers it.
 export type Security = {
-  /// The paths as written -- a leading `~` and all.
+  /// The list IN FORCE -- built-in then custom, as written. What the fence parks on.
   "sensitive-paths": readonly string[];
-  /// Where the list came from: `config` when this home wrote one, `default` when the
-  /// built-in list answered instead.
-  source: "config" | "default";
-  /// The built-in list, so `restore` is a local action rather than a second request.
-  defaults: readonly string[];
+  /// The built-in half: always in force, never deletable from the panel.
+  builtin: readonly string[];
+  /// THIS HOME's own additions -- the half the add/remove buttons write.
+  custom: readonly string[];
 };
 
 /// The server's own sentence when a route refused, or a sentence about the status when the
@@ -46,12 +53,12 @@ function reasonFrom(body: unknown, status: number, t: Translate): string {
 
 function asSecurity(body: unknown): Security {
   const wire = (body ?? {}) as Record<string, unknown>;
-  const paths = Array.isArray(wire["sensitive-paths"]) ? (wire["sensitive-paths"] as string[]) : [];
-  const defaults = Array.isArray(wire.defaults) ? (wire.defaults as string[]) : [];
+  const strings = (value: unknown): string[] =>
+    Array.isArray(value) ? (value as string[]) : [];
   return {
-    "sensitive-paths": paths,
-    source: wire.source === "config" ? "config" : "default",
-    defaults,
+    "sensitive-paths": strings(wire["sensitive-paths"]),
+    builtin: strings(wire.builtin),
+    custom: strings(wire.custom),
   };
 }
 
@@ -63,8 +70,9 @@ export async function readSecurity(t: Translate): Promise<Security> {
   return asSecurity(body);
 }
 
-/// Write the WHOLE list (that is the route's shape: an empty array says this home guards
-/// nothing), and answer the list the server now reads back.
+/// Write THIS HOME's OWN additions (the built-in half is never in the request and never
+/// dropped: `[]` empties the custom half, it does not turn the guard off), and answer the
+/// record the server now reads back.
 export async function writeSecurity(
   paths: readonly string[],
   t: Translate,

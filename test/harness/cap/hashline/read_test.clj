@@ -386,19 +386,19 @@
 ;; ----------------------------------------------- the inherited behaviour
 
 (deftest relative-paths-and-the-fence-are-untouched-by-the-mode
-  ;; Both of these predate the editing mode and must survive it: re-rooting is
-  ;; what a project binding IS, and the fence is what parks an out-of-bounds read
-  ;; for a human.
+  ;; Re-rooting is what a project binding IS, and it still holds in both modes. The FENCE
+  ;; is no longer on READ (see harness.cap.tools/sensitive-fence): a read outside the project
+  ;; RUNS, which is the read/write split this feature made.
   (use-mode! "r-fence" ":hashline")
   (put! "inside.txt" "here\n")
   (testing "a relative path still resolves against the project"
     (is (str/includes? (read-raw "r-fence" {:path "inside.txt"}) "here")))
   (testing "an absolute path inside the project works too"
     (is (str/includes? (read-raw "r-fence" {:path (path-of "inside.txt")}) "here")))
-  (testing "and one outside the project and the config home still parks"
+  (testing "and one outside the project RUNS -- reads are not held by the fence"
     (let [res (call "r-fence" "read" {:path (support/outside-path "hosts")})]
-      (is (some? (:parked res)) "the call is waiting for a human")
-      (is (= :out-of-bounds (:reason (:parked res)))))))
+      (is (nil? (:parked res))
+          "a read outside the project is not parked -- the fence is a write guard"))))
 
 (deftest str-replace-mode-reads-the-file-as-before
   (use-mode! "r-plain" ":str-replace")
