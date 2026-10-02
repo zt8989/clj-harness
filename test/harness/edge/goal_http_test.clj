@@ -96,6 +96,30 @@
     (is (not (contains? (:goal body) :armed?))
         "the permission is a fact about this PROCESS, so it never rides inside the goal")))
 
+(deftest three-places-one-vocabulary
+  ;; THE FIELD NAMES ARE A CONTRACT BETWEEN THREE CONSUMERS (`.scratch/goal` decision 3): the
+  ;; capability's snapshot, the ROUTE's answer and the pushed FRAME. `harness.cap.goal`'s own
+  ;; suite pins the first, this one pins the second and the third against it -- and
+  ;; `ui/test/suites/goal.tsx` pins the client's type against the wire. A field added in one
+  ;; place only is a client reading `undefined`, so the day somebody adds one, this fails.
+  (#'http/commands-request tid [(goal-command "create" :objective "one vocabulary")])
+  (let [sent (atom []) ch (fake-channel sent)]
+    (#'http/mux-attend! "tok-keys" ch [{:threadId tid}])
+    (#'http/commands-request tid [(goal-command "pause" :goal_id (:id (goal/goal-for tid))
+                                               :revision (:revision (goal/goal-for tid)))])
+    (let [body  (answer (#'http/goal-get tid))
+          frame (last (frames sent))
+          wired (set (keys (:goal body)))]
+      (is (= #{:id :revision :objective :phase :rounds :max-rounds :updated-at} wired)
+          (str "a snapshot with nothing pending wears exactly `harness.cap.goal/snapshot-keys`'"
+               " required half: " (pr-str wired)))
+      (is (= wired (set (keys (:goal frame))))
+          "and the frame carries the same fields as the route -- one payload, two doors")
+      (is (= #{:threadId :goal :armed?} (set (keys body)))
+          "the envelope is three keys, and the permission is one of them")
+      (is (not (contains? (:goal body) :armed?)) "never inside the goal")
+      (is (not (contains? (:goal frame) :armed?)) "at either door"))))
+
 ;; ------------------------------------------------------------------- the commands
 
 (deftest a-goal-command-with-no-run-is-executed-and-answered

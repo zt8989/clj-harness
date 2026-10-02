@@ -22,8 +22,10 @@
 
 ## 推送那一半
 
-- **一条 socket，按 `threadId` 路由**：`ui/src/lib/mux.ts`（ADR 0004）。今天的三个家族是
-  window（这一页手里那份对话）、run（正在跑的 run 的 AG-UI 事件）、fact（`turn/*` 与 `model/*`）。
+- **一条 socket，按 `threadId` 路由**：`ui/src/lib/mux.ts`（ADR 0004）。今天的家族是 window
+  （这一页手里那份对话）、run（正在跑的 run 的 AG-UI 事件）、fact（`turn/*` 与 `model/*`）、
+  task（右栏那一份作业与委派）、goal（这一场会话的目标：`{threadId, goal, armed?}` 一整份载荷，
+  **没有游标可重放**——见 07 那一处）。
 - **推的是「变了」，不是「变了之后的全部」**：谁要画它，谁把自己那一格状态改掉。
 - **一个新的可推对象 = 服务端要有一个写点**挂在它上面（一轮 run 的边、一次工具调用、一个进程的结局）。
   没有写点就推不了——那就先问「它凭什么没有写点」，**而不是先开一个定时器**。
@@ -43,7 +45,8 @@
 
 ## 今天谁这么做了（这份文件就是它们的规矩）
 
-**没有欠账了**——六处都按上面那两半走（2026-09-29 复查过每一条都落在代码里，2026-10-01 添了第一处新面板）：
+**没有欠账了**——七处都按上面那两半走（2026-09-29 复查过每一条都落在代码里，2026-10-01 添了第一处新面板，
+2026-10-02 添了目标条那一处）：
 
 - **左侧清单**：挂载一次 `GET /api/projects`，之后每一个 host 级变化（run 起止、别窗发送、项目增删、
   归档）由 `events.host` 推来（`ui/src/components/sidebar.tsx` + `ui/src/lib/host.ts`，ADR 0004）。
@@ -75,6 +78,13 @@
   **抽屉里那一个动词（`重算`）不违反「读不写」**：写的那一半是 `POST /api/stats/rebuild`，一个 POST 而不是
   一次 GET；那条 GET 依旧只数行、不落一笔。
 
-**没有欠账了**——上面六处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
+- **composer 之上那条目标条**（`.scratch/goal` 票 07，2026-10-02）：挂载一次、换会话一次
+  `GET /api/threads/<stem>/goal`（只读、不留痕、不 404），之后由同一条 socket 的 `goal` 帧推着走；
+  此外两个 fact（`model/start`、`turn/end`）各补一次存量——**模型在 run 里自己改的那个目标是它推不动的**
+  （`create_goal`/`update_goal` 走的是工具表，不是面板那条写点），而 run 收尾时服务端会补推一帧
+  （`harness.edge.http` 的 `:run/done`）；`onDownlinkOpen` 再补一次（这一族帧没有游标，断了就只靠下一次存量）。
+  `ui/src/components/composer-goal.tsx` 里**一个计时器都没有**。
+
+**没有欠账了**——上面七处都按那两半走。把前四处从欠账改过来的票在 `.scratch/panel-data-push/`（右栏与
 左栏那一半）；目录选择器那一处是 2026-09-29 随手合上的，trajectory 那一处同一天随
 `.scratch/memory-hygiene/` 票 02 一起（它本来就在推，缺的是「重连之后补一次」。）

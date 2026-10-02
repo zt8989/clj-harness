@@ -2060,23 +2060,34 @@
                       ;; answers nil).
                       (when-some [snap (numbers-snapshot thread-id)]
                         (project/remember-numbers! thread-id snap))
-                      ;; AND THE MODEL'S OWN HALF OF THE GOAL REACHES THE WIRE HERE, because this
-                      ;; is the moment a run stops changing it: a `create_goal` / `update_goal` call
-                      ;; inside the run wrote the record and the row, and a strip watching this
-                      ;; conversation would otherwise keep drawing the goal as it was until somebody
-                      ;; reloaded. ONE FRAME PER FINISHED RUN for a session that HAS a goal, and
-                      ;; nothing at all for one that has none -- the payload is the whole answer, so a
-                      ;; repeat costs a client nothing but a redraw it already owed (see `goal-send!`).
-                      (when (goal/goal-for thread-id)
-                        (goal-send! thread-id))
-                      ;; AND THE NEXT ROUND, IF THE GOAL SAYS SO (`.scratch/goal` decision 9).
-                      ;; LAST, and after the frame above: this may OPEN A RUN, and a run started
-                      ;; before this one has finished talking to its clients would be a second run
-                      ;; of one conversation (the very thing `refuse-second-run!` exists for -- the
+                      ;; AND THE GOAL'S TWO END-OF-RUN JOBS, in one guarded block: push what the
+                      ;; model may have changed inside this run, and open the next round if the goal
+                      ;; says so (`.scratch/goal` decisions 3 and 9).
+                      ;;
+                      ;; THE PUSH COMES FIRST because it is about THIS run -- a `create_goal` /
+                      ;; `update_goal` call inside it wrote the record and the row, and a strip
+                      ;; watching the conversation would otherwise keep drawing the goal as it was
+                      ;; until somebody reloaded. One frame per finished run for a session that HAS a
+                      ;; goal, and nothing for one that has none: the payload is the whole answer, so
+                      ;; a repeat costs a client nothing but a redraw it already owed.
+                      ;;
+                      ;; AND THE DRIVER RUNS LAST, after that frame: it may OPEN A RUN, and one
+                      ;; started before this run has finished talking to its clients would be a second
+                      ;; run of one conversation (`refuse-second-run!` exists for exactly that). The
                       ;; terminal frame has already cleared the registry, which is what makes this
-                      ;; moment the right one).
-                      (when (ended-normally? @state)
-                        (drive-next-round! thread-id run-id (changed-a-file? @state) start-run))
+                      ;; moment the right one.
+                      ;;
+                      ;; NOTHING HERE MAY TAKE A RUN'S ENDING DOWN WITH IT: this is the last thing the
+                      ;; run does, and a store that will not answer would otherwise leave a session
+                      ;; that looks unfinished for the life of the process. The failure is logged and
+                      ;; the run ends as it was going to.
+                      (try
+                        (when (goal/goal-for thread-id)
+                          (goal-send! thread-id))
+                        (when (ended-normally? @state)
+                          (drive-next-round! thread-id run-id (changed-a-file? @state) start-run))
+                        (catch Throwable t
+                          (log/error! :goal/run-end-failed t {:thread-id thread-id :run-id run-id})))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -7522,7 +7533,10 @@
    (fn [thread-id kind payload]
      ;; A RUN ID OF NIL IS THE HONEST ONE: a goal changes outside any run as often as inside one
      ;; (a person's `/goal resume` after a restart has no run in flight).
-     (log! thread-id nil kind payload))))
+     (log! thread-id nil kind payload)))
+  ;; NIL, SO THIS CANNOT BE MISTAKEN FOR A TEARDOWN: `start!` collects thunks it calls on the
+  ;; way out, and a function that ANSWERS the writer is not one of them (see the call there).
+  nil)
 
 (defn start!
   "Start the server and return its stop fn. Default port is 8080.
@@ -7581,7 +7595,9 @@
                    ;; here, exactly as the subagent runner above is handed over. A run id of nil is the
                    ;; honest one: a goal changes outside any run as often as inside one (the strip's
                    ;; command runs in a run, but a `/goal resume` after a restart has no run yet).
-                   (install-goal-writer!)
+                   ;; IT IS NOT INSTALLED HERE: a teardown is a THUNK, and this one is a
+                   ;; closure -- see `install-goal-writer!` and the call below, beside the record
+                   ;; writer's own step, where a thing that must NOT be called on the way out goes.
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
                    ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
                    ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
@@ -7615,6 +7631,12 @@
     ;; server this process starts, and a suite that starts a hundred must not
     ;; leave a hundred writer threads behind (or stop the one it has).
     (stream/prepare-with! carry-back!)
+    ;; AND THE GOAL'S RECORD DOOR (`.scratch/goal`), beside it and for the same reason: a
+    ;; capability is handed the writer THIS process has -- one writer serves every server the
+    ;; process starts -- and there is nothing to hand back at the end, so it is not in the
+    ;; teardown list above (it was, once, and a test suite that stopped a server called the
+    ;; writer fn as a thunk: `ArityException`, 205 errors in one full run).
+    (install-goal-writer!)
     ;; AND THE RECORD'S FIRST LINE (ticket 06): what a file's header says is the EDGE's to say --
     ;; the row vocabulary is this namespace's (`row-of`) and the conversation's identity is the
     ;; HOME's. The writer only knows WHEN one is due.

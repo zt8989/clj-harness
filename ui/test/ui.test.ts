@@ -596,33 +596,16 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// (`.scratch/global-stats-panel/`) -- the trailing `…` that opens it, and the column itself,
 /// which draws two rankings on sight and folds the token-per-model one away.
 ///
-/// ...215 -> 223: the `goal` suite, appended to `SUITES` -- the goal strip above the composer and
-/// `/goal …` as the composer reads it (`.scratch/goal`, tickets 07 and 08). EIGHT cases: the empty
-/// state (no goal, zero nodes), the hands each phase-and-arm combination draws, the rounds and the
-/// blocker, the words from the catalogs in both languages, the parser's six shapes, its refusals,
-/// the `goal` frame reaching only the conversation it is about (driven through the real `deliver`
-/// with a stand-in socket), and the one source read -- the snapshot, the frame, the two facts and
-/// the reconnect, with no timer anywhere. A press, a fold and a real run are the browser
-/// walkthrough's half.
-/// ...215 -> 224: the `goal` suite, appended to `SUITES` -- the goal strip above the composer and
-/// `/goal …` as the composer reads it (`.scratch/goal`, tickets 07 and 08). NINE cases: the empty
+/// 215 -> 225: the `goal` suite, appended to `SUITES` -- the goal strip above the composer and
+/// `/goal …` as the composer reads it (`.scratch/goal`, tickets 07 and 08). TEN cases: the empty
 /// state (no goal, zero nodes), the hands each phase-and-arm combination draws, the rounds, the
-/// blocker and the full objective the fold carries, the words from the catalogs in both languages,
-/// the parser's six shapes and its refusals, the read verb's doorbell (`/goal` alone rings the
-/// strip and sends nothing), the `goal` frame reaching only the conversation it is about (driven
+/// blocker and the full objective the fold carries, the words from the catalogs in both
+/// languages, the parser's six shapes and its refusals, the read verb's doorbell (`/goal` alone
+/// rings the strip and sends nothing), the fence a typed command names (the goal on screen,
+/// published by the strip), the `goal` frame reaching only the conversation it is about (driven
 /// through the real `deliver` with a stand-in socket), and one source read -- the snapshot, the
 /// frame, the two facts and the reconnect, with no timer anywhere. A press, a fold and a real run
 /// are the browser walkthrough's half.
-/// ...215 -> 225: the `goal` suite, appended to `SUITES` -- the goal strip above the composer and
-/// `/goal …` as the composer reads it (`.scratch/goal`, tickets 07 and 08). TEN cases: the empty
-/// state (no goal, zero nodes), the hands each phase-and-arm combination draws, the rounds, the
-/// blocker and the full objective the fold carries, the words from the catalogs in both languages,
-/// the parser's six shapes and its refusals, the read verb's doorbell (`/goal` alone rings the
-/// strip and sends nothing), the fence a typed command names (the goal on screen, published by the
-/// strip -- a walkthrough fix), the `goal` frame reaching only the conversation it is about
-/// (driven through the real `deliver` with a stand-in socket), and one source read -- the
-/// snapshot, the frame, the two facts and the reconnect, with no timer anywhere. A press, a fold
-/// and a real run are the browser walkthrough's half.
 const EXPECTED_CASES = 225;
 
 

@@ -105,7 +105,7 @@ harness.edge.http/handle-run ──► as-channel，SSE 回包（首帧带 statu
 |---|---|---|
 | 会话消息 | **服务端内存**（会话表；`jsonl` 是恢复源） | 铁律 3：会话归服务端，一轮 run 的输入是**动作**（`append`），历史由服务端自己交给自己 |
 | **窗口**（`entries` / `baseSeq` / `hasMore` / `cursor`，以及 generation） | **连接与浏览器**（一条 feed 一条连接；服务端不记谁订了什么） | 铁律 3 的另一半：游标随连接走，进程除了活着的连接不持有任何订阅状态 |
-| 项目 / 会话归属 / 归档 / 认领（`session_claims`）/ 任务清单（`todos`） | **sqlite**（`harness.infra.db`） | 会被**改写**的状态 |
+| 项目 / 会话归属 / 归档 / 认领（`session_claims`）/ 任务清单（`todos`）/ **目标（`goals`）** | **sqlite**（`harness.infra.db`） | 会被**改写**的状态。目标那一格是**物化 fold**：真相在记录里的 `goal/change` 行，`goals` 一行是它折出来的快照（写整份、就地改、无历史），`harness.cap.goal/goal-from-records` 是修复路径——与 `sessions.numbers` 对 model/* 那一族是同一个形状，**不是第二份真相** |
 | 行锚点、已展示集合、撤销记录 | **sqlite**（`harness.infra.db`，四张 `hashline_*` 表） | 会被**改写**的状态；且会话长命，重启后日志里的锚点还得能用 |
 | 文件编辑模式（`config.edn` 的 `:editing`） | **文件**（每次调用现读） | 手编、改了不重启；按会话解析，两种模式各有完整用例 |
 | 已执行的对话记录 | **jsonl 文件**（只追加） | 只追加的记录：`message` / `event` 两类行，其中**不含推理帧**——同一段思考在模型那条 `message` 行的 `reasoning_content` 上（[ADR 0009](../adr/0009-the-record-holds-a-thought-once.md)） |

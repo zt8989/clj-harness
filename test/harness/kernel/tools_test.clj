@@ -283,9 +283,9 @@
   ;; question whichever way it edits files.
   (testing "the default session is served the anchor toolset"
     (let [names (mapv #(get-in % [:function :name]) (tools/specs))]
-      (is (= ["ask" "bash" "eval" "glob" "grep" "insert" "job" "job_kill" "job_list"
-              "job_output" "read" "replace" "skill" "todo_read" "todo_write"
-              "undo_last_replace" "web_fetch" "web_search" "write"]
+      (is (= ["ask" "bash" "create_goal" "eval" "get_goal" "glob" "grep" "insert" "job"
+              "job_kill" "job_list" "job_output" "read" "replace" "skill" "todo_read"
+              "todo_write" "undo_last_replace" "update_goal" "web_fetch" "web_search" "write"]
              names))
       (is (every? #(seq (get-in % [:function :description])) (tools/specs)))))
   (testing "and a session that asks for the exact-string editor gets it"
@@ -296,8 +296,9 @@
     (try
       (let [names (mapv #(get-in % [:function :name])
                         (tools/specs "tt-strrep-toolset"))]
-        (is (= ["ask" "bash" "edit" "eval" "glob" "job" "job_kill" "job_list" "job_output"
-                "read" "skill" "todo_read" "todo_write" "web_fetch" "web_search" "write"]
+        (is (= ["ask" "bash" "create_goal" "edit" "eval" "get_goal" "glob" "job" "job_kill"
+                "job_list" "job_output" "read" "skill" "todo_read" "todo_write"
+                "update_goal" "web_fetch" "web_search" "write"]
                names)))
       (finally (support/wipe-session!)))))
 
