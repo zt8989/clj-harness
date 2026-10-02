@@ -20,6 +20,7 @@
     "general": "General",
     "models": "Models",
     "mcp": "MCP servers",
+    "security": "Security",
     "groups": "Session behaviour",
     "subagents": "Subagents",
     "sessions": "Sessions"
