@@ -98,3 +98,36 @@ turn/end         {steps, messages, seqFrom, seqTo}   ← 进记录
 - **数字**：同一轮上，`turn/end` 行里的 `steps` 与同一份记录折出来的步数相等（一条读侧用例钉住）。
 - **客户端与行一致**：窗口带来的 `turns` 与记录里的 `turn/*` 行逐条相等（一张共享用例表）。
 - **老记录**：一份没有 `turn/*` 行的记录读出来 `:turns` 为 0 / 没有轮 —— 这是**判据**，不是缺陷。
+
+## 落地
+
+**票 01 / 02 落了，票 03 的「服务端一半」也落了（2026-10-02）；票 03 的 UI 一半与票 04 还没做。**
+
+| 文件 | 改了什么 |
+|---|---|
+| `harness.edge.http` | 开轮写一行 `turn/start`、收轮写一行 `turn/end`；两族 fact 的 `:seq` 改成**它自己那一行**；窗口帧带 `:turns`（`window-frame`），live 与 record 两条路都带上 |
+| `harness.edge.turns` | 新命名空间：把记录里的 `turn/*` 行折成每轮的账（`{:from :to :steps :messages}`）、`turn-id`（名字只有一处拼写）、一个会话 fold |
+| `harness.edge.stats` | `:turns` 数 `turn/start` 行；`user-ids` 删掉 |
+| `harness.edge.trajectory` | 一轮由 `turn/start` 行开（段机多一个 `:turn?` 标记）；message 行的请求侧/返回侧改按**行的性质**判 |
+| `harness.edge.turn` | `records->turn` 删掉；docstring 改口为「写侧为本轮攒 `turn/end` 的载荷」 |
+| 测试 | `client` fixture 现在带它开的那一行；`client-again` 表示不带；stats / trajectory 跟着改 |
+
+### 判据
+
+- `harness.edge.trajectory-test` + `harness.edge.stats-test`：50 用例 / 237 断言，全绿。
+- 其余后端（mux / replay / normalized / sessions / ui / compaction / fork / pressure / context）：214 用例 / 975 断言，全绿。
+- `harness.edge.http-test`：126 用例 / 1378 断言 —— **单跑与重跑都绿，整轮里红过一次**：
+  `a-conversation-whose-runs-predate-the-numbering-heals-on-the-next-read` 报过 `:numbered-from-record` 为 nil。
+  单跑这个用例（`clojure.test/run-test-var`）是绿的，重跑整轮也绿，主检出（未改）整轮绿 —— 记为**与负载/时序有关**，不是这一刀的逻辑。
+
+### 三个踩过的坑
+
+1. **真实记录的 `system-prompt` 行不在 run 的第一行**：它在 `turn/start` 之后、`model/start` 之后
+   （`.scratch/record-envelopes` 把 prompt 与人的话放进了首个调用的信封里）。原来「段由第一条 message
+   行开」的规则让它恰好当了段首；`turn/start` 行插到它前面以后，它落到了 `:returned` 一侧，prompt 从轨迹里
+   消失。修法是把「请求侧/返回侧」从**位置**改成**行的性质**（entry 与 prompt 永远在请求侧）。
+2. **`opens-segment?` 原来那条「entry 行 + streaming 就开新段」**会把同一个 run 的 client 行切成两段
+   （`RUN_STARTED` 在它之前），于是那一轮没有 `:turn?`、user cell 消失。有了 `turn/start` 行做边界，
+   这条规则整个删掉。
+3. **同一个 run 里两条人的消息**不能各开一段：`one-run` 本来就会在一个段里开多个轮。判据是
+   「这一段已经有返回侧的东西了」（`:streaming` / `:returned`），不是「已经有轮了」。
