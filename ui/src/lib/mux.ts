@@ -18,6 +18,9 @@
 // `threadId`; the server filters to the threads this connection declared (so a page hears
 // nothing about a conversation it is not holding).
 import type { WindowFrame } from "./feed";
+/// THE GOAL FAMILY'S PAYLOAD (see `GoalFrame` below): a TYPE-only import, so nothing about the
+/// strip is in this module's runtime graph.
+import type { Goal } from "./goal";
 // `apiBase` RATHER THAN `API_BASE`: a suite points the harness origin at a server it learned
 // at runtime, and this module is loaded before that (`threads.ts` says why).
 import { apiBase, downlinkUrl } from "./threads";
@@ -103,14 +106,50 @@ export type TaskFrame = {
 /// re-writing the spelling.
 export const TASK_FRAME_TYPE = "task";
 
+/// THE FIFTH FAMILY: A SESSION'S GOAL, pushed (ticket 03 of `.scratch/goal`).
+///
+/// WHAT IT IS. A conversation can be chasing ONE objective across many rounds -- a person sets
+/// it, or the model does on a person's direct request -- and while it is `active` and armed the
+/// harness opens the next round by itself. This frame is how a strip learns that the goal moved:
+/// a pause, a clear, a round the driver judged to have made no progress, a blocker the model
+/// finally reported often enough to count.
+///
+/// WHY NOT A `FactFrame`, and why the WHOLE PAYLOAD every time: the same two reasons the task
+/// pane's frame has (`TaskFrame` above). A fact is a line of the record with a number to replay
+/// by; a goal changes under a name of its own (`goal/change`), the row a strip reads is the fold
+/// of those lines, and `armed` is not in the record at all (it is this PROCESS's memory). So
+/// there is no `seq` to carry and nothing a cursor could repair: the frame IS the answer, exactly
+/// as `GET …/goal` words it, the last one wins, and a client that missed one asks again -- the
+/// two halves `docs/rules/panel-data.md` names.
+export type GoalFrame = {
+  threadId: string;
+  type: "goal";
+  /// THE GOAL AS THE ROUTE ANSWERS IT, or null for a session that has none -- `clear` pushes
+  /// null too, because a strip told nothing would go on drawing the goal somebody just cleared.
+  goal: Goal | null;
+  /// WHETHER THIS PROCESS MAY OPEN THE NEXT ROUND, beside the goal and never inside it (the
+  /// question mark is the server's own spelling, `harness.edge.http/goal-wire`).
+  "armed?": boolean;
+};
+
+/// The goal frame's one type name, exported for the same reason as `TASK_FRAME_TYPE`: a suite
+/// names the contract instead of re-writing the spelling.
+export const GOAL_FRAME_TYPE = "goal";
+
 /// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
-/// without a socket (`test/suites/mux.ts`), and so `onmessage` states it once. The `default` is
-/// deliberate: anything that is not one of the two named families is a RUN frame, which is
-/// AG-UI's own (upper-case) vocabulary.
-export function familyOf(type: string): "window" | "fact" | "task" | "run" {
+/// without a socket (`test/suites/mux.ts`, `test/suites/goal.tsx`), and so `onmessage` states it
+/// once. The `default` is deliberate: anything that is not one of the named families is a RUN
+/// frame, which is AG-UI's own (upper-case) vocabulary. THE NAMED ONES ARE BRANCHES OF THEIR OWN
+/// -- a family that fell through to that default would be validated against AG-UI's schema and
+/// take the run down with it, which is exactly what the fact and task branches say above.
+export function familyOf(type: string): "window" | "fact" | "task" | "goal" | "run" {
   if (WINDOW_TYPES.has(type)) return "window";
   if (FACT_TYPES.has(type)) return "fact";
   if (type === TASK_FRAME_TYPE) return "task";
+  // AND THE GOAL IS THE FIFTH, named here for the same reason the task pane's is: a goal frame
+  // handed to `@ag-ui/client` as a run event would be refused by its schema, and the run the
+  // page is watching would die with a frame that was never meant for it.
+  if (type === GOAL_FRAME_TYPE) return "goal";
   return "run";
 }
 
@@ -257,6 +296,11 @@ const factSubscriptions = new Map<string, Set<(fact: FactFrame) => void>>();
 /// conversation nobody is watching the pane of reaches nobody.
 const taskSubscriptions = new Map<string, Set<(task: TaskFrame) => void>>();
 
+/// THE GOAL STRIP'S SUBSCRIBERS, by conversation -- the fifth family's table (see `GoalFrame`).
+/// A separate map for the same reason every other family has one: a frame for a conversation
+/// nobody is showing the goal of reaches nobody.
+const goalSubscriptions = new Map<string, Set<(goal: GoalFrame) => void>>();
+
 
 /// WHO HAS TO BE TOLD WHEN THE SOCKET IS BACK -- and why anybody has to be.
 ///
@@ -266,6 +310,10 @@ const taskSubscriptions = new Map<string, Set<(task: TaskFrame) => void>>();
 /// in no frame this page will ever be handed -- a fresh answer is the only repair, and this is
 /// the door `open` knocks on to ask for one. `subscribeTasks` registers the reader; stopping
 /// takes it away.
+///
+/// AND ONE MORE READER IS IN THE SAME POSITION: the goal strip. Its frame (`GoalFrame`) carries no
+/// cursor either, so it reads again through the same door -- `onDownlinkOpen` directly, because
+/// the strip, not this module, is the thing that knows whether it is on screen.
 const openListeners = new Set<() => void>();
 
 /// ASKED WHEN THE SOCKET HAS BEEN AWAY AND IS BACK, for a reader whose own connection the
@@ -316,6 +364,15 @@ function deliver(frame: MuxFrame & RunFrame): void {
     // page that missed one asks again when it reopens (the pane's own snapshot read).
     for (const onTask of taskSubscriptions.get(frame.threadId) ?? []) {
       onTask(frame as unknown as TaskFrame);
+    }
+    return;
+  }
+  if (family === "goal") {
+    // NO CURSOR AND NO REMEMBERING, the same two sentences the task pane's branch says: the frame
+    // IS the whole payload, so the last one wins, and a reader that missed one asks again (the
+    // strip's own snapshot read, on the fact family and after a reconnect).
+    for (const onGoal of goalSubscriptions.get(frame.threadId) ?? []) {
+      onGoal(frame as unknown as GoalFrame);
     }
     return;
   }
@@ -375,8 +432,9 @@ let wanted = false;
 let everOpen = false;
 
 /// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows, a run it
-/// drives, OR ONE WHOSE FACTS IT WANTS, OR ONE A PANE IS DRAWING. The server filters EVERY
-/// family by this set, so a thread has to be in it however this page came to hold it.
+/// drives, OR ONE WHOSE FACTS IT WANTS, OR ONE A PANE IS DRAWING, OR ONE WHOSE GOAL A STRIP IS
+/// SHOWING. The server filters EVERY family by this set, so a thread has to be in it however this
+/// page came to hold it.
 ///
 /// THE FACTS BELONG HERE, and their absence used to be a hole with a real edge: a page whose
 /// only claim on a conversation was the run it had just driven stopped being told about that
@@ -398,13 +456,15 @@ function wantedThreads(): string[] {
       ...runSubscriptions.keys(),
       ...factSubscriptions.keys(),
       ...taskSubscriptions.keys(),
+      ...goalSubscriptions.keys(),
     ]),
   ];
 }
 
 /// IS ANYBODY STILL CLAIMING THIS CONVERSATION? -- the question every door's close has to ask
-/// before it tells the server to stop sending. Window, run, facts AND THE TASK PANE are FOUR
-/// SEPARATE CLAIMS on one conversation, and a door that drops only its own must not take the
+/// before it tells the server to stop sending. Window, run, facts, the goal strip AND THE TASK
+/// PANE are FIVE SEPARATE CLAIMS on one conversation, and a door that drops only its own must
+/// not take the others' with it.
 /// others' with it.
 ///
 /// THE RUN'S OWN DOOR IS THE ONE THAT MADE THIS NECESSARY: the agent lets go of a run the moment
@@ -421,7 +481,8 @@ function stillWanted(threadId: string): boolean {
     subscriptions.has(threadId) ||
     runSubscriptions.has(threadId) ||
     factSubscriptions.has(threadId) ||
-    taskSubscriptions.has(threadId)
+    taskSubscriptions.has(threadId) ||
+    goalSubscriptions.has(threadId)
   );
 }
 
@@ -674,6 +735,36 @@ export function subscribeTasks(
       // this reader: nobody is told to read again (`openListeners`), and the server is asked to
       // stop sending only when no family is left (`stillWanted`).
       if (onOpen !== undefined) openListeners.delete(onOpen);
+      if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
+    },
+  };
+}
+
+/// FOLLOW A CONVERSATION'S GOAL for THREAD-ID: every pushed payload is handed to ON_GOAL, and the
+/// way to stop comes back. The opening snapshot is the caller's to ask for (`lib/goal.ts`'s
+/// `goalFor`) -- a subscription with no snapshot would be a strip that is empty until something
+/// happens.
+///
+/// IT TAKES NO `onOpen` AND NEEDS NONE, unlike `subscribeTasks` above: a `goal` frame carries no
+/// cursor either, so the strip's own `onDownlinkOpen` is what re-reads after a reconnect -- and
+/// the strip is what knows whether it is on screen to read anything.
+export function subscribeGoals(
+  threadId: string,
+  onGoal: (goal: GoalFrame) => void,
+): { unsubscribe: () => void } {
+  const set = goalSubscriptions.get(threadId) ?? new Set<(goal: GoalFrame) => void>();
+  set.add(onGoal);
+  goalSubscriptions.set(threadId, set);
+  // The same two lines every family's door has: the socket is opened, and the server is told that
+  // this connection wants this conversation (`wantedThreads` says why that matters).
+  ensure();
+  void declareThread(threadId);
+  return {
+    unsubscribe: () => {
+      const current = goalSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onGoal)) return;
+      if (current.size === 0) goalSubscriptions.delete(threadId);
+      // AND THE SAME QUESTION THE OTHER DOORS ASK: the last claim out turns off the light.
       if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },
   };

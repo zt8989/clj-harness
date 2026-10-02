@@ -36,6 +36,10 @@
   read -- the walk a session is BORN by -- is the fold installed here."
   (:require [harness.cap.claims :as claims]
             [harness.cap.jobs :as jobs]
+            ;; The goal's PROCESS memory -- whether this process may open the session's next
+            ;; goal round by itself. It has to be dropped on both doors out of the session table
+            ;; (see the two seams below); the goal itself lives in the record.
+            [harness.cap.goal :as goal]
             [harness.cap.project :as project]
             [harness.edge.host :as host]
             [harness.infra.stream :as stream]
@@ -129,6 +133,12 @@
 (def ^:private seams
  {:build
   (fn [thread-id registered]
+    ;; A SESSION BORN (OR REBORN) HERE HAS BEEN TOLD 'CARRY ON' BY NOBODY (`.scratch/goal`
+    ;; decision 3): the permission to open the next goal round is PROCESS memory, and this is
+    ;; the moment the session comes back into a process -- a restart, an eviction, a fork.
+    ;; The GOAL itself is untouched: it is in the record, and a person speaking to the session
+    ;; puts the permission back (`harness.cap.goal/arm-if-active!`).
+    (goal/disarm! thread-id)
     (if-some [f (replay/find-log (home/projects-dir) thread-id)]
       (let [{:keys [entries context state compactions prunes]
              folds :folds} (replay/fold-sofar f registered)]
@@ -179,6 +189,13 @@
                 ;; `stream/fsync!` itself: THE BYTES GET THEIR PROMISE, and the IN-MEMORY RING ROW
                 ;; for this conversation goes with it (`forget-kept!` -- a reader with a cursor pulls
                 ;; the file, so nothing askable is lost). `.scratch/memory-hygiene/` ticket 03.
+                ;;
+                ;; AND THE GOAL'S PERMISSION GOES WITH THE SESSION (`.scratch/goal` decision 3):
+                ;; nothing here may open the next round for a conversation this process has just
+                ;; stopped serving. It is memory, so putting it away IS forgetting it -- writing
+                ;; that fact down would be a second lifetime for something whose whole point is
+                ;; that it does not survive.
+                (goal/disarm! thread-id)
                 (stream/fsync! thread-id)
                 (stream/forget-kept! thread-id)
                 nil)})

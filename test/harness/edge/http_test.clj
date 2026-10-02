@@ -34,6 +34,7 @@
             [harness.infra.shell :as shell]
             [harness.test-support :as support]
             [harness.kernel.tools :as tools]
+            [harness.cap.goal :as goal]
             [harness.wire :as wire])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -7703,3 +7704,66 @@
           ;; SCHEDULED RATHER THAN WAITED ON: the trigger is running in this server, so the
           ;; request answers at once and the downlink carries the new numbers when they land.
           (is (true? (:scheduled (read-json resp)))))))))
+
+;; ------------------------------------------------------------------ the round driver
+;;
+;; THE ONE CASE THAT NEEDS A REAL RUN (`.scratch/goal` ticket 06): the driver is decided AT
+;; `:run/done`, so 'a round opened' is a fact about a run's own ending and nothing else can
+;; produce it. The scripted provider gives the round something to do -- a `write`, which is the
+;; driver's own progress criterion -- and the script is deliberately short: the round AFTER it
+;; has nothing to change, which is the brake, in the same run of the test.
+
+(deftest a-run-that-changed-a-file-opens-the-next-round-and-then-the-brake-stops-it
+  (with-server ["goal-driver"]
+    [{:content ""
+      :tool-calls [{:id "c-goal-write" :name "write"
+                    :arguments {:path (str (home/root) "/goal-driver.txt")
+                                :content "one line the driver can see"}}]}
+     {:content "the file is written"}]
+    (fn []
+      (let [tid (str "goal-driver")
+            log (log-file tid)]
+        (io/delete-file log true)
+        (goal/create! tid "change a file, then carry on")
+        (is (true? (goal/armed? tid)) "a goal a person made is one this process may push")
+        (let [resp (post-run tid {:append [{:id "m-goal-1" :role "user" :content "go"}]})]
+          (is (= 200 (.statusCode resp)))
+          ;; THE ROUND OPENS: the driver appends the round opening as a REAL user message after
+          ;; the run's terminal, so the record is where it can be seen (`wait-for-recorded` polls
+          ;; the file the run is still writing).
+          ;; (MATCHED ON THE ROUND OPENING'S OWN SENTENCE, not on `<goal`: the REMINDER is a
+          ;; `<goal>` block too, and the run this test drives had one injected at its start --
+          ;; a predicate that took either would pass on run 1 and prove nothing about the driver.)
+          (let [rows (wait-for-recorded
+                      log
+                      (fn [ls]
+                        (some #(and (= "message" (:type %))
+                                   (str/includes? (str (:content (:payload %)))
+                                                  goal/round-instruction))
+                              ls))
+                      15000)]
+            (let [turn (first (filter #(and (= "message" (:type %))
+                                             (str/includes? (str (:content (:payload %)))
+                                                            goal/round-instruction))
+                                      rows))]
+              (is (some? turn) "a round opened -- the driver's own message, in the record")
+              (is (str/includes? (str (:content (:payload turn))) "round 1/")
+                  "and it says which round this is (counted before the run starts)")))
+          (is (= 1 (:rounds (goal/goal-for tid))) "the count is in the store too")
+          ;; AND THE BRAKE: the round after it has nothing to change, so the goal is BLOCKED
+          ;; rather than pushed again (the fuse is small and the drive stops on zero progress).
+          (let [blocked (wait-for-recorded
+                          log
+                          (fn [ls]
+                            (some #(and (= "goal/change" (replay/kind %))
+                                        (= "blocked" (:phase (replay/payload %))))
+                                  ls))
+                          15000)]
+            (is (some #(and (= "goal/change" (replay/kind %))
+                            (= "blocked" (:phase (replay/payload %))))
+                     blocked)
+                "a round that changed nothing blocks the goal -- the driver's one brake that acts")
+            (let [g (goal/goal-for tid)]
+              (is (= "blocked" (:phase g)))
+              (is (= "no-progress" (get-in g [:blocked :code])))
+              (is (false? (goal/armed? tid))))))))))

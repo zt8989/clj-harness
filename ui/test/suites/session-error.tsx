@@ -226,8 +226,11 @@ const cases: readonly Case[] = [
 
       // AND THE GAPS ARE THE OTHER HALF (owner, 2026-10-01): every block that DRAWS carries a
       // blank gap under it so it reads as a card of its own, and the QUEUE -- the one thing
-      // joined to the composer -- carries none. The two reserved slots draw nothing yet, so
-      // their spacing is a written obligation rather than a rendered one.
+      // joined to the composer -- carries none. THE GOAL SLOT IS NO LONGER ONE OF THE RESERVED
+      // ONES (ticket 07 of `.scratch/goal` filled it in), so the only slot that draws nothing
+      // today is the queue, and its spacing is a written obligation rather than a rendered one.
+      // The goal's own spacing is the same obligation, and now also a rendered one (`suites/goal`
+      // pins the strip).
       expect(sessionErrorCardSource).toContain("mb-1.5");
       expect(composerTodosSource).toContain("mb-1.5");
       // AND THE TASK LIST IS A ROUNDED BOX OF ITS OWN, in the composer's own material --
@@ -237,7 +240,9 @@ const cases: readonly Case[] = [
       expect(composerTodosSource).toContain("bg-(--composer-bg)");
       expect(composerGoalSource).toContain("mb-1.5");
       expect(composerQueueSource).not.toContain("mb-1.5");
-      expect(composerGoalSource).toContain("() => null");
+      // AND THE GOAL SLOT STILL DRAWS NOTHING FOR A SESSION WITH NO GOAL -- the same claim the
+      // line below makes about the queue, and the same one the `() => null` slot used to make.
+      expect(composerGoalSource).toContain("if (goal === null) return null;");
       expect(composerQueueSource).toContain("() => null");
 
       // AND THE CONVERSATION DRAWS NO ERROR OF ITS OWN ANY MORE (owner, 2026-10-01): the

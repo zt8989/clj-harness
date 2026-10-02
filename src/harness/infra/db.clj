@@ -919,6 +919,41 @@
               items      TEXT NOT NULL,
               updated_at INTEGER NOT NULL)"))
 
+(defn- goals-table
+  "A SESSION'S GOAL: one row per conversation, the goal's CURRENT snapshot as one
+  JSON value in the `goal` column.
+
+  WHY A TABLE AT ALL, when the goal lives in the record. The goal IS a record first
+  (`.scratch/goal/spec.md` decision 1): every change appends a `goal/change` fact row
+  to the conversation's jsonl, and the fold of those rows is the truth. But two hands
+  write it -- a person from outside any run, and the model from inside one -- and both
+  ask 'what is it now' far more often than either changes it. The row is that first
+  read: ONE SELECT answers the strip, the route and the reminder, where the fold would
+  walk the whole record. The fold STAYS the repair path -- `harness.cap.goal/goal-for`
+  rebuilds from the records when the row is missing -- exactly as `sessions.numbers`
+  does (`.scratch/session-numbers-in-the-store`).
+
+  WHY THIS IS A MATERIALIZED FOLD AND NOT PROJECTED CONTENT, and why the argument
+  matters: the `declared-projected-columns` allowance (ADR 0008) is for tables that
+  MIRROR the log's own lines (`messages` / `tool_calls`). This row mirrors nothing --
+  it is a DERIVED SUMMARY of one family of fact rows, the same relationship
+  `sessions.numbers` has to the model/* family. It is state-shaped (one row per
+  session, written whole, rewritten in place, never queried by element), and it is
+  recomputable from the record alone, which is the acceptance `goal-for` vs
+  `goal-from-records` pins. It is NOT its own truth: a hand-edited log can disagree
+  with it, and the fold wins wherever they differ.
+
+  `goal` is the column's name, against db_test's name guard, for the reason
+  `todos.items` was: the column holds the snapshot, and a generic name would both
+  trip that guard and say less. NULL means 'no goal now' -- a conversation that never
+  had one and one whose goal was cleared read the same, which is exactly what the
+  record's fold says too (`nil`)."
+  [^Connection c]
+  (ddl! c "CREATE TABLE goals (
+              thread_id  TEXT PRIMARY KEY NOT NULL,
+              goal       TEXT,
+              updated_at INTEGER NOT NULL)"))
+
 (defn- session-claims
   "WHICH PROCESS IS SERVING A CONVERSATION: one row per live claim, gone when the
   claim is handed back.
@@ -1164,7 +1199,16 @@
    ;; record of it, and the probe is what says whether it needs it.
    {:name     "model-calls"
     :present? #(table? % "model_calls")
-    :run      model-calls}])
+    :run      model-calls}
+   ;; AND THE GOAL'S ROW, appended like every step here. It is the MATERIALIZED FOLD of the
+   ;; conversation's `goal/change` fact rows -- one row per session, the snapshot written
+   ;; whole, the fold kept as the repair path -- the same shape `sessions.numbers` has to
+   ;; the model/* family. The argument for why that is state and not a projected content
+   ;; table is in `goals-table`'s docstring and in `harness.infra.db-test`'s
+   ;; `declared-state-columns`, where the row is declared.
+   {:name     "goals"
+    :present? #(table? % "goals")
+    :run      goals-table}])
 
 (defn target-version
   "The schema version this harness speaks: the number of steps in `migrations`."

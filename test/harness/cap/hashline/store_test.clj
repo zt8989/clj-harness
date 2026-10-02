@@ -103,7 +103,7 @@
           (let [;; THE CONTENT PROJECTION'S THREE ARE HERE TOO (ADR 0008): they arrive with the full
                 ;; chain like every other table, and a test that lists the store's tables says so.
                 all ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                     "hashline_undo" "messages" "projection_offsets" "projects"
+                     "goals" "hashline_undo" "messages" "projection_offsets" "projects"
                      "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]]
             (is (= all (db/tables)))
             (is (= all (db/tables full)))))

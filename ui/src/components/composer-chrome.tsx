@@ -106,6 +106,7 @@ import { modelMenu, modelRowFromKey } from "@/lib/model-rows";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { bindThread, projectName, type ProjectSummary } from "@/lib/projects";
 import { layerWord, matches, skillsFor, skillsIn, type SkillGroup } from "@/lib/skills";
+import { opensGoalCommand } from "@/lib/goal-command";
 import { isNewChatView } from "@/lib/thread-view";
 
 import { ContextRing } from "./context-ring";
@@ -616,9 +617,16 @@ const TRIGGER_CHAR = "/";
 /// A menu that offers a load which cannot happen is worse than no menu, so the
 /// matcher is narrowed to the shape `harness.cap.skills/slash-pattern` actually reads:
 /// the slash first, then a name with no whitespace after it yet.
+///
+/// AND `goal` IS A RESERVED NAME (`.scratch/goal` decision 10), so the menu does NOT open for
+/// `/goal …`: that is a COMMAND, not a skill load. It is not merely a tidier menu -- a popover
+/// that believes a skill is being typed SWALLOWS the Enter that would send the line, so `/goal`
+/// alone never reached the agent at all (found in the walkthrough, 2026-10-02). The one rule for
+/// the shape lives in `lib/goal-command.ts` so this matcher and the parser cannot drift apart.
 const slashAtStart: Unstable_TriggerMatcher = (text, char, cursorPosition) => {
   const typed = text.slice(0, cursorPosition);
   if (!typed.startsWith(char)) return null;
+  if (opensGoalCommand(typed)) return null;
   if (/\s/.test(typed.slice(char.length))) return null;
   return { query: typed.slice(char.length), offset: 0, endOffset: cursorPosition };
 };
