@@ -14,7 +14,7 @@
 
  :ui {:language :en}                         ; 这个家说的语言：:en 或 :zh
 
- :security {:sensitive-paths ["~/.ssh/" "~/.aws/"]}  ; 一碰就 park 的路径；不写就用内置清单
+ :security {:sensitive-paths ["~/.ssh/" "~/.aws/"]}  ; 叠在内置清单之上的自家敏感路径；[] 表示不额外加
 
  :providers
  {:openrouter {:protocol :openai-completions
@@ -26,14 +26,15 @@
                           "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}}
 ```
 
-**`:security` 是唯一一节既不是 model 也不是界面的东西**：它装的是一份**路径清单**，文件工具（read /
-write / edit / glob / grep）落到上面就 park 等一个人点头——**哪怕那条路径本来就在围栏的自由路径里**
-（项目绑在 `$HOME` 上时 `~/.ssh/id_rsa` 就是这样）。判据是**重叠**：目标在敏感路径之内，或**含有**一条
-敏感路径（`grep` 一个目录就是把目录底下读一遍）都算命中。
-**不写这一节**就用 `harness.cap.providers/default-sensitive-paths` 的内置清单；**写了就整份取代**它，
-`[]` 是「这一家什么都不守」这个决定本身。`~` 指的是**操作系统家目录**，不是配置家。
-判据与门禁在 `harness.cap.project`（`sensitive-paths` / `sensitive-path?`），这一节只负责「文件里写了什么」；
-写它的是 `POST /api/security`，读它的是 `GET /api/security`（设置面板里的那个区）。
+**`:security` 是唯一一节既不是 model 也不是界面的东西**：它装的是一份**路径清单**，文件工具落到上面就 park
+等一个人点头。**这份清单只增不减**：内置的 `harness.cap.providers/default-sensitive-paths` **始终生效**，
+这一节写的只是**叠在它之上的自家条目**（`[]` = 不加任何自家的，**不是**关掉守备）。判据是**重叠**：目标在
+敏感路径之内，或**含有**一条敏感路径（`grep` 一个目录就是把目录底下读一遍）都算命中。
+**读与写在这条缝上的差别**：`read` / `grep` / `glob` **只**受这份清单约束——它们**不受项目围栏**（一条路径
+出了绑定的项目也能读）；`write` / `edit` 等写工具则**既受项目围栏、也受这份清单**。`~` 指的是**操作系统家目
+录**，不是配置家。判据与门禁在 `harness.cap.project`（`sensitive-paths` / `sensitive-path?` / `out-of-bounds?`），
+这一节只负责「文件里写了什么」；写它的是 `POST /api/security`，读它的是 `GET /api/security`（设置面板里那个区，
+把内置半边画成不可删、自家半边可增删）。
 
 **一个空的 `config.edn` 是一个什么都没说的文件**，这个形状把它拼成 `{}`：沉默时内置表照旧当地板、
 没有任何默认档，一轮跑起来遇到的是**那句教你写哪个形状**的话；而**说了话却不是 map**（一个向量、

@@ -190,17 +190,20 @@
     (is (= ["src/one.clj"] (names (:content (glob! {:pattern "**/one.clj" :path "."})))))))
 
 (deftest the-fence-is-on-the-tool
-  ;; The declaration is what makes an out-of-bounds root park for a human. It is
-  ;; asked here rather than through a park because that is the mechanical half: a
-  ;; tool that declares the rule and one that does not are indistinguishable until
-  ;; somebody is interrupted, and the parking itself is the seam's ordinary
-  ;; approval flow (tested where approvals are tested).
+  ;; The declaration is what makes a park happen, but for a READ tool the rule is the
+  ;; SENSITIVE list alone: reads are not held by the project fence (see
+  ;; harness.cap.tools/sensitive-fence), so a glob rooted outside the project runs and only a
+  ;; root this home calls sensitive parks.
   (let [rule (:park-reason (get (tools/effective-tools tid) "glob"))]
     (is (fn? rule) "glob declares a park rule")
-    (testing "which fires for a root outside the project and the configuration home"
-      (is (= :out-of-bounds (rule tid {:pattern "**/*.clj" :path (support/outside-path)}))))
+    (testing "which does NOT fire for a root outside the project -- reads ignore the fence"
+      (is (nil? (rule tid {:pattern "**/*.clj" :path (support/outside-path)}))))
     (testing "and stays quiet for one inside it"
       (is (nil? (rule tid {:pattern "**/*.clj" :path "src"}))))
+    (testing "and fires only for a root this home calls sensitive"
+      (is (= :sensitive-path
+             (rule tid {:pattern "**/*.clj" :path (first (project/sensitive-paths tid))}))
+          "a root this home calls sensitive parks, absolute or not"))
     (testing "and for a call with no path at all -- the argument check says that, one line later"
       (is (nil? (rule tid {:pattern "**/*.clj"}))))))
 

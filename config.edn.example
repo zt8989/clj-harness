@@ -12,8 +12,10 @@
 ;;               which models each one serves
 ;;   :ui         the interface's own settings -- today just :language, the language
 ;;               this harness speaks (see the note below)
-;;   :security   the paths this home calls sensitive: a file tool aimed at one of them
-;;               parks for your approval, even when the path is inside the project
+;;   :security   extra paths this home calls sensitive, ON TOP OF the built-in list: a file
+;;               tool aimed at one of them parks for your approval -- reads park for this
+;;               reason only (they are not limited by the project fence), writes park here
+;;               as well as by the fence
 ;;   :session    how a session runs: editing / compaction / llm / approval / skills /
 ;;               instructions / subagents, plus :groups -- per-model overrides of those
 ;;               blocks (what harness.edn used to hold, keys unchanged)
@@ -259,18 +261,31 @@
 ;;              KNOW IS a named failure -- a typo here must not sit there doing
 ;;              nothing.
 ;;
-;; :security -- THE PATHS THIS HOME CALLS SENSITIVE, and the only section that is not
-;; about a model or an interface at all. A file tool (read, write, edit, glob, grep)
-;; aimed at one of them PARKS for a human first -- INCLUDING when the path is inside the
-;; project, which is the case a project bound at your home directory makes. It is a list
-;; of PATHS, and the criterion is OVERLAP: a path inside one of them, or a directory that
-;; CONTAINS one (a grep over a directory reads what is under it).
+;; :security -- PATHS THIS HOME CALLS SENSITIVE, ON TOP OF THE BUILT-IN LIST, and the only
+;; section that is not about a model or an interface at all. A file tool aimed at one of
+;; them PARKS for a human first -- INCLUDING when the path is inside the project, which is
+;; the case a project bound at your home directory makes. It is a list of PATHS, and the
+;; criterion is OVERLAP: a path inside one of them, or a directory that CONTAINS one (a
+;; grep over a directory reads what is under it).
 ;;
-;; ABSENT IS THE USUAL CASE AND NOT A GAP: when this home names no list, the built-in one
-;; stands (harness.cap.providers/default-sensitive-paths -- the cloud CLIs, key material
-;; and keychains, container configuration, and the credential files of the package
-;; managers and of git). Writing a list REPLACES it whole, and `[]` says this home guards
-;; nothing, which is a decision rather than a mistake.
+;; READS AND WRITES DIFFER HERE. read, grep and glob are held ONLY by this list: they are
+;; NOT limited by the project fence, so a read outside the bound project runs. write, edit,
+;; replace and insert are held by this list AND by the fence (a write outside the free
+;; paths parks on the fence as before).
+;;
+;; THE LIST IS ALWAYS IN FORCE, BUILT-IN FIRST: harness.cap.providers/default-sensitive-paths
+;; (the cloud CLIs, key material and keychains, container configuration, and the credential
+;; files of the package managers and of git) can NEVER be switched off. What this section
+;; writes is the CUSTOM half, ADDED on top. `[]` is a decision -- 'add none of my own' --
+;; and the built-in list is still there; it is not 'guard nothing'.
+;;
+;; THIS SECTION IS ABSENT BY DEFAULT: no `:security` means no custom entries, and the
+;; built-in list stands alone.
+;;
+;; TO SEE WHAT IS IN FORCE ask GET /api/security (it answers `builtin`, `custom`, and the
+;; union under `sensitive-paths`), or open the settings panel -- which writes the custom
+;; half for you and draws the built-in half as not deletable, so the list can be kept up to
+;; date without editing this file by hand.
 ;;
 ;; TO SEE WHICH OF THE TWO IS IN FORCE ask GET /api/security, or open the settings panel
 ;; -- which writes this section for you, so the list can be kept up to date without

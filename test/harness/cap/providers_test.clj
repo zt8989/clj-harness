@@ -1995,30 +1995,44 @@
 ;; -------------------------------------------------------- the sensitive paths
 
 (deftest the-security-section-is-this-homes-sensitive-list
+(deftest the-security-section-is-this-homes-sensitive-list
   ;; :security is the fourth section and the only one that is not about a model or an
-  ;; interface at all: the paths a file tool must park a human on. WHICH calls those are
-  ;; is harness.cap.project's business -- what is tested here is the FILE.
-  (testing "a home that wrote no list gets the built-in one, and says so"
-    (with-config-text "{:default {:provider :openrouter}}\n"
+  ;; interface at all: the CUSTOM additions to the built-in sensitive list -- a file
+  ;; tool parks on built-in UNION custom. WHICH calls those are is harness.cap.project's
+  ;; business -- what is tested here is the FILE.
+  (testing "a home that wrote no list gets the built-in one, as the custom half empty"
+    (with-config-text "{:default {:provider :openrouter}}\\n"
       (fn []
         (let [cfg (providers/sensitive-paths-config)]
-          (is (= :default (:source cfg)))
-          (is (= (vec providers/default-sensitive-paths) (:paths cfg)))
-          (is (= (:paths cfg) (:defaults cfg)))))))
-  (testing "a home that wrote one gets EXACTLY that, whole"
-    (with-config-text "{:security {:sensitive-paths [\"~/.config/mine/\", \"/srv/keys/\"]}}\n"
+          (is (= (vec providers/default-sensitive-paths) (:paths cfg))
+              "force = built-in when nothing custom")
+          (is (= (vec providers/default-sensitive-paths) (:builtin cfg)))
+          (is (= [] (:custom cfg)))))))
+  (testing "a home that wrote one gets the built-in UNION exactly that, as custom"
+    (with-config-text "{:security {:sensitive-paths [\"~/.config/mine/\", \"/srv/keys/\"]}}\\n"
       (fn []
         (let [cfg (providers/sensitive-paths-config)]
-          (is (= :config (:source cfg)))
-          (is (= ["~/.config/mine/" "/srv/keys/"] (:paths cfg)))
-          (is (not (str/includes? (pr-str (:paths cfg)) ".ssh"))
-              "the built-in list is replaced, not merged into")))))
-  (testing "an empty list is a decision: this home guards nothing"
-    (with-config-text "{:security {:sensitive-paths []}}\n"
+          (is (= (vec providers/default-sensitive-paths) (:builtin cfg)))
+          (is (= ["~/.config/mine/" "/srv/keys/"] (:custom cfg)))
+          (is (= (set (concat (vec providers/default-sensitive-paths)
+                           ["~/.config/mine/" "/srv/keys/"]))
+                   (set (:paths cfg)))
+              "the built-in list is merged IN, not replaced")
+          (is (str/includes? (pr-str (:paths cfg)) ".ssh")
+              "built-in entries are still present")))))
+  (testing "an empty custom list is a legal value: built-in still in force"
+    (with-config-text "{:security {:sensitive-paths []}}\\n"
       (fn []
-        (is (= [] (:paths (providers/sensitive-paths-config))))
-        (is (= :config (:source (providers/sensitive-paths-config))))
-        (is (= [] (providers/sensitive-paths))))))
+        (is (= (vec providers/default-sensitive-paths) (:paths (providers/sensitive-paths-config))))
+        (is (= [] (:custom (providers/sensitive-paths-config))))))
+  (testing "`~` means the operating system's home, not this home"
+    (with-config-text "{:security {:sensitive-paths [\"~/.ssh/\"]}}\\n"
+      (fn []
+        (is (= [(str (home/user-home) "/.ssh/")] (providers/sensitive-paths)))
+        (is (not (str/includes? (first (providers/sensitive-paths)) (home/root)))
+            "relocating the configuration home does not move a person's keys"))))
+  (testing "and `~user` is left as written rather than guessed at"
+    (is (= "~someone/keys/" (providers/expand-home "~someone/keys/")))))
   (testing "`~` means the operating system's home, not this home"
     (with-config-text "{:security {:sensitive-paths [\"~/.ssh/\"]}}\n"
       (fn []
@@ -2044,13 +2058,18 @@
 (deftest set-sensitive-paths-writes-the-list-and-refuses-what-is-not-one
   (with-config-text "{:default {:provider :openrouter}}\n"
     (fn []
-      (testing "a list of paths is written into :security and read back"
+      (testing "a list of paths is written as the custom half and read back"
         (providers/set-sensitive-paths! ["~/.ssh/" "/srv/keys/"])
-        (is (= ["~/.ssh/" "/srv/keys/"] (:paths (providers/sensitive-paths-config))))
-        (is (= :config (:source (providers/sensitive-paths-config)))))
-      (testing "an empty list is a legal decision, not a missing value"
+        (is (= ["~/.ssh/" "/srv/keys/"] (:custom (providers/sensitive-paths-config))))
+        (is (= (set (concat (vec providers/default-sensitive-paths) ["~/.ssh/" "/srv/keys/"]))
+               (set (:paths (providers/sensitive-paths-config))))
+            "the built-in half is still in force beside the custom one"))
+      (testing "an empty list is a legal decision, not a missing value: clears the custom half"
         (providers/set-sensitive-paths! [])
-        (is (= [] (:paths (providers/sensitive-paths-config)))))
+        (is (= [] (:custom (providers/sensitive-paths-config))))
+        (is (= (vec providers/default-sensitive-paths)
+               (:paths (providers/sensitive-paths-config)))
+            "the built-in half is never cleared"))
       (testing "a value that is not a list of strings is refused by name, and writes nothing"
         (let [before (slurp (home/config-file) :encoding "UTF-8")
               e      (try (providers/set-sensitive-paths! "~/.ssh/") nil
@@ -2058,7 +2077,6 @@
           (is (some? e))
           (is (str/includes? (ex-message e) ":sensitive-paths"))
           (is (= before (slurp (home/config-file) :encoding "UTF-8"))))))))
-
 ;; ------------------------------- the two sections that were files of their own
 
 (deftest the-session-and-mcp-sections-are-read-from-the-one-config-file
@@ -2393,3 +2411,7 @@
             "the sentence names the file, which is what makes it fixable")
         (is (= "{:llm " (slurp (io/file dir "harness.edn") :encoding "UTF-8"))
             "not a byte of it moved -- a migration must not lose a file to its own parse error")))))
+;; the security-list tests above replaced the old whole-list assertions with
+;; built-in UNION custom ones when the list became additions-only (see
+;; .scratch/read-write-fence-split).
+)

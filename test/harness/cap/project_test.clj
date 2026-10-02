@@ -980,20 +980,20 @@
       (is (false? (project/sensitive-path? "pt-sensitive" (str root "/credentials/id_rsa")))))))
 
 (deftest this-home-can-write-its-own-sensitive-list
-  (testing "a written list is what is in force, and it replaces the built-in one whole"
+  (testing "a written list is MERGED with the built-in one, not a replacement"
     ;; `pr-str` FOR THE PATH, not bare interpolation: this is EDN, and a Windows path is
     ;; backslashes -- pasted raw, the `\U` in `\Users` is an invalid escape, the file does not
     ;; parse, and the case then fails about the FILE instead of about the list it wrote.
     (with-config-edn (str "{:security {:sensitive-paths ["
                           (pr-str (str (tmp "credentials") "/"))
-                          "]}}\n")
+                          "]}}\\n")
       (fn []
         (is (true? (project/sensitive-path? nil (str (tmp "credentials") "/key.pem"))))
         (is (true? (project/sensitive-path? nil (tmp "credentials"))))
-        (is (false? (project/sensitive-path? nil (str (home/user-home) "/.ssh/id_rsa")))
-            "the built-in list is replaced, not merged into"))))
+        (is (true? (project/sensitive-path? nil (str (home/user-home) "/.ssh/id_rsa")))
+            "the built-in list is still in force -- merged in, not replaced"))))
   (testing "a relative entry resolves against the bound project, like any tool path"
-    (with-config-edn "{:security {:sensitive-paths [\"credentials/\"]}}\n"
+    (with-config-edn "{:security {:sensitive-paths [\"credentials/\"]}}\\n"
       (fn []
         (project/bind! "pt-sensitive-relative" root)
         (is (true? (project/sensitive-path? "pt-sensitive-relative" "credentials/key.pem")))))))

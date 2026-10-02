@@ -6,15 +6,15 @@
   },
   "security": {
     "title": "敏感路径",
-    "hint": "这一家点名的敏感路径——云与基础设施凭证、私钥、容器与包管理器凭证。文件工具（read / write / edit / glob / grep）落到其中一条上就挂起等你点头，哪怕它落在项目里。它写进 config.edn 的 :security：这里列出来的就是全部规矩，清空即表示这一家什么都不守。",
-    "fromConfig": "这份清单是这一家自己写的（config.edn 的 :security :sensitive-paths）。",
-    "fromDefault": "这是内置清单——这一家还没写过自己的。",
-    "empty": "这一家不守任何路径：内置清单已关掉。",
+    "hint": "这一家点名的敏感路径（叠在内置清单之上）——云与基础设施凭证、私钥、容器与包管理器凭证。文件工具（read / grep / glob 等读，以及 write / edit 等写）落到其中一条上就挂起等你点头；读只受这份清单约束，不再因「出了项目」而挂起（写仍在项目围栏内）。它写进 config.edn 的 :security：这里列出的只是你加的，内置那一半删不掉、也关不掉。",
+    "fromBuiltin": "内置清单（始终生效，不可删除）",
+    "builtinTag": "内置",
+    "empty": "你还没加过自己的路径。内置清单照旧生效。",
     "loading": "正在读敏感路径…",
     "add": "添加",
     "placeholder": "~/.ssh/ 或 /一个/绝对路径",
     "remove": "移除 {{path}}",
-    "restore": "恢复内置清单"
+    "clear": "清空我加的"
   },
   "page": {
     "general": "General",

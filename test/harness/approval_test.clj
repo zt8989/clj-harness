@@ -353,7 +353,7 @@
         outside (str dir "/outside-the-fence.txt")
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
-                              :tool-calls [(call "c1" "read" {:path outside})]}
+                              :tool-calls [(call "c1" "write" {:path outside :content "placed"})]}
                              {:content "never reached"}])
              [] thr)
         term (last seen)]
@@ -367,7 +367,7 @@
       (let [[int]  (:interrupts term)
             parked (tools/parked (:id int))]
         (is (= "c1" (:tool-call-id int)))
-        (is (= "read" (:name int)))
+        (is (= "write" (:name int)))
         (is (string? (:id int)))
         (is (= thr (:thread-id parked)))
         (testing "and the parked record is stamped with the fence reason"
@@ -527,11 +527,11 @@
         _    (write-session-harness! "{:approval {:strict true}}")
         {:keys [seen history]}
         (run (fake/scripted [{:content ""
-                              :tool-calls [(call "c1" "read" {:path "inside.txt"})]}
+                              :tool-calls [(call "c1" "write" {:path "inside.txt" :content "x"})]}
                              {:content "never reached"}])
              [] thr)
         term (last seen)]
-    (testing "an in-project read parks under strict -- the ordinary interrupt"
+    (testing "an in-project WRITE parks under strict -- the ordinary interrupt"
       (is (= :run/interrupt (:type term)))
       (is (empty? (results seen)))
       (is (empty? (tool-msgs history)))
@@ -550,7 +550,7 @@
     (try
       (let [{:keys [seen]}
             (run (fake/scripted [{:content ""
-                                  :tool-calls [(call "c1" "read" {:path "inside.txt"})]}
+                                  :tool-calls [(call "c1" "write" {:path "inside.txt" :content "x"})]}
                                  {:content "never reached"}])
                  [] thr)]
         (is (= :run/interrupt (:type (last seen)))
@@ -588,14 +588,14 @@
            (is (str/includes? (:content (first results)) "reference material"))
            (is (not (str/includes? (:content (first results)) "vetoed")))))
 
-       (testing "and the same read one directory over still parks"
+       (testing "and a read one directory over now RUNS too -- reads ignore the fence"
          (let [{:keys [history]}
                (run (fake/scripted [{:content ""
                                      :tool-calls [(call "c2" "read" {:path (str (io/file elsewhere "x.md"))})]}
                                     {:content "ok"}])
                     [] "thr-skill-fence")]
-           ;; Parked calls are left unanswered -- no tool message at all.
-           (is (empty? (filter #(= "tool" (:role %)) history)))))
+           ;; A read outside the project is no longer parked -- it answers.
+           (is (= 1 (count (filter #(= "tool" (:role %)) history))))))
        (finally
          (project/bind! "thr-skill-fence" nil)
          (doseq [d [proj elsewhere]] (support/wipe-tree! d)))))))
@@ -625,3 +625,28 @@
          (project/bind! "thr-temp-fence" nil)
          (io/delete-file target true)
          (support/wipe-tree! proj))))))
+
+(deftest a-read-outside-the-project-runs-without-parking
+  ;; THE CORE OF THE SPLIT: reads are NOT subject to the project fence. A bound
+  ;; session that would park a WRITE outside the project lets a READ of the same
+  ;; path through -- the fence is a WRITE guard, not a read guard.
+  (let [thr     "thr-read-fence-park"
+        _       (fence-rig thr)
+        outside (str dir "/outside-the-read.txt")
+        {:keys [seen history]}
+        (run (fake/scripted [{:content ""
+                              :tool-calls [(call "c1" "read" {:path outside})]}
+                             {:content "read it"}])
+             [] thr)]
+    (testing "the read ran and the run ended normally -- no interrupt, no park"
+      (is (= :run/end (:type (last seen))))
+      (is (= 1 (count (results seen))))
+      (is (empty? (filter #(= :run/interrupt (:type %)) seen))))
+    (testing "grep of a path outside the project runs too -- the search tools read"
+      (let [{:keys [seen]}
+            (run (fake/scripted [{:content ""
+                                  :tool-calls [(call "c2" "grep" {:path outside :pattern "."})]}
+                                 {:content "searched"}])
+                 [] thr)]
+        (is (= :run/end (:type (last seen))))
+        (is (= 1 (count (results seen))))))))

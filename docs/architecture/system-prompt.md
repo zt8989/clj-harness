@@ -38,18 +38,18 @@ vendor: <生效的 vendor> -- model: <生效的 model id> -- reasoning effort: <
 <project>
 bound to: /Users/zhouteng/Documents/workspace/clj-harness
 Relative paths in the file tools resolve against it, and bash runs with it as its working directory. Absolute paths are never redirected.
-A read/write/edit path that resolves outside every free path below parks for human approval before it runs:
+A WRITE path (write, edit, replace, insert) that resolves outside every free path below parks for human approval before it runs. READS (read, grep, glob) are NOT limited by this fence -- they may read anywhere outside it, and the sensitive paths below are the only thing that parks a read:
   - /Users/zhouteng/Documents/workspace/clj-harness -- this project
   - /Users/zhouteng/.clj-harness -- this harness's configuration home; reading your own configuration there is allowed
   - /private/var/folders/9_/vz1tw99s6bn2cd7gpsxc97nc0000gn/T -- the machine's temporary directory; scratch that is meant to be thrown away
   - /private/tmp -- the machine's temporary directory; scratch that is meant to be thrown away
   - /Users/zhouteng/.agents/skills -- where this session's skills live
   - /Users/zhouteng/Documents/workspace/clj-harness/.agents/skills -- where this session's skills live
-These paths are declared sensitive by this home, and a file tool aimed at one of them parks for human approval too -- inside the free paths above or not:
+These paths are declared sensitive by this home, and a file tool aimed at one of them parks for human approval -- a READ parks for this reason only, while a WRITE parks here as well as outside:
   - /Users/zhouteng/.aws/
   - /Users/zhouteng/.ssh/
   - /Users/zhouteng/.config/gcloud/
-  ... (the whole list: config.edn's :security, or the built-in one when it says nothing)
+  ... (built-in, always in force, then config.edn's :security entries on top)
 </project>
 
 <env>
@@ -60,11 +60,13 @@ not found: (nothing from the list)
 language: Chinese (zh)
 </env>
 
-上面三块是**样例**：`<project>` 的围栏清单是 gate 自己的 `harness.cap.project/fence`，项目开
-`:approval {:strict true}` 时项目目录会从里面退场（配置家、技能根与本机临时目录不退场），未绑定时
-整块换成一句「没有绑定」。**敏感路径那一段同样是派生的**（`harness.cap.project/sensitive-paths`），
-因为它是这条规矩的另一半：落到清单上的调用**哪怕在自由路径里也 park**，所以只报自由路径的块会说一条
-门禁并不执行的规矩。它**未绑定也照说**——清单是这一家的，不是项目的。样例里的路径只对该场会话成立。
+上面三块是**样例**：`<project>` 的围栏清单是 gate 自己的 `harness.cap.project/fence`，那是**写闸**——块里明说
+`read` / `grep` / `glob` 不受它约束。项目开 `:approval {:strict true}` 时项目目录会从里面退场（配置家、技能根
+与本机临时目录不退场），未绑定时整块换成一句「没有绑定」。**敏感路径那一段同样是派生的**
+（`harness.cap.project/sensitive-paths`），它是**读与写共用**的守备：落到清单上的调用**哪怕在自由路径里也
+park**，读更是**只为这个原因** park，所以只报自由路径的块会说一条门禁并不执行的规矩。清单是**内置 ∪ 自家**
+（内置始终生效、关不掉，`config.edn` 的 `:security` 只叠自家条目）。它**未绑定也照说**——清单是这一家的，
+不是项目的。样例里的路径只对该场会话成立。
 `<env>` 的语言那一行由 `harness.infra.language` 定：`config.edn` 的 `:ui :language` → 系统语言 →
 终端语言 → 英语；它**永远在**（模型与 `ask` 都指这一行）。
 

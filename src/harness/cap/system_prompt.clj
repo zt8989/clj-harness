@@ -198,9 +198,9 @@
   [thread-id bound?]
   (when-let [paths (seq (project/sensitive-paths thread-id))]
     (str "These paths are declared sensitive by this home, and a file tool aimed at one of"
-         " them parks for human approval too"
+         " them parks for human approval"
          (if bound?
-           " -- inside the free paths above or not"
+           " -- a READ parks for this reason only, while a WRITE parks here as well as outside"
            " -- and a session with no binding does not lift this")
          ":\n"
          (str/join "\n" (map (fn [p] (str "  - " p)) paths))
@@ -252,12 +252,14 @@
                  "bound to: " dir "\n"
                  "Relative paths in the file tools resolve against it, and bash runs with it"
                  " as its working directory. Absolute paths are never redirected.\n"
-                 "A read/write/edit path that resolves outside every free path below parks"
-                 " for human approval before it runs:\n"
+                 "A WRITE path (write, edit, replace, insert) that resolves outside every free"
+                 " path below parks for human approval before it runs. READS (read, grep, glob)"
+                 " are NOT limited by this fence -- they may read anywhere outside it, and the"
+                 " sensitive paths below are the only thing that parks a read:\n"
                  (str/join "\n" (map (fn [[p why]] (str "  - " p " -- " why)) free)) "\n"
                  (when strict?
                    (str "This project sets :approval {:strict true}, so the project directory"
-                        " is NOT in that set: paths inside it park too.\n"))
+                        " is NOT in that set: a WRITE inside it parks too (reads are unaffected).\n"))
                  (sensitive-sentence thread-id true)
                  "</project>"))}))
 

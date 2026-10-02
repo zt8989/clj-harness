@@ -7340,34 +7340,45 @@
 
 (deftest the-security-route-is-this-homes-sensitive-list
   ;; GET and POST /api/security are where a person reads and edits the list the fence
-  ;; parks on (`:sensitive-path`). No threadId: the list belongs to the HOME.
+  ;; parks on (`:sensitive-path`). No threadId: the list belongs to the HOME. The
+  ;; built-in half is answered under `builtin` (and is never what the POST writes);
+  ;; POST writes THIS HOME's own additions under `custom`, and `sensitive-paths`
+  ;; is the union of the two, AS WRITTEN.
   (let [config (home/config-file)
         saved  (when (.exists config) (slurp config :encoding "UTF-8"))]
     (try
       (spit config "{:default {:provider :alpha :model \"alpha-small\"}}\n" :encoding "UTF-8")
       (with-server "sec-unused"
         (fn []
-          (testing "a home that wrote no list reads the built-in one"
+          (testing "a home that wrote no list reads the built-in half plus an empty custom"
             (let [body (read-json (api-call :get "/api/security" nil))]
-              (is (= "default" (:source body)))
-              (is (= (vec providers/default-sensitive-paths) (:sensitive-paths body)))
-              (is (= (:sensitive-paths body) (:defaults body)))))
-          (testing "POST writes the list and answers what is in force"
+              (is (= (vec providers/default-sensitive-paths) (:builtin body)))
+              (is (= (:builtin body) (:sensitive-paths body))
+                  "with no custom entries, the force equals the built-in half")
+              (is (= [] (:custom body)))))
+          (testing "POST writes the custom half and answers the union"
             (let [resp (api-call :post "/api/security"
                                  (json/write-str {:sensitive-paths ["~/.ssh/" "/srv/keys/"]}))]
               (is (= 200 (.statusCode resp)))
               (let [body (read-json resp)]
-                (is (= "config" (:source body)))
-                (is (= ["~/.ssh/" "/srv/keys/"] (:sensitive-paths body))))
+                (is (= ["~/.ssh/" "/srv/keys/"] (:custom body)))
+                (is (= (set (concat (vec providers/default-sensitive-paths)
+                                ["~/.ssh/" "/srv/keys/"]))
+                       (set (:sensitive-paths body))))
+                (is (= (vec providers/default-sensitive-paths) (:builtin body))))
               (is (str/includes? (slurp config :encoding "UTF-8") ":sensitive-paths")))
-            (testing "and GET reads the same list back, with the built-in list beside it"
+            (testing "and GET reads the same union back"
               (let [body (read-json (api-call :get "/api/security" nil))]
-                (is (= ["~/.ssh/" "/srv/keys/"] (:sensitive-paths body)))
-                (is (= (vec providers/default-sensitive-paths) (:defaults body))))))
-          (testing "an empty list is a decision, not a missing field"
+                (is (= ["~/.ssh/" "/srv/keys/"] (:custom body)))
+                (is (= (set (concat (vec providers/default-sensitive-paths)
+                                ["~/.ssh/" "/srv/keys/"]))
+                       (set (:sensitive-paths body)))))))
+          (testing "an empty custom list is a decision, not a missing field"
             (let [resp (api-call :post "/api/security" (json/write-str {:sensitive-paths []}))]
               (is (= 200 (.statusCode resp)))
-              (is (= [] (:sensitive-paths (read-json resp))))))
+              (is (= [] (:custom (read-json resp))))
+              (is (= (vec providers/default-sensitive-paths) (:sensitive-paths (read-json resp)))
+                  "the built-in half is still in force")))
           (testing "a value that is not a list of paths is a 400 and leaves the file alone"
             (let [before (slurp config :encoding "UTF-8")
                   resp   (api-call :post "/api/security"
@@ -7382,7 +7393,6 @@
               (is (str/includes? (:error (read-json resp)) "sensitive-paths"))))))
       (finally
         (if saved (spit config saved :encoding "UTF-8") (io/delete-file config true))))))
-
 ;; ------------------------------------ instruction updates on the record (tickets 02/03)
 
 (defn- rows-of-kind [lines]

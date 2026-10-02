@@ -119,8 +119,10 @@
        "A line too long to show still gets its anchor, so it can be replaced whole. "
        "Binary files, images, directories and UTF-16/32 text are refused by name. "
        "A relative path resolves against this session's project directory when one is bound. "
-       "When bound, a path resolving outside the project directory and the configuration home "
-       "parks for human approval first. "
+       "Reads are NOT limited by the project fence -- a path outside the project is read directly, "
+       "the same way `bash` could read it. The one exception is this home's sensitive list "
+       "(config.edn's :security :sensitive-paths): a read aimed at one of those paths parks for "
+       "human approval first. "
        "After an edit the tool that made it hands back the anchors for the changed lines, so a "
        "follow-up edit needs no new read."))
 
@@ -134,7 +136,7 @@
               :description "How many lines to return at most."}}})
 
 (def ^:private read-plain-description
-  "Read a file. A relative path resolves against this session's project directory when one is bound. When bound, a path resolving outside the project directory and the configuration home parks for human approval first.")
+  "Read a file. A relative path resolves against this session's project directory when one is bound. Reads are NOT limited by the project fence -- a path outside the project is read directly, the same way `bash` could read it. The one exception is this home's sensitive list (config.edn's :security :sensitive-paths): a read aimed at one of those paths parks for human approval first.")
 
 (def ^:private read-plain-params
   {:type "object" :properties {"path" {:type "string" :description "File path."}}})
@@ -525,7 +527,7 @@
       (when derive (try (derive thread-id parsed) (catch Throwable _ nil)))))
 
 (defn- fence
-  "The park rule a fence-marked tool declares: a call whose target resolves outside the
+  "The park rule a WRITE tool declares: a call whose target resolves outside the
   session's project directory and the configuration home parks for a human, and so does a
   call whose target is one of the paths THIS HOME declares sensitive -- inside the free
   set or not. DERIVE names that target when the tool has no `path` argument (see
@@ -560,11 +562,37 @@
           (project/sensitive-path? thread-id p) :sensitive-path
           (project/out-of-bounds? thread-id p)  :out-of-bounds)))))
 
+(defn- sensitive-fence
+  "The park rule a READ tool declares: a call whose target is one of the paths THIS HOME
+  declares sensitive parks for a human -- and nothing else. Reads do NOT ask the project
+  fence (`harness.cap.project/out-of-bounds?`): the fence is a guard against writing outside
+  the project, not against reading, and a path a session may read through `bash` should not
+  stop and ask a person on `read` / `grep` / `glob`. DERIVE names the target when the tool has
+  no `path` argument (see fenced-path).
+
+  ONE SOURCE, as `fence` keeps it. The only question asked here is `sensitive-path?` -- the
+  same predicate the <project> block's sensitive half states, read fresh per call -- so the
+  rule the gate keeps and the rule the model is told cannot drift. A reason of :out-of-bounds
+  can NEVER come from a read after this split: the only thing a read parks on is a path this
+  home names as secret.
+
+  AN UNBOUND SESSION IS STILL SUBJECT TO IT. The sensitive list is THIS HOME's, not a project's
+  (see harness.cap.project/sensitive-path?): a read that would slip through an absent fence is
+  exactly the case the list exists for, so removing the binding does not lift it.
+
+  A CALL WITH NO PATH AT ALL IS NOT A FENCE CASE -- same reason as `fence`: asking a missing
+  path would answer with an exception from inside java.io instead of the honest absence the
+  seam's missing-arguments check reports one line later."
+  [derive]
+  (fn [thread-id parsed]
+    (when-let [p (fenced-path derive thread-id parsed)]
+      (when (project/sensitive-path? thread-id p) :sensitive-path))))
+
 (register! "read"
   (assoc (tool read-plain-description
                {"path" {:type "string" :description "File path."}}
                [:path] t-read)
-         :park-reason (fence nil)
+         :park-reason (sensitive-fence nil)
          :read-only true
          ;; `read` and `write` are the two tools whose face follows the editing
          ;; mode: both keep their NAME (the user asked for one `read`, one `write`)
@@ -774,8 +802,10 @@
        " plain text, which is both faster and the way out when a pattern is refused"
        " for being able to hang a regex engine. "
        "A relative `path` resolves against this session's project directory when one"
-       " is bound. When bound, a path resolving outside the project directory and the"
-       " configuration home parks for human approval first."))
+       " is bound. Reads are NOT limited by the project fence -- a path outside the project"
+       " is searched directly, the same way `bash` could. The one exception is this home's"
+       " sensitive list (config.edn's :security :sensitive-paths): a search rooted at one"
+       " of those paths parks for human approval first."))
 
 (defn- t-grep
   "`grep`'s body. The search root is resolved for the session exactly as the
@@ -813,7 +843,7 @@
                [:pattern] t-grep)
          ;; A search reads files, so the fence applies: when a project is bound, a
          ;; root outside it parks for a human exactly as a read does.
-         :park-reason (fence nil)
+         :park-reason (sensitive-fence nil)
          :read-only true))
 
 ;; ---------------------------------------------------------------------- glob
@@ -834,8 +864,10 @@
        " session's project directory (or the process working directory when none is"
        " bound). "
        "A relative `path` resolves against this session's project directory when one"
-       " is bound. When bound, a path resolving outside the project directory and the"
-       " configuration home parks for human approval first."))
+       " is bound. Reads are NOT limited by the project fence -- a path outside the project"
+       " is listed directly, the same way `bash` could. The one exception is this home's"
+       " sensitive list (config.edn's :security :sensitive-paths): a listing rooted at one"
+       " of those paths parks for human approval first."))
 
 (defn- t-glob
   "`glob`'s body. The search root is resolved for the session exactly as the file
@@ -854,9 +886,10 @@
                                              " the process working directory when none"
                                              " is bound).")}}
                [:pattern] t-glob)
-         ;; A listing reads the tree, so the fence applies exactly as it does to a
-         ;; search: a root outside the project parks for a human.
-         :park-reason (fence nil)
+         ;; A listing reads the tree. Like grep, it is a read: the project fence is a
+         ;; WRITE guard, so a listing outside the project does not park -- only this
+         ;; home's sensitive list does.
+         :park-reason (sensitive-fence nil)
          :read-only true))
 
 (register! "bash"

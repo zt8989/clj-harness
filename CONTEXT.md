@@ -520,20 +520,22 @@ provider 档），由 `harness.cap.system-prompt/assemble` 在每次 run 现算�
 prompt 只中立地点出自省入口。
 *别叫成* system prompt（那是整条消息，头只是它）、冻结的 prompt。
 
-**围栏**（fence）—— 绑定了项目的会话里，文件工具可以直接碰、不必 park 的那些目录：项目目录自己
+**围栏**（fence）—— 绑定了项目的会话里，**写工具**可以直接碰、不必 park 的那些目录：项目目录自己
 （除非 `:approval {:strict true}` 把它拿掉）、配置家、本机临时目录（`java.io.tmpdir` 与 POSIX `/tmp`）、
 技能根（即「技能层」那两档所在的目录）、`:approval {:allow [..]}` 声明的路径。
+**它是一道写闸**：`write` / `edit` / `replace` / `insert` 撞上它才 park；`read` / `grep` / `glob` **不受它约束**，
+可以读绑定项目之外的任何路径。（`bash` / `job` 从来没进过围栏。）
 它**只有一个来源** `harness.cap.project/fence`，因为它是同一件事的两面：门禁拿它判要不要 park，
 `<project>` 块拿它对模型说规则——两处若是各写一份，模型就会以为某个路径自由而实际被拦。
-
 **敏感路径**（sensitive paths）—— 这一家点名的、文件工具**一碰就 park** 的那些路径：云与基础设施
-CLI 的凭证、私钥与钥匙串、容器运行时的配置、包管理器与版本控制的凭证文件。**它比围栏更紧**：一条路径
-落在里面就 park 等一个人点头，**哪怕它本来就在围栏的自由路径里**——项目绑在 `$HOME` 上时，
-`~/.ssh/id_rsa` 正是这种情形。
+CLI 的凭证、私钥与钥匙串、容器运行时的配置、包管理器与版本控制的凭证文件。**读只受它约束**：`read` /
+`grep` / `glob` 落到上面就 park，而它们**不受围栏约束**——读的守备就是这一份。写同样落在它上面 park
+（写还额外受围栏）。**它比围栏更紧**：一条路径落在里面就 park 等一个人点头，**哪怕它本来就在围栏的自由路径
+里**——项目绑在 `$HOME` 上时，`~/.ssh/id_rsa` 正是这种情形。
 判据是**重叠**：目标在敏感路径之内、**或含有**一条敏感路径（`grep` 一个目录就是把目录底下读一遍）
-都算命中。清单只有一个来源 `harness.cap.project/sensitive-paths`（config.edn 的
-`:security :sensitive-paths`，这一家没写就用 `harness.cap.providers/default-sensitive-paths` 的内置清单），
-门禁与 `<project>` 块都从它读。
+都算命中。清单是**内置 ∪ 自家**：`harness.cap.providers/default-sensitive-paths` 的内置表**始终生效、关不掉**，
+config.edn 的 `:security :sensitive-paths` 只写**叠加上去的自家条目**（`[]` = 不加自家的，不是关掉守备）。
+门禁与 `<project>` 块都从 `harness.cap.project/sensitive-paths`（内置 ∪ 自家）读它。
 **它不随绑定开关。** 围栏是项目的，未绑定的会话本就没有围栏；敏感清单是**这一家的**，未绑定也照守 ——
 一条「没有项目就失效」的凭证保护等于没有保护。命中时 park 的原因写作 `:sensitive-path`（与围栏的
 `:out-of-bounds` 分开记），好让人和读审计的人分得清两种理由。
