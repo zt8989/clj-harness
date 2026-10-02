@@ -705,7 +705,7 @@
 
 (defn- ends [seen] (filter #(= :model/end (:type %)) seen))
 
-(deftest an-idle-timeout-with-nothing-emitted-is-retried
+(deftest an-idle-timeout-with-nothing-answered-is-retried
   ;; THE ORDINARY RECOVERY, and the shape of the record it leaves: a start and an end per
   ;; ATTEMPT. The first attempt's end came from the CALL itself (the provider layer threw,
   ;; so `model-call!` closed its own segment); the second's is the successful one. Nothing
@@ -731,7 +731,7 @@
                  (mapv :type seen))))
         (testing "and the frame says what a person needs: which try it was, and that another follows"
           (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
-                   :retrying true :emitted false}]
+                   :retrying true :answered false}]
                  (vec (timeouts seen)))))))))
 
 (deftest an-idle-timeout-spends-the-budget-and-then-ends-the-run
@@ -771,11 +771,34 @@
                                          :idle-timeout-retries 3})]
         (is (= 1 @calls) "no second attempt")
         (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
-                 :retrying false :emitted true}]
+                 :retrying false :answered true}]
                (vec (timeouts seen))))
         (is (= :run/error (:type (last seen))))
         (is (str/includes? (:message (last seen)) "half-written"))
         (is (= 1 (count (ends seen))))))))
+
+(deftest a-timeout-after-only-thinking-is-retried
+  ;; THINKING IS NOT ANSWERING (2026-10-02). A thought on the wire is not the message a person
+  ;; came for, so it does not buy the attempt the exemption a half-written ANSWER does: the
+  ;; vendor is cut off and tried again, and the frame it leaves says `:answered false` -- the
+  ;; retrying card, not the 'not retried' one. This is the shape a thinking-mode vendor makes
+  ;; when it dies mid-thought, which is where a long silence is most likely to mean death.
+  (let [calls (atom 0)]
+    (with-redefs [llm/stream! (fn [_provider _messages emit _thread-id]
+                                (if (= 1 (swap! calls inc))
+                                  (do (emit (ev/reasoning-delta "thinking..."))
+                                      (throw (timeout!)))
+                                  {:message {:role "assistant" :content "hello"}
+                                   :telemetry {}}))]
+      (let [{:keys [history seen]} (drive {} [] {:thread-id "t-idle-thinking"
+                                                 :idle-timeout-ms 500
+                                                 :idle-timeout-retries 3})]
+        (is (= "hello" (:content (last history))) "the retry's answer is the run's answer")
+        (is (= 2 @calls) "the thought cost the attempt nothing")
+        (is (= [{:type :model/timeout :idle-ms 500 :attempt 1 :limit 3
+                 :retrying true :answered false}]
+               (vec (timeouts seen))))
+        (is (= :run/end (:type (last seen))) "the run went on to the retry's answer")))))
 
 (deftest a-call-that-says-nothing-at-all-is-cut-off-by-the-deadline
   ;; THE OTHER HALF OF THE GUARD, and the one no provider layer can do: the call never

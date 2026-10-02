@@ -738,9 +738,9 @@
     (is (= ["RUN_STARTED" "CUSTOM" "CUSTOM" "RUN_FINISHED"] (types frames)))
     (is (= {:type  "CUSTOM"
             :name  ag/timeout-part-name
-            :value {:idleMs 500 :attempt 1 :limit 3 :retrying true :emitted false}}
+            :value {:idleMs 500 :attempt 1 :limit 3 :retrying true :answered false}}
            (second frames)))
-    (is (= {:idleMs 500 :attempt 4 :limit 3 :retrying false :emitted false}
+    (is (= {:idleMs 500 :attempt 4 :limit 3 :retrying false :answered false}
            (:value (nth frames 2)))
         "the fourth attempt's own frame says the run is ending")
     (is (not (contains? (second frames) :messageId))

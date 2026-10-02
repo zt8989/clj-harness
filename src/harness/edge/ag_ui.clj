@@ -376,7 +376,7 @@
                                     :attempt  (:attempt ev)
                                     :limit    (:limit ev)
                                     :retrying (:retrying ev)
-                                    :emitted  (:emitted ev)}})
+                                    :answered (:answered ev)}})
 
     ;; A `:run/cut-off-result` IS THE SAME FRAME (`harness.kernel.event`), because the
     ;; RECORD does not distinguish an answer that arrived from one written at a stop -- it
