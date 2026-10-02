@@ -35,19 +35,6 @@
     "rereadTitle": "Read the files again",
     "back": "Back"
   },
-  "report": {
-    "title": "In force",
-    "provider": "provider",
-    "model": "model",
-    "reasoning": "reasoning",
-    "endpoint": "endpoint"
-  },
-  "tier": {
-    "config": "config.edn",
-    "session": "this session",
-    "request": "this run's request",
-    "catalog": "the provider's default"
-  },
   "defaults": {
     "title": "Default tier",
     "introLead": "What a new session starts from — ",
