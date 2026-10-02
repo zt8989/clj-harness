@@ -367,7 +367,7 @@ chunk，把客户端永远卡在「运行中」——实测数字见 `scripts/de
 **收起**在栏自己头部的**前缘**（`RightPaneCollapseButton`）；**打开**是页面**右上角**的浮标
 （`RightPaneOpenButton`，只在栏关着时画，因为关着的列没有子树可挂它），**每个宽度都画**：`md` 以下它是抽屉那扇门，`md`
 以上它是唯一的门（右栏这一侧没有 rail）。
-第二扇门在对话里：主对话那张 `agent` 工具卡（`message-parts.tsx` 读 `SubagentViewContext`），以及任务视图里
+第二扇门在对话里：主对话那张 `subagent` 工具卡（旧记录里写作 `agent`；`message-parts.tsx` 读 `SubagentViewContext`），以及任务视图里
 子代理的一行（`components/task-pane-subagents.tsx`，点的是**那一行自己的 `threadId`**）——两者写的是 `App` 那同一个
 `openMirror`，不按位置配。镜像头部那颗 X 因此退场：它和收起是同一个动词，同一个头部不放两遍。
 

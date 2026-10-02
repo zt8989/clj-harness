@@ -663,6 +663,24 @@ const cases: Case[] = [
       // A NAME WITH NO DEFINITION DRAWS NO DESCRIPTION EITHER.
       expect(over).not.toContain('data-slot="task-pane-subagent-description"');
       expect(textOf(over, "task-pane-subagent-name")).toBe("removed");
+
+      // AND THE DURATION, which is the two clocks a row measures. A FINISHED delegation's is
+      // FIXED (`finishedAt` - `delegatedAt`), and a row the wire carried no `finishedAt` for
+      // draws NO duration at all rather than the `NaN 分 NaN 秒` the missing field used to
+      // produce (owner, 2026-10-02).
+      const settled: SubagentTaskRow = {
+        threadId: "s3",
+        name: "explore",
+        description: "find every namespace",
+        delegatedAt: 1_000,
+        finishedAt: 61_000,
+        running: false,
+      };
+      expect(textOf(row(settled, "en"), "task-pane-subagent-duration")).toBe("took 1m 0s");
+      expect(textOf(row(settled, "zh"), "task-pane-subagent-duration")).toBe("耗时 1 分 0 秒");
+      // NO END, NO DURATION -- a delegation an earlier process left behind has no clock to
+      // draw from, and the honest drawing is none rather than a made-up one.
+      expect(over).not.toContain('data-slot="task-pane-subagent-duration"');
     },
   },
   {

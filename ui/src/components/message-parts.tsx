@@ -77,7 +77,7 @@
 //
 // ------------------------------------------------- and one call that opens a door
 //
-// `agent` IS THE ONE CALL THAT IS NOT ONLY A ROW. A delegation is a whole other
+// `subagent` -- `agent` in a record written before the rename -- IS THE ONE CALL THAT IS
 // conversation happening because of this line, and the line is the only place in the
 // transcript that knows it: the record's own pairing (`toolCallId` -> the child
 // session, ticket 03 of `.scratch/subagent-view`) is read once per parent session by
@@ -88,7 +88,7 @@
 // the shape question ticket 04 left open. This file registers exactly one renderer
 // (see the head of `THREAD_COMPONENTS`), and the property that buys is the one
 // `subjectOf`'s own comment states: a tool nobody has taught this page about still
-// appears, with its name and its first string argument. A registered `agent` renderer
+// appears, with its name and its first string argument. A registered `subagent` renderer
 // would take that call out of the fallback and re-draw the trigger, the arguments, the
 // result and the two parked-call cards -- five things that must look the same as every
 // other call's, duplicated so that one of them can carry a button. So the exception is
@@ -328,6 +328,18 @@ const TOOL_ICONS: Record<string, ElementType> = {
 /// fallback is that the page does not know. `WrenchIcon` says "a tool" and stops.
 const FALLBACK_TOOL_ICON = WrenchIcon;
 
+/// THE NAMES A PERSON READS, for a tool whose wire name is not what it should say.
+///
+/// `subagent` IS SPELLED `Sub Agent` (owner, 2026-10-02), and the OLD wire name `agent` is
+/// mapped too so a conversation recorded before the rename reads the same. Every other
+/// tool's name is its own -- `read` is `read` -- so this table is a rename, not a
+/// translation, and it is deliberately not the same thing as `TOOL_ICONS` (a tool may be
+/// relabelled and keep its icon, or the other way round).
+const TOOL_LABELS: Record<string, string> = {
+  subagent: "Sub Agent",
+  agent: "Sub Agent",
+};
+
 // ------------------------------------------------- what this call is about
 
 type Args = Record<string, unknown>;
@@ -416,6 +428,7 @@ function subjectOf(toolName: string, args: Args, t: Translate): string | null {
       return firstLine(stringArg(args, "command") ?? "") || null;
     case "eval":
       return firstLine(stringArg(args, "code") ?? "") || null;
+    case "subagent":
     case "agent": {
       // WHICH SUBAGENT, AND WHAT IT WAS ASKED -- the two things this call is about,
       // in that order. The name goes first because the row already reads
@@ -523,7 +536,7 @@ const ToolCallTrigger: FC<{
           isRunning && "shimmer motion-reduce:animate-none",
         )}
       >
-        <b className="aui-tool-call-trigger-name">{toolName}</b>
+        <b className="aui-tool-call-trigger-name">{TOOL_LABELS[toolName] ?? toolName}</b>
         {subject !== null && (
           <span
             data-slot="tool-call-trigger-subject"
@@ -767,13 +780,14 @@ const ToolCallCard: ToolCallMessagePartComponent = ({
   // ASKED ONLY FOR A CALL OF THIS TOOL (`null` for every other row): the request is
   // about delegations, and a conversation that has none should not send it because a
   // card happened to render.
+  const delegated = toolName === "subagent" || toolName === "agent";
   const delegations = useDelegations(
     parentThreadId,
-    toolName === "agent" ? toolCallId : null,
+    delegated ? toolCallId : null,
     settled,
   );
   const openView = useOpenSubagentView();
-  const delegation = toolName === "agent" ? delegations.get(toolCallId) : undefined;
+  const delegation = delegated ? delegations.get(toolCallId) : undefined;
   const openMirror =
     delegation !== undefined && openView !== null
       ? () => openView({ threadId: delegation.threadId, subagent: delegation.subagent })

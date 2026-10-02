@@ -127,7 +127,7 @@
 (def ^:private script
   "One delegation, then the closing round. The child reads a file, so its record holds more
   than the two frames that would bracket an empty answer."
-  [{:content "" :tool-calls [{:id "d1" :name "agent"
+  [{:content "" :tool-calls [{:id "d1" :name "subagent"
                               :arguments {:name "explore" :prompt task}}]}
    {:content "" :tool-calls [{:id "c1" :name "read" :arguments {:path "deps.edn"}}]}
    {:content "the replay is the record's own frames"}

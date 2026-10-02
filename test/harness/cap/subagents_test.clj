@@ -13,6 +13,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [harness.cap.hooks :as cap-hooks]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
             [harness.cap.subagents :as subagents]
             [harness.cap.system-prompt :as system-prompt]
@@ -82,12 +83,12 @@
                              (keys (tools/effective-tools "sa-parent"))))
         table   (range-of "general")]
     (is (contains? session "eval") "the session itself has it -- that is what makes removing it worth asserting")
-    (is (contains? session "agent") "and the delegating tool is in the main table by design")
+    (is (contains? session "subagent") "and the delegating tool is in the main table by design")
     (is (contains? (set (keys (tools/effective-tools "sa-parent"))) "edit")
         "the two editing families are both IN the table, which is what makes the filter worth having")
     (is (not= (contains? session "edit") (contains? session "replace"))
         "and exactly one of them is served -- whichever mode this home is in")
-    (is (= (disj (disj session "eval") "agent") table)
+    (is (= (disj (disj session "eval") "subagent") table)
         "everything else, name for name")))
 
 (deftest a-name-the-parent-does-not-serve-is-not-in-a-range-either
@@ -107,7 +108,7 @@
         (is (contains? table n) (str n " reads and says so"))))
     (testing "and everything that can write is out"
       (doseq [n ["write" "edit" "replace" "insert" "undo_last_replace"
-                 "bash" "job" "job_kill" "eval" "agent" "todo_write"]]
+                 "bash" "job" "job_kill" "eval" "subagent" "todo_write"]]
         (is (not (contains? table n)) (str n " is not something an exploring subagent may do"))))))
 
 (deftest a-session-tool-that-cannot-prove-itself-is-out-of-an-exploring-range
@@ -188,13 +189,46 @@
         end!      (subagents/begin! thread-id {:parent "sa-parent"
                                                :definition defn
                                                :table (subagents/table-for "sa-parent" defn)})
-        answer    (try (tools/run! {:id "c1" :function {:name "agent"
+        answer    (try (tools/run! {:id "c1" :function {:name "subagent"
                                                         :arguments "{\"name\":\"explore\",\"prompt\":\"hi\"}"}}
                                    thread-id)
                        (finally (end!)))]
     (is (:error answer))
     (is (str/includes? (:content answer) "cannot delegate")
         "the refusal says why, rather than leaving a model to look for a way round it")))
+
+(deftest run-in-background-turns-a-delegation-into-a-job
+  ;; THE ARGUMENT CHANGES WHO WAITS, NOT WHAT RUNS (owner, 2026-10-02). This is the
+  ;; claim measured against the seam: the same `subagent` call, with `run_in_background`
+  ;; true, answers a receipt naming a JOB -- and that job is an ordinary one, read with
+  ;; `job_output` and waited on the same way a command's is.
+  (let [seen     (atom [])
+        teardown (subagents/install!
+                  {:run (fn [{:keys [definition task]}]
+                          (swap! seen conj [(:name definition) task])
+                          {:answer (str "did " task)})})]
+    (try
+      (testing "the default waits and answers the subagent's own message"
+        (let [answer (tools/run! {:id "c1"
+                                  :function {:name "subagent"
+                                             :arguments "{\"name\":\"explore\",\"prompt\":\"look\"}"}}
+                                 "rb-parent")]
+          (is (= "did look" (:content answer)))
+          (is (= [["explore" "look"]] @seen))))
+      (testing "run_in_background answers at once with a job you read or wait on"
+        (let [answer (tools/run! {:id "c2"
+                                  :function {:name "subagent"
+                                             :arguments "{\"name\":\"explore\",\"prompt\":\"peek\",\"run_in_background\":true}"}}
+                                 "rb-parent")
+              text   (str (:content answer))
+              id     (second (re-find #"job (j\d+)" text))]
+          (is (str/includes? text "background") "the receipt says it is a background delegation")
+          (is (str/includes? text (str "job_output {\"job\": \"" id "\"}"))
+              "and hands over the verb that reaches it")
+          (let [out (jobs/output "rb-parent" id {:wait true :timeout 5000})]
+            (is (= "[exit 0]" (:status out)) "the job ends when the delegation does")
+            (is (= ["did peek"] (:lines out)) "and its record IS the subagent's answer"))))
+      (finally (teardown)))))
 
 (deftest a-run-carries-its-two-clocks
   ;; TICKET 01 OF `.scratch/task-pane-push`: a delegation's row draws 开始时间 + 持续时间, so the
@@ -235,7 +269,7 @@
                        (finally (end!)))]
     (is (contains? names "read"))
     (is (not (contains? names "write")))
-    (is (not (contains? names "agent")))
+    (is (not (contains? names "subagent")))
     (is (contains? (set (map #(get-in % [:function :name]) (tools/specs "sa-parent")))
                    "write")
         "while the delegating session still has everything")))
@@ -268,7 +302,7 @@
     ;; Those are never in ANY range, so excluding one asks for something the entry
     ;; cannot be honoured for -- and a request that cannot be honoured is refused
     ;; rather than dropped.
-    (doseq [n ["eval" "agent"]]
+    (doseq [n ["eval" "subagent"]]
       (is (thrown-with-msg? Exception #"never served to any subagent"
                             (subagents/check-entry! "x" {:baseline :all :exclude [n]})))))
   (testing "a legal one comes back whole"

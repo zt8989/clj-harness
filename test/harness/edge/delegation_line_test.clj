@@ -137,7 +137,7 @@
   "One delegation, then the closing round -- the child reads nothing, so its
   whole conversation is one turn and the test is about the LINES, not the
   child's work."
-  [{:content "" :tool-calls [{:id "d1" :name "agent"
+  [{:content "" :tool-calls [{:id "d1" :name "subagent"
                               :arguments {:name "explore" :prompt task}}]}
    {:content "delegated and answered"}])
 
@@ -247,7 +247,7 @@
             ;; conversation at all (one tool call, not a quoted transcript).
             (let [calls (->> (:messages body)
                              (mapcat :toolCalls)
-                             (filter #(= "agent" (get-in % [:function :name]))))]
+                             (filter #(= "subagent" (get-in % [:function :name]))))]
               (is (= 1 (count calls)))
               (is (str/includes? (str (get-in (first calls) [:function :arguments])) task)
                   "the delegating call carries the task in its arguments"))))))))

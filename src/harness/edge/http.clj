@@ -3431,13 +3431,21 @@
   now: nothing is running under that id.
 
   `delegatedAt` is the store row's creation time, which for a subagent's session is
-  the moment its delegation opened it -- there is no earlier fact about it."
+  the moment its delegation opened it -- there is no earlier fact about it.
+
+  `finishedAt` IS THE OTHER END, and its absence was the bug this field fixes: a finished
+  delegation's row drew `delegatedAt`-started-but-NaN duration because the wire simply did
+  not carry the end (ticket 01 of `.scratch/task-pane-push`). It is the clock this process
+  stamped when it WATCHED the delegation end (`harness.cap.subagents/finished`), so it is
+  nil for one still running AND for one an earlier process left behind -- both draw a start
+  and NO duration, which is the honest answer either way."
   [row]
   {:threadId    (:thread-id row)
    :parent      (:parent row)
    :subagent    (:subagent row)
    :project     (:project row)
    :delegatedAt (:delegated-at row)
+   :finishedAt  (:finished-at row)
    :running     (:running row)})
 
 (defn- subagents-get
@@ -5243,7 +5251,14 @@
   that carried half of it would be a second clock for the other half."
   [thread-id]
   {:jobs        (vec (jobs/listing thread-id))
-   :delegations (vec (filter #(= (str thread-id) (str (:parent %))) (subagents/runs)))})
+   ;; THE SAME ROW SHAPE THE SNAPSHOT ROUTE ANSWERS WITH (`subagent-run-row`), and the
+   ;; second thing this fixes: `subagents/runs` speaks kebab-case keywords (`:thread-id`,
+   ;; `:finished-at`) while every client reads camelCase (`threadId`, `finishedAt`), so a
+   ;; pushed frame spelled its delegations in keys the page could not read. One function
+   ;; spells the row once, for both halves.
+   :delegations (vec (->> (subagents/runs)
+                          (filter #(= (str thread-id) (str (:parent %))))
+                          (mapv subagent-run-row)))})
 
 (defn- task-send!
   "PUSH the pane's answer to every connection watching THREAD-ID (ticket 01 of

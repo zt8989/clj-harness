@@ -5,8 +5,11 @@
   a home may add its own in config.edn.
 
   THE WHOLE FEATURE IS ONE TOOL CALL FROM THE OUTSIDE. The main agent's table gains
-  `agent`, whose arguments are a subagent's name and a task; the subagent runs its
-  own conversation and its final message becomes that call's result. No new wire
+  `subagent`, whose arguments are a subagent's name and a task. By default the
+  subagent runs its own conversation and its final message becomes that call's result;
+  with `run_in_background` the call returns at once and that message becomes the record
+  of a BACKGROUND JOB (`harness.cap.jobs`), whose ending is announced to the model the
+  way a command's is. No new wire
   frame, no new endpoint, no second protocol: a client that can draw a tool call
   already draws this one.
 
@@ -88,6 +91,7 @@
   (:require [clojure.java.io :as io]
             [clojure.pprint :as pprint]
             [clojure.string :as str]
+            [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
             ;; The one write path (see `change-subagents!`): the file's shape check, the
             ;; atomic write and the backup all live there rather than here.
@@ -102,7 +106,7 @@
 (def delegation-tool
   "The name of the tool a main agent delegates with -- and one of the two names no
   subagent ever serves."
-  "agent")
+  "subagent")
 
 (def forbidden
   "The two names no range contains, whatever a configuration says. See this
@@ -622,8 +626,8 @@
 
 ;; ------------------------------------------------------------------- the tool
 
-(def ^:private agent-params
-  "`agent`'s arguments. The name's description is filled in per session (see face)
+(def ^:private subagent-params
+  "`subagent`'s arguments. The name's description is filled in per session (see face)
   because the list of names is the session's own; the shape itself does not move."
   {:type "object"
    :properties
@@ -631,10 +635,18 @@
     "prompt" {:type "string"
               :description (str "The task, stated so it can be done without this"
                                 " conversation: what to find out or do, and what the"
-                                " answer should contain.")}}})
+                                " answer should contain.")}
+    "run_in_background"
+    {:type "boolean"
+     :description
+     (str "Run the delegation in the BACKGROUND and answer at once with a job id"
+          " (like `j1`): the subagent goes on working while you do something else."
+          " Read its answer, or wait for it, with `job_output` and that id -- and"
+          " its ending is put in front of you before your next model call. Default"
+          " false: the call WAITS for the answer and returns it as this call's result.")}}})
 
 (defn- face
-  "`agent`'s face for THREAD-ID: the names on offer, what each one is for, and --
+  "`subagent`'s face for THREAD-ID: the names on offer, what each one is for, and --
   when the configuration could not be read -- that fact. A tool whose subject is
   the session's own definitions has to describe itself per session, or a model
   reads a stale list."
@@ -647,6 +659,10 @@
           " result. Nothing else about the exchange enters this conversation, so a"
           " subagent is how you have something long, self-contained or noisy done"
           " without filling your own context with it. "
+          "By DEFAULT this call waits for the subagent's final message and returns it;"
+          " set `run_in_background` to true to start it as a background job instead --"
+          " the call then returns at once with a job id, and you read or wait on it with"
+          " `job_output`. "
           "Available: "
           (str/join "; " (map (fn [d] (str (:name d) " -- " (:description d))) subagents))
           ". "
@@ -657,7 +673,7 @@
                  problem "), so only the built-in subagents are listed and NO"
                  " delegation will run until that is fixed.")))
      :parameters
-     (cond-> (assoc-in agent-params [:properties "name" :description]
+     (cond-> (assoc-in subagent-params [:properties "name" :description]
                        (str "Which subagent"
                             (if (seq names) (str ": " (str/join ", " names)) "") "."))
        (seq names) (assoc-in [:properties "name" :enum] names))}))
@@ -669,6 +685,78 @@
 ;; required because running a conversation means the provider, the record and the
 ;; hook sink -- the edge's business, not a capability's -- and a second
 ;; implementation of them here is how the two would drift.
+
+(defn- open-thread!
+  "Freeze DEFINITION's range as THREAD-ID and make every call the thread makes from here
+  on answered by that range. Answers the fn that closes the thread again.
+
+  THE SAME STEPS WHETHER THE DELEGATION RUNS NOW OR IN THE BACKGROUND, and that is the
+  point of it being a function: a background delegation's live-table entry, its store
+  row and its registered tools are facts about a delegation that is RUNNING, and they
+  must be true by the time the call that started it returns."
+  [thread-id parent-thread-id definition table]
+  (let [end! (begin! thread-id {:parent     parent-thread-id
+                                :definition definition
+                                :table      table})]
+    (project/begin-subagent! thread-id {:parent   parent-thread-id
+                                        :subagent (:name definition)})
+    (doseq [[n t] table] (tools/session-register! thread-id n t))
+    end!))
+
+(defn- converse!
+  "Run THIS thread's conversation to its final message, with SubagentStart/Stop around
+  it. Answers the answer string."
+  [parent-thread-id definition task thread-id run!]
+  (hook/emit :subagent-start {:subagent (:name definition)})
+  (try
+    (str (:answer (run! {:parent-thread-id parent-thread-id
+                         :thread-id        thread-id
+                         :definition      definition
+                         :task            task})))
+    (finally
+      (hook/emit :subagent-stop {:subagent (:name definition)}))))
+
+(defn- run-now!
+  "One delegation the CALLING TOOL waits for: open the thread, run it, close the
+  thread whatever happened, and answer the subagent's final message."
+  [parent-thread-id definition task table run!]
+  (let [thread-id (str (java.util.UUID/randomUUID))
+        end!      (open-thread! thread-id parent-thread-id definition table)]
+    (try
+      (converse! parent-thread-id definition task thread-id run!)
+      (finally (end!)))))
+
+(defn- run-in-background!
+  "One delegation the CALLING TOOL does NOT wait for. Answers `{:id <job id>}` at once.
+
+  THE RECORD IS THE ANSWER. The delegation runs on a future exactly as it would on the
+  calling thread -- same range, same conversation, its own thread id -- and its final
+  message is written to the job's record, which is what `job_output` reads and what the
+  ending notice points at. THE JOB IS A MANAGED ONE (`jobs/start-managed!`): it has no
+  process, so `job_kill` cancels this future instead of killing a tree, and `stop!`
+  claims the record with `[stopped]` exactly as it does for a command.
+
+  A DELEGATION THAT DIED STILL ENDS ITS JOB: the `catch` writes what little there is to
+  say and ends the record with `[exit 1]`, so a `job_output {wait: true}` never waits
+  forever on a job this process has already given up on."
+  [parent-thread-id definition task table run!]
+  (let [command (str "subagent " (:name definition) ": " task)
+        {:keys [id append! finish! attach!]}
+        (jobs/start-managed! parent-thread-id {:command command})
+        work (future
+               (let [thread-id (str (java.util.UUID/randomUUID))
+                     end!      (open-thread! thread-id parent-thread-id definition table)]
+                 (try
+                   (append! (converse! parent-thread-id definition task thread-id run!))
+                   (finish! "[exit 0]")
+                   (catch Throwable t
+                     (append! (str "the delegation failed: " (or (ex-message t) (str t))))
+                     (finish! "[exit 1]"))
+                   (finally (end!)))))]
+    ;; THE CANCEL REACHES THE FUTURE WHATEVER ENDS THE JOB (`stop!` from the model or from
+    ;; the pane, a session being put away, the JVM going) -- `close!` is what calls it.
+    (attach! #(future-cancel work))
+    {:id id}))
 
 (defn- run-one
   "One delegation, in the order the pieces have to happen in:
@@ -686,32 +774,21 @@
        exists nowhere else, and registering is how a session hands one on);
     4. SubagentStart, the run, SubagentStop -- the stop in a `finally`, because a
        delegation that died still stopped;
-    5. close the thread whatever happened."
-  [parent-thread-id definition task]
-  (let [table     (table-for parent-thread-id definition)
-        thread-id (str (java.util.UUID/randomUUID))
-        run!      @runner
-        end!      (begin! thread-id {:parent parent-thread-id
-                                     :definition definition
-                                     :table table})]
+    5. close the thread whatever happened.
+
+  `BACKGROUND?` DECIDES WHO WAITS. False is the ordinary delegation, and the answer is
+  the subagent's final message; true hands the same run to a future and answers a job
+  id -- see `run-in-background!`."
+  [parent-thread-id definition task background?]
+  (let [table (table-for parent-thread-id definition)
+        run!  @runner]
     (when-not run!
-      (end!)
       (throw (ex-info (str "no delegation runner is installed, so there is nothing to run"
                            " the " (:name definition) " subagent with")
                       {:reason :no-runner})))
-    (try
-      (project/begin-subagent! thread-id {:parent   parent-thread-id
-                                          :subagent (:name definition)})
-      (doseq [[n t] table] (tools/session-register! thread-id n t))
-      (hook/emit :subagent-start {:subagent (:name definition)})
-      (try
-        (str (:answer (run! {:parent-thread-id parent-thread-id
-                             :thread-id        thread-id
-                             :definition      definition
-                             :task            task})))
-        (finally
-          (hook/emit :subagent-stop {:subagent (:name definition)})))
-      (finally (end!)))))
+    (if background?
+      (run-in-background! parent-thread-id definition task table run!)
+      (run-now! parent-thread-id definition task table run!))))
 
 (defn- known-phrase [definitions]
   (let [names (known-names definitions)]
@@ -719,16 +796,28 @@
       (str "this home has " (str/join ", " names))
       "this home has no subagents at all")))
 
-(defn- t-agent
-  "`agent`'s body: find the subagent, then hand it the task. Everything it can get
+(defn- background-receipt
+  "What a background delegation answers with: which job it is, and the one verb that
+  reaches it -- the same sentence a command's `job` receipt ends on."
+  [definition {:keys [id]}]
+  (str "subagent " (:name definition) " is running in the background as job " id
+       "; read its answer, or wait for it, with `job_output {\"job\": \"" id "\"}`."
+       " Its ending will be put in front of you before your next model call."))
+
+(defn- t-subagent
+  "`subagent`'s body: find the subagent, then hand it the task. Everything it can get
   wrong is refused by name -- an unknown name lists the ones that exist, an empty
   task says what a task is for, an unreadable configuration says which file -- so
-  the model can fix its call instead of guessing at what happened."
+  the model can fix its call instead of guessing at what happened.
+
+  `run_in_background` CHANGES WHO WAITS, not what runs: the same delegation, on a
+  managed job (`run-in-background!`) whose ending is announced like a command's."
   [args]
   (let [parent-thread-id tools/*thread-id*
         defs             (definitions parent-thread-id)
         requested        (some-> (get args :name) str str/trim)
-        task             (some-> (get args :prompt) str str/trim)]
+        task             (some-> (get args :prompt) str str/trim)
+        background?      (true? (get args :run_in_background))]
     (when (str/blank? (str requested))
       (throw (ex-info (str "name a subagent to delegate to; " (known-phrase defs) ".")
                       {:reason :no-subagent-named
@@ -746,18 +835,21 @@
                       {:reason :unreadable-subagents
                        :path (:path defs)})))
     (if-let [definition (definition-for defs requested)]
-      (run-one parent-thread-id definition task)
+      (let [answer (run-one parent-thread-id definition task background?)]
+        (if background?
+          (background-receipt definition answer)
+          answer))
       (throw (ex-info (str "no subagent called " (pr-str requested) " is defined here; "
                            (known-phrase defs) ".")
                       {:reason :unknown-subagent :name requested
                        :known (known-names defs)})))))
 
-(def ^:private agent-tool
+(def ^:private subagent-tool
   "The delegating tool, as the seam's table holds it."
   {:description "Delegate a task to a subagent."
    :parameters  {:type "object" :properties {} }
    :required    [:name :prompt]
-   :run         t-agent
+   :run         t-subagent
    ;; Its subject is the session's own definitions, so its face is per session:
    ;; which names exist, and what each one is for.
    :describe    face})
@@ -911,7 +1003,7 @@
   "Put this capability's three contributions in, and answer the ONE teardown that
   takes them all out again:
 
-    - the `agent` tool, so a session can delegate at all;
+    - the `subagent` tool, so a session can delegate at all;
     - the narrowing policy, so a subagent thread is held to the range it was
       delegated with -- asked AFTER any policy installed before it, which is what
       keeps a doubly-refused name refused in the more specific words;
@@ -923,13 +1015,13 @@
   definition task]}] -> {:answer string}). It arrives through this door rather
   than being required because running a conversation means the provider, the
   record and the hook sink -- the edge's business. A process that installs this
-  without one serves the `agent` tool and answers every call to it with 'no
+  without one serves the `subagent` tool and answers every call to it with 'no
   delegation runner is installed', which is the honest state of a process that
   cannot run a conversation; the composition root always passes one."
   [{:keys [run]}]
   (reset! runner run)
   (let [tools-teardown (tools/install! {:name "subagents"
-                                        :tools {delegation-tool agent-tool}
+                                        :tools {delegation-tool subagent-tool}
                                         :narrow {:served? served?
                                                  :refuse  unserved-message}
                                         :unattended unattended-message})
