@@ -1236,10 +1236,11 @@
     (is (some? job-id) (str "a job really started: " started))
     (let [{:keys [content error]} (call "job_list" {})]
       (is (false? error))
-      (testing "the row names the job, how it went, what it was, and where its record is"
+      (testing "the row names the job, how it went, and what it was"
         (is (str/includes? content job-id) "the id, so the next call can address it")
         (is (str/includes? content "this run") "and which run it belongs to")
-        (is (str/includes? content (str (home/root))) "the record's path, which is a reader's next move")
+        (is (not (str/includes? content (str (home/root))))
+            "NOT the record's path: `job_output` is where a path comes from (owner, 2026-10-02)")
         (is (str/includes? content "echo one; exit 0") "and the command, for a job this process holds"))
       (testing "a job's status is its own record's last line, said the way `job_output` says it"
         (is (re-find #"\[(exit [^\]]*|stopped|running)\]" content)))
