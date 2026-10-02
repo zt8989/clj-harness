@@ -1,7 +1,8 @@
 (ns harness.edge.turn
   "THE CURRENT TURN'S COUNTS, folded from a session's record: how many STEPS it has taken and
-  how many assistant messages it has written -- the two numbers the client's fold line draws
-  (`ui/src/lib/turns.ts`'s `turnCounts`, whose keys these are).
+  how many assistant messages it has written -- the two numbers the `turn/end` row carries
+  (ADR 0017). IT IS THE WRITER'S OWN COUNT AND NOT A READER'S: what the turns OF A RECORD are
+  is `harness.edge.turns` (plural), folded from the rows themselves.
 
   A STEP, NOT A CALL (`.scratch/step-events`, ADR 0011): the rows counted are `step/start`
   ones, so a request the vendor made us send again after refusing it for length is ONE step.

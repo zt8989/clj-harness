@@ -254,8 +254,7 @@ set-up 之后，这两个点都会拿到 nil sink、永远静默。这是「点�
 是**关于记录本身**的事实，按自己那一行的行号落在轮与轮之间）。**没有结束的轮没有 `turn-end`**：一条轮结束的
 凭据只有「后一轮开了」或「记录最后一帧是终态」。模型自己的话按 dsh 叫 `message`；一轮的模型调用骑在它的
 `turn-start` 上（条目的 `:call` 指向那里）。
-两半的边界是**轮的判据**：两处都调**同一个**「这段记录带来哪些用户消息 id」的实现
-（`stats/user-ids`），所以数出来的轮与分出来的组不会各说各话。
+两半的边界是**记录里的行**：一轮由一条 `turn/start` 分段（ADR 0017），`stats` 数它、`trajectory` 按它分组，
 **它按段判轮，不认某种行**：悬置恢复会在同一个 runId 下再写一条 `system-prompt` 行（没有新的用户消息），
 那是同一轮的续，不是新的一轮（`trajectory/run-segments` 的第三种开段情形）。
 **跑着的那一段读 `tools/*` 那几行**（2026-09-27）：一轮的**返回侧 `message` 行是 `:run/done` 之后才写的**
@@ -477,8 +476,8 @@ PNG / woff2 / `.gz` 本来就被压过，再折只会**更大**（实测 1 KB �
 | `tools/pre-execute` / `execute` / `post-execute` | 工具生命周期三相，按 `toolCallId` 键控，**不上 wire** |
 | `model/start` | 一次**模型调用**开始：`:model` / `:base-url` / `:reasoning-effort` / `:context-window`（目录声明了才记，前三个同），加工具表的**签名**：`:tools-names-hash`（工具**名字**集合的 SHA-256——改描述不动它，加删工具才动）/ `:tools-count` / `:tools-bytes`（`context/size-of` 的字符数，给上下文圈画数）。**整张工具表不在这一行**（票 04：runtime 配置，一轮里一字不差重复几百遍，曾占整份日志四成）——它落在 system 那条 `message` 行的**信封**上（`:tools`，整张表，见下）。表为空时不写这三个键。**两处都在**：照旧进记录，**并且上会话那条下行**（ADR 0006 决策 4），线上的载荷就是这一行的载荷 |
 | `model/end` | 同一次调用结束：`:usage` / `:finish-reason` / `:model`，**厂商的键名逐字**；这次调用什么都没报时载荷是空对象。**两处都在**（同上），而线上的那一份多一层 **`numbers`**：到这一刻的 `steps` / `usage` / `cacheHitPercent` / `outputTokensPerSecond` / `context`——它是**会话自己那几份折叠**当时的答案（`stats-get` 答的就是它们），所以线上不是第二份真相，是同一个答案早一点到 |
-| `turn/start` / `turn/end` | 一轮的两端。**只上会话那条下行，不进记录**：轮的边界在记录里由「没见过的 `:source "client"` user 行」算得出来（`harness.edge.stats/user-ids`），再写一行就是同一件事的第二份。**轨迹里那两条 `turn-start` / `turn-end` 格因此是折出来的**（`harness.edge.trajectory/turn-cells`），不是记录里的行：`trajectory` 把同一套轮判据作用在 `message` 行上，把结果画成两条边界。`turn/start` 在那条 user 行**写入之前**发（行号就是它将要拿到的那一行）；`turn/end` 在**返回尾巴落地之后**发，带 `{turnId, calls, messages, seqFrom, seqTo}`——`calls` / `messages` 是 `harness.edge.turn` 那份**按轮**的折叠（客户端 `lib/turns.ts` 的 `turnCounts` 是同一套读数）。**parked 的一轮不收口**：`run/interrupt` 不是终局，带着人答复回来的那个 run 关的是**同一轮**（ADR 0006 决策 3） |
-| `step/start` / `step/end` | **一步**的两端：一次模型请求，加上**它调的那些工具**（ADR 0011）。**两处都在**：各写一行记录，**并且上会话那条下行**——这一族的 `:seq` 是**它自己那一行**的行号（不像 `turn/*` 是借来的，因为它本来就在记录里）。`step/start` 在请求发出之前发（**停止检查之后**：一个被停的 run 不该开一步它收不了的步）；`step/end` 在这一步那些调用**都有了结局之后**发，带 `{:tools [{:id :name} …]}`——每个调用后来怎么了在**它自己**的 `tools/*` 行上（同一批 id），不在这里说第二遍。一次工具也没调的步，`step/end` 紧跟在 `model/end` 之后。收口有四条路，都收：工具都答了 / 停止（被切掉的调用先拿 cut-off 答案）/ **悬置** / 失败（内核那个 `catch`）。**悬置关的是同一步**：回答人的那次请求是**下一步**——步不跨 run，轮才跨。这条也不是 AG-UI 帧（`harness.edge.ag-ui/step` 对它是空操作） |
+| `turn/start` / `turn/end` | 一轮的两端。**两处都在**（ADR 0017）：各写一行记录，**并且上会话那条下行**——这一族的 `:seq` 是**它自己那一行**的行号（像 `step/*`、`model/*`，不再是借来的），`turnId` 由那一行的行号造（`harness.edge.turns/turn-id`）。`turn/start` 在**开轮那条 user 行之前**写（人自己的话一条一条开轮：一次 run 带来两条就写两条）；`turn/end` 在**返回尾巴落地之后**写，载荷带 `{turnId, steps, messages, seqFrom, seqTo}`。**轨迹里那两条 `turn-start` / `turn-end` 格现在是读行的**（`harness.edge.trajectory/opens-segment?` 用 `turn/start` 分段），不再由「没见过的 user 行」折出来：那条规则与 `harness.edge.stats/user-ids` 一起删掉了（`stats` 的 `:turns` 数行）。**parked 的一轮不收口**：`run/interrupt` 不是终局，带着人答复回来的那个 run 关的是**同一轮** |
+| `step/start` / `step/end` | **一步**的两端：一次模型请求，加上**它调的那些工具**（ADR 0011）。**两处都在**：各写一行记录，**并且上会话那条下行**——这一族的 `:seq` 是**它自己那一行**的行号（与 `turn/*`、`model/*` 一样，因为三族本来都在记录里）。`step/start` 在请求发出之前发（**停止检查之后**：一个被停的 run 不该开一步它收不了的步）；`step/end` 在这一步那些调用**都有了结局之后**发，带 `{:tools [{:id :name} …]}`——每个调用后来怎么了在**它自己**的 `tools/*` 行上（同一批 id），不在这里说第二遍。一次工具也没调的步，`step/end` 紧跟在 `model/end` 之后。收口有四条路，都收：工具都答了 / 停止（被切掉的调用先拿 cut-off 答案）/ **悬置** / 失败（内核那个 `catch`）。**悬置关的是同一步**：回答人的那次请求是**下一步**——步不跨 run，轮才跨。这条也不是 AG-UI 帧（`harness.edge.ag-ui/step` 对它是空操作） |
 | `approval/decided` | 人对一个 park 调用的答复 |
 | `provider/init` | 每 thread 恰好一行，首次 run；含**选择**（三个旋钮）、**来源**（`default` / `request` / `inline`）与**解析结果** `:resolved` |
 | `provider/changed` | 会话中 provider 档变更：`:before` / `:after`（本次按下的旋钮）、`:override`（按完之后 session 这一档的完整形状）、`:trigger`、`:resolved` |

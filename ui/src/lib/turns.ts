@@ -1,11 +1,15 @@
-// What a TURN is, as arithmetic: which messages are one, whether it has stopped,
-// what its conclusion is, how much it did, and what its summary line says.
-// A turn is a run of adjacent ASSISTANT messages -- the steps of one answer. The
-// AG-UI adapter opens a new assistant message for every LLM round, so a turn that
-// thought, read and then answered is several messages in a row, and the user
-// message that starts the next turn is what ends it. `thread.aui.tsx` asks the
-// same question for the action bar (`isTurnEnd` / `isTurnContinuation`); this
-// module answers it for the fold, which needs the same boundary plus the counts.
+// What a TURN is, as arithmetic: which messages are one, whether it has stopped, what its
+// conclusion is, and what its summary line says.
+//
+// THE TURN ITSELF IS NOT ARITHMETIC ANY MORE (ADR 0017). It used to be "a run of adjacent
+// assistant messages" -- a fact about the message list -- and it is now a fact about the RECORD:
+// the `turn/start` / `turn/end` rows say where a turn begins and what it did, and the window
+// carries those rows to the page (`feed.ts`'s `TurnRow`, remembered by `lib/turn-rows.ts`). What
+// is still arithmetic here is what a turn MEANS to the reader: whether it has stopped, and which
+// of its messages is the answer.
+//
+// `thread.aui.tsx` asks the same boundary question for the action bar (`isTurnEnd` /
+// `isTurnContinuation`); this module answers it for the fold.
 //
 // RUNTIME-ZERO IMPORTS, like `stats.ts` and `attachment-rules.ts`: the one import
 // below is a TYPE (`import type { TFunction }`), which the compiler erases, so the
@@ -13,33 +17,60 @@
 // through a rendered thread (see test/suites/turns.ts).
 import type { TFunction } from "i18next";
 
-/// The shape this module reads a message through: enough to walk a turn, count a
-/// tool call, and ask whether the message is still being written. Structural on
-/// purpose -- the runtime's `MessageState` satisfies it, and so does a literal in
-/// a test.
+/// The shape this module reads a message through: enough to place it in a turn and to ask
+/// whether that turn is still being written. Structural on purpose -- the runtime's `MessageState`
+/// satisfies it, and so does a literal in a test.
 export type TurnMessage = {
+  readonly id?: string | undefined;
   readonly role: string;
   readonly status?: { readonly type: string } | undefined;
   readonly parts?: readonly { readonly type: string; readonly text?: string }[] | undefined;
 };
 
-/// The run of adjacent assistant messages `index` sits in, as first/last indices.
+/// WHAT TURN THE RECORD PUTS ONE MESSAGE IN, by that message -- `undefined` when it puts it in
+/// none. `ui/src/lib/turn-rows.ts` is the one implementation: it compares the record line the
+/// message arrived in against each turn's own range.
+export type TurnOf = (message: TurnMessage) => string | undefined;
+
+/// The run of adjacent messages `index` sits in, as first/last indices -- THE TURN THE RECORD PUT
+/// IT IN, found by asking `turnOf` for each neighbour's turn id.
 ///
-/// Both ends are found by walking outwards while the neighbour is an assistant
-/// message, which is what makes the boundary a fact about the LIST rather than a
-/// field somebody has to keep in step. A message that is not an assistant's -- a
-/// user's, or an index past the end -- is its own bounds: only assistant messages
-/// ask, but returning a neighbour's turn for one would be a silent lie.
+/// THE MESSAGE LIST IS NOT THE AUTHORITY (ADR 0017, and the reason this takes `turnOf`). It used
+/// to group adjacent ASSISTANT messages, which is a fact about the list and a second place the
+/// boundary was decided; the record writes it down and the window carries it. A message the record
+/// places in no turn is its own bounds -- there is nothing it could be grouped with.
 export function turnBounds(
   messages: readonly TurnMessage[],
   index: number,
+  turnOf: TurnOf,
 ): { first: number; last: number } {
-  if (messages[index]?.role !== "assistant") return { first: index, last: index };
+  const mine = turnOf(messages[index] ?? {});
+  if (mine === undefined) return { first: index, last: index };
   let first = index;
-  while (first > 0 && messages[first - 1]?.role === "assistant") first -= 1;
+  while (first > 0 && turnOf(messages[first - 1] ?? {}) === mine) first -= 1;
   let last = index;
-  while (messages[last + 1]?.role === "assistant") last += 1;
+  while (last + 1 < messages.length && turnOf(messages[last + 1] ?? {}) === mine) last += 1;
   return { first, last };
+}
+
+/// THE STEPS OF A TURN: the messages of `turnBounds` that the FOLD is about -- the assistant's own.
+///
+/// A TURN ALSO HOLDS THE PERSON'S MESSAGE. The record's boundary stands in FRONT of what it opens
+/// (ADR 0017), so the turn `turnBounds` answers with begins at the question; that message is never
+/// folded -- it is what the reader asked -- and a summary line drawn by it would be a header in
+/// front of the wrong thing. This is the run the summary line and the hiding are about, and the
+/// first of it is the message that draws the line.
+export function turnStepBounds(
+  messages: readonly TurnMessage[],
+  index: number,
+  turnOf: TurnOf,
+): { first: number; last: number } {
+  const { first, last } = turnBounds(messages, index, turnOf);
+  let head = first;
+  while (head <= last && messages[head]?.role !== "assistant") head += 1;
+  let tail = last;
+  while (tail >= head && messages[tail]?.role !== "assistant") tail -= 1;
+  return head > tail ? { first: index, last: index } : { first: head, last: tail };
 }
 
 /// Whether the turn has stopped being written.
@@ -94,49 +125,14 @@ export function turnConclusion(
   return undefined;
 }
 
-/// What the turn did, as the fold line asks it: HOW MANY STEPS it took.
-///
-/// ONE MODEL REQUEST IS ONE STEP, and on the read side one request is one assistant message --
-/// so the turn's steps are the run of assistant messages `turnBounds` found, and the user
-/// message that started the turn is not one of them (it is already on screen above the line,
-/// and counting it would make every turn one longer than the reader can see).
-///
-/// THE RECORD WRITES THAT BOUNDARY DOWN NOW (`step/start` rows, `.scratch/step-events`, ADR
-/// 0011) and for a settled turn the two readings agree. They part in exactly one place: a
-/// request the vendor refused for length and made us send again is ONE step in the record and
-/// TWO messages here, because the client sees two messages and cannot see that the vendor was
-/// asked twice. Where they part the record is right -- which is what `turn/end` carrying
-/// `steps` is for.
-export function turnCounts(
-  messages: readonly TurnMessage[],
-  first: number,
-  last: number,
-): { steps: number } {
-  let steps = 0;
-  for (let index = first; index <= last; index += 1) {
-    if (messages[index]?.role === "assistant") steps += 1;
-  }
-  return { steps };
-}
-
-/// WHICH OF THE TWO READINGS THE SUMMARY LINE PRINTS (`.scratch/step-events`, and ADR 0006
-/// decision 5: 'when a turn folds there is ONE owner, never two').
-///
-/// THE SERVER OWNS THE TURN IT JUST CLOSED, and only that one. `turn/end` arrives when the turn
-/// is over and turns close in order, so the last one a page heard about is the last turn in its
-/// view -- that is `isNewest`. Every OTHER turn belongs to the read side: an older one, and any
-/// turn at all on a page that opened after it closed (facts are not replayed), which is the only
-/// reading that can answer for a past this page did not watch. The two agree everywhere except a
-/// request the vendor made us send twice, where the record is right -- `suites/turn.ts` measures
-/// that they agree on a real run.
-export function turnStepsFrom(
-  fromRead: number,
-  fromServer: number | undefined,
-  isNewest: boolean,
-): number {
-  return isNewest && fromServer !== undefined ? fromServer : fromRead;
-}
-
+/// HOW MANY STEPS A TURN TOOK IS NOT ANSWERED HERE ANY MORE (ADR 0017). It is the number the
+/// turn's own `turn/end` row carries (`steps`), the window hands it over with the turn, and the
+/// summary line reads it there -- one number, written down once, instead of a count of messages
+/// that agreed with it except when the vendor made us send a request twice.
+/// WHICH OF TWO READINGS THE SUMMARY LINE PRINTS IS NOT A QUESTION ANY MORE (ADR 0017). The
+/// steps are the record's own number wherever it came from -- the `turn/end` row in the window, or
+/// the same row pushed the moment it was written (`lib/turn-numbers.ts`). They are one fact said
+/// twice on the wire, never two readings that could disagree.
 /// The translator `turnSummaryLabel` takes, PINNED TO THE FACE THAT DRAWS IT.
 ///
 /// i18next's `TFunction` is branded with the namespace it was bound to, so a bare
@@ -150,7 +146,7 @@ type Translate = TFunction<"thread">;
 ///
 /// IT USED TO BE TWO NUMBERS -- `72 tool calls · 25 messages` -- AND BOTH ARE GONE
 /// (`.scratch/step-events`, ticket 05). The message half was the same number as the step
-/// half (one request, one message: see `turnCounts`), and a line reading `3 步 · 3 条消息`
+/// half (one request, one message), and a line reading `3 步 · 3 条消息`
 /// tells nobody anything; the tool-call half said less than the step count does -- three
 /// requests, one of which may have run five tools.
 ///

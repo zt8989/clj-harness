@@ -21,7 +21,8 @@ import { expect } from "vitest";
 import { type Case, type Suite, agentFor, content, script, threadId } from "../e2e";
 import { type HarnessAgent } from "@/lib/agent";
 import { declaredSet, subscribeFacts } from "@/lib/mux";
-import { turnBounds, turnCounts } from "@/lib/turns";
+import { noteTurnEnd, serverTurnNumbers } from "@/lib/turn-numbers";
+import type { FactFrame } from "@/lib/mux";
 
 async function newAgent(tid: string): Promise<{ agent: HarnessAgent; failed: () => string | null }> {
   const agent = await agentFor(tid);
@@ -108,19 +109,20 @@ const cases: Case[] = [
     },
   },
   {
-    name: "the-read-side-and-the-server-count-the-same-steps",
-    // THE SHARED CASE TABLE TICKET 05 ASKED FOR: ONE REAL RUN, the same turn counted twice --
-    // by the record's own `step/start` rows (what the `turn/end` fact carries) and by the
-    // conversation's own run of assistant messages (`lib/turns.ts`, what the fold line draws
-    // when it has no event). THEY MUST AGREE, because the fold line chooses between them by**who
-    // owns the turn**, never by which one it trusts (`turnStepsFrom`).
+    name: "the-step-count-is-the-records-own-and-both-roads-say-it",
+    // THE READ SIDE NO LONGER COUNTS (ADR 0017). It used to walk the conversation's run of
+    // assistant messages and agree with the record everywhere except a request the vendor made us
+    // send twice; the number is now the turn's own `turn/end` row, and it reaches the page on two
+    // roads -- the window that opened later, and the same row pushed the moment it was written.
+    // THIS CASE MEASURES THOSE TWO ROADS ON ONE REAL RUN, which is the promise the summary line
+    // rests on.
     run: async () => {
       const tid = threadId("steps-two-ways");
       const { agent } = await newAgent(tid);
       // THE PAGE'S OWN SUBSCRIPTION, not a raw socket: what arrives here is what a page has.
-      const ended: unknown[] = [];
+      const ended: FactFrame[] = [];
       const { unsubscribe } = subscribeFacts(tid, (fact) => {
-        if (fact.type === "turn/end") ended.push(fact.numbers);
+        if (fact.type === "turn/end") ended.push(fact);
       });
       script([
         {
@@ -140,18 +142,20 @@ const cases: Case[] = [
       unsubscribe();
 
       // TWO STEPS: the request that asked for `read`, and the one that answered with it in hand.
-      const server = (ended.at(-1) as { steps?: number } | undefined)?.steps;
+      const closed = ended.at(-1);
+      const server = (closed?.numbers as { steps?: number } | undefined)?.steps;
       expect(server, "the server closed a turn and said how many steps it took").toBe(2);
 
-      // THE TURN AS THE FOLD SEES IT. The raw AG-UI list carries a tool RESULT as an entry of its
-      // own (`role: "tool"`, measured here: `[user, reasoning, assistant, tool, assistant]`), and
-      // that entry BREAKS the run of assistant messages `turnBounds` walks -- the page's own view
-      // does not carry it (the result is a part of the assistant message: the browser walkthrough
-      // draws this very shape of turn as "2 步", from this same read side). So the shared case
-      // table is read over the shape the fold is handed, not over the transport's.
-      const foldedView = agent.messages.filter((m) => m.role !== "tool");
-      const { first, last } = turnBounds(foldedView, foldedView.length - 1);
-      expect(turnCounts(foldedView, first, last).steps, "and the view counts the same two").toBe(server);
+      // AND THE SAME NUMBER ON THE OTHER ROAD. The row the record wrote is what a window carries
+      // (`TurnRow.steps`); the fact is that same row pushed. The page keeps the latest it heard
+      // (`lib/turn-numbers.ts`) and prints it -- there is nothing on this side left to count, which
+      // is the whole point of ADR 0017.
+      expect(closed, "a turn/end fact arrived").toBeDefined();
+      if (closed !== undefined) noteTurnEnd(tid, closed);
+      expect(
+        serverTurnNumbers(tid)?.steps,
+        "the store the summary line reads agrees with the frame",
+      ).toBe(2);
     },
   },
   {

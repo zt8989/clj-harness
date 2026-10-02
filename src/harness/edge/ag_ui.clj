@@ -781,8 +781,9 @@
   reader asking 'what did the person say' therefore has to tell them apart, and this is
   that rule NAMED ONCE -- `first-user-text` (which names a session after the first thing
   somebody said) asks it, and so do the record's readers
-  (`harness.edge.stats/user-ids`, which counts turns, and `harness.edge.trajectory`,
-  which draws them). A copy of the test at each of those would be a second place deciding
+  (`harness.edge.trajectory`, which groups turns by the record's own `turn/start` rows -- the
+  boundary is WRITTEN DOWN now, ADR 0017). A copy of the test at each of those would be a second
+  place deciding
   which message is ours, which is exactly what `context-entry-id`'s docstring refuses."
   [message]
   (or (= context-entry-id (:id message))

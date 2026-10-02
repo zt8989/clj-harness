@@ -86,9 +86,10 @@ lib/
                     缺一个就是 `null`）。**零 import**，所以 UI 套件能直接测它
   attachment-rules.ts  附件那两条判据（模型收不收图、源字节有没有过 2 MB）与它们各自的拒话。
                     同样**零 import**，同样被 UI 套件直接测
-  turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、它做了几次调用几条消息、
-                    摘要那行写什么。**零 import**（`turnBounds` / `turnIsSettled` /
-                    `turnCounts` / `turnSummaryLabel`），被 UI 套件当成数来测
+  turns.ts          一轮的**算术**：哪几条消息是同一轮、它停没停、哪条是回答、摘要那行写什么。
+                    **零 import**，被 UI 套件当成数来测。**轮与步数不由它决定**（ADR 0017）：
+                    边界是记录里那两行，窗口把 `turns` 送下来（`lib/turn-rows.ts` 按消息 id 记着），
+                    它只回答「这一轮对读者意味着什么」
   thread-view.ts    「这一屏是新建的，还是已经在会话里」这道题（`isNewChatView`）：布局按它决定
                     composer 居中还是贴底，composer 的 chrome 按它决定画不画项目/分支条、
                     `ui/src/styles.css` 按它决定收不收 footer 那 16–24px。**一处定义、两处读**——

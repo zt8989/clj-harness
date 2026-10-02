@@ -117,12 +117,30 @@
   [] {:open nil :closed []})
 
 (defn- opens-segment?
-  "The three ways a new segment opens -- see `run-segments` for why each one is."
+  "The ways a new segment opens -- see `run-segments` for why each one is. A `turn/start` row is
+  one of them (ADR 0017) UNLESS the segment already open is the same run's and has not taken a
+  turn yet: the record writes a run's prompt row BEFORE the boundary on some paths (the prompt is
+  written on the way to the run) and AFTER it on others, so a boundary that always cut a segment
+  of its own would strand that prompt in a segment with nothing to fold it into. That row is not
+  opening a segment -- it is MARKING the one it is already in (`segments-step` has the branch)."
   [record current]
-  (and (= "message" (replay/kind record))
-       (or (not= (:runId record) (:run-id current))
-           (and (entry-row? record) (:streaming current))
-           (and (replay/system-prompt? record) (:prompt? current)))))
+  (or (and (= "turn/start" (replay/kind record))
+           (or (nil? current)
+               ;; SOMETHING HAS ALREADY BEEN ANSWERED IN THIS SEGMENT: this boundary belongs to
+               ;; another run and opens a segment of its own. What is NOT evidence is one person's
+               ;; message on its own -- a run can carry more than one, and those open turns INSIDE
+               ;; one segment (`one-run` is where).
+               (:streaming current)
+               (seq (:returned current))
+               (not= (:runId record) (:run-id current))))
+      (and (= "message" (replay/kind record))
+           ;; TWO WAYS A MESSAGE ROW OPENS A SEGMENT: another run's id, and a prompt row that came
+           ;; again (a resume). AN ENTRY ARRIVING MID-STREAM IS NO LONGER ONE OF THEM: with a
+           ;; `turn/start` row in front of every run, that boundary is where a new run is DECLARED,
+           ;; and a rule that also cut on 'an entry while streaming' would split the run it belongs
+           ;; to in half (`opens-segment?` above).
+           (or (not= (:runId record) (:run-id current))
+               (and (replay/system-prompt? record) (:prompt? current))))))
 
 (defn segments-step
   "One record into the segment machine: `{:open … :closed […]}`. A segment is CLOSED the
@@ -132,35 +150,51 @@
   [state [i record]]
   (cond
     (opens-segment? record (:open state))
-    {:open   (cond-> {:run-id       (:runId record)
-                      :prompt?      (replay/system-prompt? record)
-                      :prompt-row   (when (replay/system-prompt? record) record)
-                      :opener       record
-                      :i            i
-                      :at           (:ts record)
-                      :brought      []
-                      :brought-rows []
-                      :submitted    (if (run-produced? record) [] [(row-message record)])
-                      :returned     (if (run-produced? record) [(row-message record)] [])
-                      :calls        []
-                      :tool-ids     []
-                      :streaming    false}
-               (entry-row? record)
-               (assoc :brought      [(row-message record)]
-                      :brought-rows [record]))
-     :closed (cond-> (:closed state) (:open state) (conj (:open state)))}
+    (let [turn?     (= "turn/start" (replay/kind record))
+          produced? (run-produced? record)]
+      {:open   (cond-> {:run-id       (:runId record)
+                        :prompt?      (replay/system-prompt? record)
+                        :prompt-row   (when (replay/system-prompt? record) record)
+                        ;; DID THE RECORD OPEN A TURN HERE (ADR 0017)? The boundary row is not a
+                        ;; message and lands on neither side of the request: it is what the segment
+                        ;; is FOR.
+                        :turn?        turn?
+                        :opener       record
+                        :i            i
+                        :at           (:ts record)
+                        :brought      []
+                        :brought-rows []
+                        :submitted    (if (or turn? produced?) [] [(row-message record)])
+                        :returned     (if produced? [(row-message record)] [])
+                        :calls        []
+                        :tool-ids     []
+                        :streaming    false}
+                 (entry-row? record)
+                 (assoc :brought      [(row-message record)]
+                        :brought-rows [record]))
+       :closed (cond-> (:closed state) (:open state) (conj (:open state)))})
+
+    ;; A `turn/start` ROW THAT DID NOT OPEN A SEGMENT MARKS THE ONE ALREADY OPEN: it is the same
+    ;; run's -- the boundary came after that segment's first row -- and this is what makes it the
+    ;; segment the turn belongs to.
+    (= "turn/start" (replay/kind record))
+    (update state :open (fn [current] (when current (assoc current :turn? true))))
 
     (= "message" (replay/kind record))
     (update state :open
             (fn [current]
               (when current
-                ;; WHICH SIDE A MESSAGE ROW IS ON IS STILL ITS POSITION: a run's request is written
-                ;; before the frames that answer it. THE ONE CASE THAT COMES OUT BACKWARDS is a run
-                ;; that ANSWERS BEFORE IT SUBMITS -- a resume, whose replayed tool answer is the first
-                ;; message row it writes -- and that is a KNOWN OPEN ITEM (the record is written AS
-                ;; THE RUN HAPPENS now, so this positional guess has to become a question about the
-                ;; row itself: `.scratch/record-envelopes`).
-                (if (or (:streaming current) (run-produced? record))
+                ;; WHICH SIDE A MESSAGE ROW IS ON IS STILL ITS POSITION for the rows a RUN
+                ;; produced: its answer is written after the frames that carried it. THE REQUEST'S
+                ;; OWN ROWS ARE NOT POSITIONAL ANY MORE (ADR 0017 put the boundary in front of
+                ;; them, `.scratch/record-envelopes` put the prompt and the person's words inside
+                ;; the call's envelope): an ENTRY -- what the conversation handed over -- and the
+                ;; SYSTEM PROMPT are the request side WHEREVER they stand. The one case position
+                ;; still gets wrong is a resume, whose replayed tool answer is its first row (that
+                ;; is a `run-produced?` row, and the question is asked about the row itself).
+                (if (and (not (entry-row? record))
+                         (not (replay/system-prompt? record))
+                         (or (:streaming current) (run-produced? record)))
                   (update current :returned conj (row-message record))
                   (-> current
                       (update :submitted conj (row-message record))
@@ -233,17 +267,16 @@
   readers that do (`harness.edge.pressure`'s anchor, `harness.edge.context`'s ring) ask there so
   they cannot disagree.
 
-  A run is OPENED by its FIRST `message` ROW -- the array the model was handed begins there.
-  `harness.edge.http` writes the prompt BEFORE the action's own entries, so that row IS the
-  system prompt on every run this build records (a record written before that reordering opens
-  at the client's own message instead, and this reader still handles it). A HARNESS
-  FACT does not open one: the fact rows are `event`s, which is the same distinction
-  `harness.edge.replay/runs` draws. What the run BROUGHT into the CONVERSATION is
-  `:brought`, and an entry is a row that carries one (`replay/entries`' reading). Its
-  SUBMITTED messages are the `message` lines that come before its first `event`; every
-  `message` line after that is the RETURNED side, because the kernel writes its tail at
-  :run/done, i.e. after the terminal frame (the same fact harness.edge.replay's docstring
-  rests on).
+  A RUN IS OPENED BY ITS `turn/start` ROW (ADR 0017), and -- on a record written before that
+  decision, or on a path that writes no boundary -- by its FIRST `message` ROW. The prompt row
+  and the person's own words are the run's SUBMITTED side WHEREVER THEY STAND: the edge writes
+  the prompt before those entries, and `.scratch/record-envelopes` moved both of them inside the
+  first call's own envelope, so position alone no longer says which side a message row is on
+  (`opens-segment?` and the `message` branch of `segments-step` are where that is decided).
+  What the run BROUGHT into the CONVERSATION is `:brought`, and an entry is a row that carries
+  one (`replay/entries`' reading). Everything else a run wrote is the RETURNED side, because the
+  kernel writes its tail at :run/done, i.e. after the terminal frame (the same fact
+  harness.edge.replay's docstring rests on).
 
   A `message` line before any run's system message belongs to no run and is dropped: there
   is no turn it could be shown under, and inventing one would put a message on screen that
@@ -257,7 +290,7 @@
   (`harness.edge.replay/entries`), and this one SHOWS it, because 'what the model saw' is
   this reader's question.
 
-  PUBLIC, like `stats/incomplete?` and `stats/user-ids`, because a SECOND reader needs
+  PUBLIC, like `stats/incomplete?`, because a SECOND reader needs
   exactly this split: harness.edge.context counts the messages of the run the last
   reporting call belongs to (the system message against everything else), and 'which
   records are one run, and which side of it is a message on' is one rule -- a second
@@ -758,8 +791,7 @@
   not listed, because a client restates its whole conversation on every run.
 
   AN INJECTION IS NOT A TURN: the opening enters as ordinary user messages, and a turn
-  belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule
-  `stats/user-ids` counts turns with too).
+  belongs to something a PERSON said (`harness.edge.ag_ui/injected?`, the one rule).
 
   A turn's opening items land on its FIRST new user message; one `input` can bring
   several new user messages (the client may hand over more than one), and each of the
@@ -808,12 +840,19 @@
         ;; invent (see `add-context`).
         fresh     (vec (remove #(contains? seen (:id %))
                                (filter #(= "user" (:role %)) added)))
-        changed?  (not= texts shownSystem)
-        ;; WHO HAD ALREADY BEEN SEEN: the CLIENT's own user messages (`stats/user-ids` is
-        ;; that rule, and asks a row's own `source` now). The birth's entries are NOT added
+        ;; A SEGMENT WITH NO PROMPT ROW SAYS NOTHING ABOUT THE SYSTEM MESSAGE: a turn the record
+        ;; opened mid-run (the same run's second person's message) carries no prompt of its own, and
+        ;; an EMPTY one drawn in front of it would be a cell the record does not have.
+        changed?  (and (some? sys) (not= texts shownSystem))
+        ;; WHO HAD ALREADY BEEN SEEN: the CLIENT's own user messages, read off the row's own
+        ;; `source` (the rule `harness.edge.stats` used to spell -- it counts `turn/start` rows
+        ;; itself now, because a turn IS a row, ADR 0017). The birth's entries are NOT added
         ;; here on purpose -- `add-context` draws them in the turn that carried them, every
         ;; time they are carried (see there for why there is no de-duplication).
-        seen'     (into seen (mapcat stats/user-ids (:brought-rows run)))
+        seen'     (into seen (keep (fn [row]
+                                     (when (= "client" (:source row))
+                                       (or (:id row) (:id (replay/payload row)))))
+                                   (:brought-rows run)))
         ;; THIS RUN'S CALLS, and where they start counting inside the turn: a resumed
         ;; run's calls continue the same turn's numbering, so an item's :call stays a
         ;; pointer into the turn's own :calls vector. NIL when this run recorded no calls
@@ -822,9 +861,11 @@
         offset    (when (seq calls)
                     (if (empty? turns) 0 (count (:calls (peek turns)))))]
 
-    (if (seq fresh)
-      ;; A new turn: the system message opens it when it is new or different, then the
-      ;; injected blocks, then the user message itself.
+    ;; A NEW TURN IS ONE THE RECORD OPENED (ADR 0017): this run's segment carries a `turn/start`
+    ;; row. What the segment brought is drawn as it always was -- the system message opens the
+    ;; turn when it is new or different, then the injected blocks, then the words of the person
+    ;; whose turn it is.
+    (if (:turn? run)
       (let [;; WHERE THE INJECTIONS SIT, relative to the person's own words: the session's
             ;; opening stands IN FRONT (it enters the conversation first, so every run
             ;; after the birth reads it there), and the session's context entry sits

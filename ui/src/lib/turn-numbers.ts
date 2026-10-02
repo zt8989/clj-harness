@@ -12,7 +12,9 @@
 // AND IT IS NOT A HISTORY. Facts are 'about this conversation while you are looking at it'
 // (ADR 0006 decision 7): nothing is replayed, so a page that opened AFTER a turn closed has
 // nothing here -- and the read side answers, being the only one of the two that can answer for a
-// past it did not watch. `lib/turns.ts`'s `turnStepsFrom` is where that choice is made.
+// past it did not watch. The RECORD'S OWN ROW is what both roads carry now (ADR 0017): the window
+// hands it over with the turn (`lib/turn-rows.ts`), and this store holds the newest one pushed --
+// the same fact twice on the wire, so there is no choice left to make.
 import type { FactFrame } from "./mux";
 
 export type TurnNumbers = {

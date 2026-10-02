@@ -25,7 +25,7 @@
 // of looking at the conversation in front of you rather than a preference about
 // conversations, which is the same line `app.tsx` takes for the
 // conversation/trajectory switch.
-import { type FC, useContext, useSyncExternalStore } from "react";
+import { type FC, useCallback, useContext, useSyncExternalStore } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { useAuiState, type AssistantState } from "@assistant-ui/react";
 import { useTranslation } from "react-i18next";
@@ -33,13 +33,13 @@ import { useTranslation } from "react-i18next";
 import { ThreadIdContext } from "@/components/composer-chrome";
 import { serverTurnNumbers, subscribeTurnNumbers } from "@/lib/turn-numbers";
 import {
-  turnBounds,
   turnConclusion,
-  turnCounts,
   turnIsSettled,
-  turnStepsFrom,
+  turnStepBounds,
   turnSummaryLabel,
 } from "@/lib/turns";
+import type { TurnMessage, TurnOf } from "@/lib/turns";
+import { subscribeTurnRows, turnOfMessage, turnRows } from "@/lib/turn-rows";
 import { cn } from "@/lib/utils";
 
 // ------------------------------------------------------------------ the store
@@ -76,17 +76,17 @@ function useTurnOpened(key: string): boolean {
 
 /// The turn this message belongs to, named by its first message's id -- one name
 /// for a turn that survives the turn growing under it.
-const turnKeyOf = (s: AssistantState): string => {
-  const { first } = turnBounds(s.thread.messages, s.message.index);
-  return s.thread.messages[first]?.id ?? "";
+const turnKeyOf = (s: AssistantState, turnOf: TurnOf): string => {
+  const { first } = turnStepBounds(s.thread.messages, s.message.index, turnOf);
+  return turnOf(s.thread.messages[first] ?? {}) ?? s.thread.messages[first]?.id ?? "";
 };
 
-const isHeadOf = (s: AssistantState): boolean =>
-  turnBounds(s.thread.messages, s.message.index).first === s.message.index;
+const isHeadOf = (s: AssistantState, turnOf: TurnOf): boolean =>
+  turnStepBounds(s.thread.messages, s.message.index, turnOf).first === s.message.index;
 
-const isConclusionOf = (s: AssistantState): boolean => {
+const isConclusionOf = (s: AssistantState, turnOf: TurnOf): boolean => {
   const { messages } = s.thread;
-  const { first, last } = turnBounds(messages, s.message.index);
+  const { first, last } = turnStepBounds(messages, s.message.index, turnOf);
   return turnConclusion(messages, first, last) === s.message.index;
 };
 
@@ -94,9 +94,9 @@ const isConclusionOf = (s: AssistantState): boolean => {
 /// message is just the answer, and a summary line in front of it would be a header
 /// for nothing -- the same reason `.scratch/flat-step-rows` deleted the old
 /// "1 tool call" group header.
-const isFoldableOf = (s: AssistantState): boolean => {
+const isFoldableOf = (s: AssistantState, turnOf: TurnOf): boolean => {
   const { messages } = s.thread;
-  const { first, last } = turnBounds(messages, s.message.index);
+  const { first, last } = turnStepBounds(messages, s.message.index, turnOf);
   return last > first && turnIsSettled(messages, last, s.thread.isRunning);
 };
 
@@ -104,32 +104,40 @@ const isFoldableOf = (s: AssistantState): boolean => {
 /// `.scratch/step-events`: a step IS a model request, the read side sees one message per
 /// request, so the message count was this number said twice.
 ///
-/// A `hook-safe` selector because it is read through `useAuiState`: it walks the thread's
-/// messages, and it answers the same thing every time for the same state.
-const turnStepsFromRead = (s: AssistantState): number => {
-  const { first, last } = turnBounds(s.thread.messages, s.message.index);
-  return turnCounts(s.thread.messages, first, last).steps;
-};
-
-/// IS THIS TURN THE CONVERSATION'S LAST ONE? -- the question `lib/turns.ts`'s `turnStepsFrom`
-/// turns on. The last turn's own end IS the last `turn/end` a page heard (turns close in
-/// order), so for that one -- and only that one -- the server's number is about the turn this
-/// line is drawing.
-const isNewestTurnOf = (s: AssistantState): boolean => {
-  const { last } = turnBounds(s.thread.messages, s.message.index);
+/// IS THIS TURN THE CONVERSATION'S LAST ONE? The last turn's own end IS the last `turn/end` a page
+/// heard (turns close in order), so for that one -- and only that one -- the number pushed the
+/// moment it was written is about the turn this line is drawing.
+const isNewestTurnOf = (s: AssistantState, turnOf: TurnOf): boolean => {
+  const { last } = turnStepBounds(s.thread.messages, s.message.index, turnOf);
   return last === s.thread.messages.length - 1;
 };
 
-/// THE STEPS THIS TURN TOOK, as the line prints them: ONE of the two readings, never both.
-/// The read side is what a page that opened later has; the server's number, which arrives with
-/// `turn/end`, is what a page that WATCHED the turn close has (and is the right one when the two
-/// part -- `lib/turn-numbers.ts` says where).
-const useTurnSteps = (): number => {
+/// WHAT TURN THE RECORD PUTS EACH MESSAGE IN, for the conversation on screen (ADR 0017). Every
+/// selector below takes it, so they all read the SAME answer -- and it is rebuilt whenever a frame
+/// moves the turns, which is what makes them recompute.
+const useTurnOf = (): TurnOf => {
   const threadId = useContext(ThreadIdContext);
-  const fromRead = useAuiState(turnStepsFromRead);
-  const newest = useAuiState(isNewestTurnOf);
+  const rows = useSyncExternalStore(subscribeTurnRows, () => turnRows(threadId));
+  return useCallback(
+    (message: TurnMessage) => turnOfMessage(threadId, message.id ?? null)?.turnId,
+    // `rows` is not read in the body: it is the DEPENDENCY that says "the record changed its
+    // mind", and every selector closing over this function is recomputed when it does.
+    [threadId, rows],
+  );
+};
+
+
+/// THE STEPS THIS TURN TOOK -- ONE number, and it is the RECORD'S (ADR 0017). It is what the turn's
+/// own `turn/end` row carries: either the row the window is holding, or the same row pushed the
+/// moment it was written (`lib/turn-numbers.ts`). Both are the one fact, said on two roads.
+const useTurnSteps = (turnOf: TurnOf): number => {
+  const threadId = useContext(ThreadIdContext);
+  const rows = useSyncExternalStore(subscribeTurnRows, () => turnRows(threadId));
+  const mine = useAuiState((s) => turnKeyOf(s, turnOf));
+  const newest = useAuiState((s) => isNewestTurnOf(s, turnOf));
   const heard = useSyncExternalStore(subscribeTurnNumbers, () => serverTurnNumbers(threadId));
-  return turnStepsFrom(fromRead, heard?.steps, newest);
+  const row = rows.find((turn) => turn.turnId === mine);
+  return newest && heard !== undefined ? heard.steps : (row?.steps ?? 0);
 };
 
 // ------------------------------------------------------------------ the hooks
@@ -169,10 +177,11 @@ const useTurnSteps = (): number => {
 /// `Object.is`: a fresh object would re-render this message on every store update,
 /// which during a run is every token.
 export function useStepFold(): "none" | "step" | "head" | "answer" {
-  const head = useAuiState(isHeadOf);
-  const foldable = useAuiState(isFoldableOf);
+  const turnOf = useTurnOf();
+  const head = useAuiState((s) => isHeadOf(s, turnOf));
+  const foldable = useAuiState((s) => isFoldableOf(s, turnOf));
   const folded = useTurnFolded();
-  const conclusion = useAuiState(isConclusionOf);
+  const conclusion = useAuiState((s) => isConclusionOf(s, turnOf));
 
   if (!foldable) return "none";
   if (head) return "head";
@@ -183,40 +192,44 @@ export function useStepFold(): "none" | "step" | "head" | "answer" {
 /// Whether the turn is folded right now: what the summary line's chevron and
 /// `aria-expanded` report, and what the head's own content follows.
 export function useTurnFolded(): boolean {
-  const key = useAuiState(turnKeyOf);
-  const foldable = useAuiState(isFoldableOf);
+  const turnOf = useTurnOf();
+  const key = useAuiState((s) => turnKeyOf(s, turnOf));
+  const foldable = useAuiState((s) => isFoldableOf(s, turnOf));
   const unfolded = useTurnOpened(key);
   return foldable && !unfolded;
 }
 
-/// The first ASSISTANT message after this one -- where the turn this message stands in front
+/// The first message of the NEXT turn after this one -- where the turn this message stands in front
 /// of begins. -1 when there is none.
 ///
-/// IT HAS TO LOOK FORWARD because a CARD-ONLY user message is not a step of any turn:
-/// `turnBounds` groups assistant messages, and a user message is a turn of its own (`first ===
-/// last`, so nothing to fold). A session's opening blocks arrive exactly that way.
-const nextTurnIndex = (s: AssistantState): number => {
+/// IT HAS TO LOOK FORWARD because a CARD-ONLY user message belongs to no turn at all: `turnOf`
+/// puts it in none, so `first === last` for it and there is nothing to fold. A session's opening
+/// blocks arrive exactly that way.
+const nextTurnIndex = (s: AssistantState, turnOf: TurnOf): number => {
   const { messages } = s.thread;
   for (let i = s.message.index + 1; i < messages.length; i += 1) {
-    if (messages[i]?.role === "assistant") return i;
+    if (turnOf(messages[i] ?? {}) !== undefined && turnStepBounds(messages, i, turnOf).first === i) {
+      return i;
+    }
   }
   return -1;
 };
 
-/// The name of the turn that follows this message, by its first message's id -- the same name
-/// that turn's own summary line folds and unfolds.
-const followingTurnKeyOf = (s: AssistantState): string => {
-  const i = nextTurnIndex(s);
+/// The name of the turn that follows this message -- the same name that turn's own summary line
+/// folds and unfolds.
+const followingTurnKeyOf = (s: AssistantState, turnOf: TurnOf): string => {
+  const i = nextTurnIndex(s, turnOf);
   if (i < 0) return "";
   const { messages } = s.thread;
-  return messages[turnBounds(messages, i).first]?.id ?? "";
+  const { first } = turnStepBounds(messages, i, turnOf);
+  return turnOf(messages[first] ?? {}) ?? messages[first]?.id ?? "";
 };
 
-const isFollowingFoldableOf = (s: AssistantState): boolean => {
-  const i = nextTurnIndex(s);
+const isFollowingFoldableOf = (s: AssistantState, turnOf: TurnOf): boolean => {
+  const i = nextTurnIndex(s, turnOf);
   if (i < 0) return false;
   const { messages } = s.thread;
-  const { first, last } = turnBounds(messages, i);
+  const { first, last } = turnStepBounds(messages, i, turnOf);
   return last > first && turnIsSettled(messages, last, s.thread.isRunning);
 };
 
@@ -228,8 +241,9 @@ const isFollowingFoldableOf = (s: AssistantState): boolean => {
 /// A CARD WITH NO TURN AFTER IT IS NEVER HIDDEN (`isFollowingFoldableOf` is false for it):
 /// there is nothing to fold it with, and hiding it would be the view losing a fact.
 export function useFollowingTurnFolded(): boolean {
-  const key = useAuiState(followingTurnKeyOf);
-  const foldable = useAuiState(isFollowingFoldableOf);
+  const turnOf = useTurnOf();
+  const key = useAuiState((s) => followingTurnKeyOf(s, turnOf));
+  const foldable = useAuiState((s) => isFollowingFoldableOf(s, turnOf));
   const unfolded = useTurnOpened(key);
   return foldable && !unfolded;
 }
@@ -244,8 +258,9 @@ export function useFollowingTurnFolded(): boolean {
 /// It is `false` for the running turn and for a turn with no conclusion, which is
 /// exactly the two cases `useStepFold` already answers `"none"`/`"step"` for.
 export function useFoldedAnswer(): boolean {
+  const turnOf = useTurnOf();
   const folded = useTurnFolded();
-  const conclusion = useAuiState(isConclusionOf);
+  const conclusion = useAuiState((s) => isConclusionOf(s, turnOf));
   return folded && conclusion;
 }
 // ------------------------------------------------------------ the summary line
@@ -261,9 +276,10 @@ export function useFoldedAnswer(): boolean {
 /// sitting at the far right, the way the reference this repo is matched against
 /// draws it.
 export const TurnStepsTrigger: FC = () => {
-  const key = useAuiState(turnKeyOf);
+  const turnOf = useTurnOf();
+  const key = useAuiState((s) => turnKeyOf(s, turnOf));
   const folded = useTurnFolded();
-  const steps = useTurnSteps();
+  const steps = useTurnSteps(turnOf);
   // The line's own words live in the `thread` face; `lib/turns.ts` takes the
   // translator rather than holding one, so this row is the one place that binds it
   // to the language the page is speaking.

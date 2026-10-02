@@ -5,6 +5,10 @@
 - **取代** `docs/adr/0006-turn-and-model-call-are-the-two-levels.md` 的**决策 2** 与它「边界（不做的事）」
   第一条（「不做 DSH 的 `step/*`」）。0006 的其余部分——轮与一次模型调用是两个层级、`turn/*` 不进记录、
   `model/*` 两处都在、`seq` 是记录行号、发送点只有一个、不背历史——**一个字不改**。
+- **本决定的「不改轮」那一条被 0017 取代**（2026-10-02）：`docs/adr/0017-the-turn-is-written-down.md` ——
+  `turn/start` / `turn/end` 现在**也进记录**（`harness.edge.turns` 折它、`stats` 数它、`trajectory` 按它
+  分段、客户端读它）。本决定的其余部分（第三级是步、`step/end` 只带 `{:tools …}`、`seq` 是记录行号、
+  一步的四条收口、不背历史）一个字不动。
 - **参照**：`.scratch/step-events/spec.md` 与它的六张票；DSH 的 "Turn flow"
   （<https://deepseek-harness.github.io/deepseek-harness/en/reference/>）：*A step is one model request
   plus the tools it calls. A turn is zero or more steps.*
