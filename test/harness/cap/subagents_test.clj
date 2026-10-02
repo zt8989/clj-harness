@@ -257,6 +257,32 @@
       (is (<= (:delegated-at (row-of)) (:finished-at (row-of))) "and never before it started")
       (is (false? (:running (row-of)))))))
 
+(deftest an-ending-is-announced-after-the-row-says-finished
+  ;; THE ORDER OF THE TWO STEPS IS THE WHOLE OF IT (owner, 2026-10-02). A change hook is
+  ;; handed the pane's answer the moment a delegation moves, and that answer is built from
+  ;; `runs` -- which reads the LIVE table for `:running`. Announcing the ending before the
+  ;; entry leaves that table sends a last frame that still says 运行中, and the row sits
+  ;; there for good (measured in the walkthrough: the managed job read `[exit 0]` while the
+  ;; subagent row went on saying 运行中 已跑 29 秒).
+  (let [parent   "sa-announce-parent"
+        child    "sa-announce-child"
+        frames   (atom [])
+        previous (subagents/set-change-hook!
+                  (fn [_] (swap! frames conj (subagents/runs))))
+        row-of   (fn [] (first (filter #(= child (:thread-id %)) (last @frames))))]
+    (try
+      (project/register-session! parent)
+      (project/begin-subagent! child {:parent parent :subagent "clocks"})
+      (let [end! (subagents/begin! child {:parent parent :subagent "clocks"})]
+        (is (true? (:running (row-of)))
+            "the START is announced while the delegation really is running")
+        (end!)
+        (is (some? (row-of)) "the ENDING is announced too")
+        (is (false? (:running (row-of)))
+            "and that frame already says the delegation is NOT running")
+        (is (integer? (:finished-at (row-of))) "with the clock it finished at"))
+      (finally (subagents/set-change-hook! previous)))))
+
 (deftest the-range-is-what-the-model-is-handed-not-just-what-runs
   ;; Absence from the list is the half a model actually reads: a tool it can see and
   ;; cannot call is a restriction it will hunt a workaround for.
