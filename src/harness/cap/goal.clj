@@ -399,15 +399,20 @@
 (defn edit!
   "Change a goal's WORDS and nothing else: not its phase, and not whether it is armed (the
   reference's rule, and the reason `/goal edit ...` cannot accidentally restart a paused
-  goal). Answers the new snapshot."
-  [thread-id ref objective]
-  (when (nil? thread-id) (no-session!))
-  (let [objective (objective! objective)
-        c         (fenced thread-id ref)]
-    (append-change! thread-id (snapshot (assoc c
-                                               :objective  objective
-                                               :revision   (next-revision c)
-                                               :updated-at (System/currentTimeMillis))))))
+  goal). OPTS may carry `:max-rounds` -- which is still neither the phase nor the permission,
+  and is the one other knob a goal carries. Answers the new snapshot."
+  ([thread-id ref objective] (edit! thread-id ref objective {}))
+  ([thread-id ref objective {:keys [max-rounds]}]
+   (when (nil? thread-id) (no-session!))
+   (let [objective (objective! objective)
+         c         (fenced thread-id ref)]
+     (append-change! thread-id (snapshot (cond-> (assoc c
+                                                        :objective  objective
+                                                        :revision   (next-revision c)
+                                                        :updated-at (System/currentTimeMillis))
+                                                (some? max-rounds)
+                                                (assoc :max-rounds (knob {:max-rounds max-rounds}
+                                                                          :max-rounds (:max-rounds c)))))))))
 
 (defn pause!
   "Active -> paused, and the process stops being allowed to open rounds. Answers the new

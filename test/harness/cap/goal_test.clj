@@ -20,6 +20,7 @@
             [harness.edge.http :as http]
             [harness.edge.replay :as replay]
             [harness.edge.sessions :as sessions]
+            [harness.kernel.tools :as tools]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
             [harness.test-support :as support]))
@@ -73,11 +74,16 @@
              (spit file before :encoding "UTF-8")
              (.delete file))))))
 
-(use-fixtures :once (fn [f] (let [td (sessions/install!)] (f) (td))))
+(use-fixtures :once
+  ;; ONE call: `use-fixtures` REPLACES a type's list rather than adding to it, so two
+  ;; `:once` calls would silently leave only the second one registered.
+  support/with-builtins
+  (fn [f] (let [td (sessions/install!)] (f) (td))))
 
 (use-fixtures :each
   (fn [f]
     (wipe!)
+    (tools/forget-turn!)
     (install-writer!)
     (let [f' (io/file (log-file tid))]
       (when (.exists f') (.delete f')))
@@ -413,3 +419,152 @@
   (testing "a home that writes :session :goal is not refused as an unknown key"
     (with-session! {:goal {:max-rounds 7}}
       (fn [] (is (= 7 (:max-rounds (goal/config tid))))))))
+
+;; -------------------------------------------------------------- the three tools
+;;
+;; THE TOOLS CARRY THE RULES, THEY DO NOT KEEP A SECOND COPY OF THEM: every assertion here is
+;; about what a MODEL gets back -- the fence's pair in the answer, and the refusal's own
+;; sentence. The `:reason` each refusal carries is pinned a layer down (`harness.cap.goal`'s
+;; own tests) and, where it matters, off the var below.
+
+(defn- call
+  "One tool call as THE SEAM runs it: `{:content .. :error ..}`, the shape a model is handed -- the seam turns a body's exception into content rather than throwing."
+  ([name args] (call tid name args))
+  ([thread-id name args]
+   (tools/run! {:id "c" :type "function"
+                :function {:name name :arguments (json/write-str args)}}
+               thread-id)))
+
+(defn- answer [name args] (:content (call name args)))
+(defn- refused? [name args] (:error (call name args)))
+
+;; THE EX-DATA IS ONLY REACHABLE OFF THE VAR: the seam catches a body's exception and hands
+;; the MODEL its message, so a test asserting a `:reason` has to run the body itself.
+(def ^:private update-body @#'harness.cap.tools/t-update-goal)
+(def ^:private create-body @#'harness.cap.tools/t-create-goal)
+
+(defn- body-refusal
+  "`{:reason ..}` for a body that refuses, nil when it answers. ARGS are the WIRE's keys, as a model sends them: the seam parses those into the keyword-keyed map a body takes, so this does the same."
+  [f thread-id args]
+  (try (binding [tools/*thread-id* thread-id]
+         (f (json/read-str (json/write-str args) :key-fn keyword)))
+       nil
+       (catch Exception e {:reason (:reason (ex-data e)) :message (ex-message e)})))
+
+(deftest get_goal-says-there-is-no-goal-rather-than-answering-an-empty-object
+  (let [text (answer "get_goal" {})]
+    (is (str/includes? text "there is no goal"))
+    (is (str/includes? text "create_goal") "and it names the way in")))
+
+(deftest get_goal-hands-the-model-the-pair-the-fence-needs
+  (goal/create! tid "one objective")
+  (let [g    (goal-now)
+        text (answer "get_goal" {})]
+    (is (str/includes? text (:id g)))
+    (is (str/includes? text (str "revision " (:revision g))))
+    (is (str/includes? text (:objective g)))
+    (is (str/includes? text (str "round " (:rounds g) "/" (:max-rounds g))))
+    (is (str/includes? text "update_goal") "and says how to write to it")))
+
+(deftest create_goal-makes-one-for-the-model
+  (let [text (answer "create_goal" {"objective" "把登录模块重构完"})]
+    (is (str/includes? text "created."))
+    (is (str/includes? text "把登录模块重构完"))
+    (is (= "active" (:phase (goal-now))))
+    (is (true? (goal/armed? tid)) "a goal the model created is one this process may push")))
+
+(deftest create_goal-refuses-a-second-unfinished-one-with-a-sentence
+  (call "create_goal" {"objective" "the first"})
+  (let [err (body-refusal create-body tid {"objective" "the second"})]
+    (is (= :goal-exists (:reason err)))
+    (is (str/includes? (:message err) "complete") "and says what to do about it")
+    (is (true? (refused? "create_goal" {"objective" "the second"}))
+        "and the model is handed that sentence rather than a thrown run")))
+
+(deftest two-create_goal-calls-in-one-message-neither-land
+  (tools/register-turn! tid [{:id "c1" :function {:name "create_goal"}}
+                             {:id "c2" :function {:name "create_goal"}}])
+  (let [err (body-refusal create-body tid {"objective" "one of two"})]
+    (is (= :second-create-in-turn (:reason err)))
+    (is (nil? (goal-now)) "and neither of them wrote")))
+
+(deftest update_goal-applies-each-action-to-the-verbs
+  (call "create_goal" {"objective" "before"})
+  (let [g (goal-now)]
+    (testing "edit changes the words"
+      (call "update_goal" {"goal_id" (:id g) "revision" (:revision g)
+                            "action" "edit" "objective" "after"})
+      (is (= "after" (:objective (goal-now)))))
+    (testing "pause stops it, and the model cannot lift it"
+      (let [g (goal-now)]
+        (call "update_goal" {"goal_id" (:id g) "revision" (:revision g) "action" "pause"})
+        (is (= "paused" (:phase (goal-now)))))
+      (let [g   (goal-now)
+            err (body-refusal update-body tid {"goal_id" (:id g) "revision" (:revision g)
+                                               "action" "resume"})]
+        (is (= :paused-by-human (:reason err)))
+        (is (str/includes? (:message err) "person"))))
+    (testing "a person can"
+      (goal/resume! tid (ref-of (goal-now)) {:by :human})
+      (is (= "active" (:phase (goal-now)))))
+    (testing "and complete ends it"
+      (let [g (goal-now)]
+        (call "update_goal" {"goal_id" (:id g) "revision" (:revision g) "action" "complete"})
+        (is (= "completed" (:phase (goal-now))))
+        (is (= [{:role "user" :content "hello"}]
+               (goal/before-llm [{:role "user" :content "hello"}] tid))
+            "and the reminder stops with it")))))
+
+(deftest update_goal-refuses-a-stale-fence-and-says-to-read-again
+  (call "create_goal" {"objective" "fenced"})
+  (let [g     (goal-now)
+        _     (goal/edit! tid (ref-of g) "moved on")
+        err   (body-refusal update-body tid {"goal_id" (:id g) "revision" (:revision g)
+                                             "action" "complete"})]
+    (is (= :goal-moved (:reason err)))
+    (is (str/includes? (:message err) "Read it again"))
+    (is (= "active" (:phase (goal-now))) "and the stale write landed nothing")))
+
+(deftest update_goal-block-reads-the-code-off-the-front-of-the-reason
+  (call "create_goal" {"objective" "blocked eventually"})
+  (let [g (goal-now)]
+    (call "update_goal" {"goal_id" (:id g) "revision" (:revision g) "action" "block"
+                          "blocked_reason" "no-credentials: the API key is gone from .env"})
+    (let [pending (goal-now)]
+      (is (= "active" (:phase pending)) "ONE report does not block it")
+      (is (= "no-credentials" (get-in pending [:pending-block :code])))
+      (is (= "the API key is gone from .env" (get-in pending [:pending-block :reason]))))
+    (testing "and the tool's own answer says the report is pending"
+      (let [g     (goal-now)
+            text  (answer "update_goal" {"goal_id" (:id g) "revision" (:revision g)
+                                         "action" "block"
+                                         "blocked_reason" "no-credentials: still gone"})]
+        (is (str/includes? text "pending blocker no-credentials"))))))
+
+(deftest update_goal-refuses-an-action-nobody-knows
+  (call "create_goal" {"objective" "x"})
+  (let [g   (goal-now)
+        err (body-refusal update-body tid {"goal_id" (:id g) "revision" (:revision g)
+                                           "action" "clear"})]
+    (is (= :unknown-goal-action (:reason err)))
+    (is (str/includes? (:message err) "block"))
+    (is (str/includes? (answer "update_goal" {"goal_id" (:id g) "revision" (:revision g)
+                                              "action" "clear"})
+                       "update_goal's action")
+        "and the model reads that sentence")))
+
+(deftest update_goal-block-wants-a-reason
+  (call "create_goal" {"objective" "x"})
+  (let [g (goal-now)]
+    (is (= :no-blocker-reason
+           (:reason (body-refusal update-body tid {"goal_id" (:id g)
+                                                  "revision" (:revision g)
+                                                  "action" "block"}))))))
+
+(deftest the-goal-tools-refuse-a-call-with-no-session
+  (doseq [[body args] [[create-body {"objective" "x"}]
+                       [update-body {"goal_id" "g" "revision" 1 "action" "pause"}]]]
+    (is (= :no-session (:reason (body-refusal body nil args)))
+        "a nil thread-id is refused by name while the seam turns it into content"))
+  (is (nil? (goal/goal-for nil))
+      "and reading a goal with no session is an answer rather than a refusal"))
