@@ -122,6 +122,10 @@
             [harness.cap.jobs :as jobs]
             [harness.cap.subagents :as subagents]
             [harness.cap.todos :as todos]
+            [harness.cap.goal :as goal]
+            ;; The session's command queue (`.scratch/run-commands`): what the harness is asked
+            ;; to do, as opposed to what the model is asked (that rides `append`).
+            [harness.edge.commands :as commands]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
@@ -1355,6 +1359,11 @@
 ;; again before EVERY model call (ticket 04 of `.scratch/compaction-shape`).
 (declare compact-if-pressured! recover-overflow! relieve-pressure!)
 (declare compact-if-pressured! recover-overflow!)
+;; THE COMMAND MACHINERY LIVES WITH THE FRAMES IT PUSHES (see `goal-send!` and the executor
+;; below), while the route that answers a command-only request is up here with the other
+;; decisions about a run -- so the route names them first.
+(declare drain-commands! execute-command! goal-send! before-llm-with-commands
+         note-tool-event changed-a-file? ended-normally? drive-next-round! start-run)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -1547,6 +1556,12 @@
             ;; own entries cover the birth, when `history` is empty. Reading the log
             ;; instead would be the second truth ADR 0002 refuses.
             (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+            ;; AND A MESSAGE IS THE OTHER WAY BACK FROM `disarmed` (`.scratch/goal` decision 3):
+            ;; opening a conversation is not asking for its goal to carry on, saying something to
+            ;; it is. An active goal this process had stopped pushing (a restart, a rebuild, a fork)
+            ;; is allowed to open the next round again from here -- and a goal that is paused,
+            ;; blocked, completed or cleared is not touched by this (`arm-if-active!`).
+            (when (seq (:append input)) (goal/arm-if-active! thread-id))
             (host/ring!)
             ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
             ;; a text-only model -- or a resume naming an interrupt this process never
@@ -1941,7 +1956,12 @@
                                                                                (if (= "read" name)
                                                                                  content
                                                                                  (spill/slip thread-id content)))
-                                                             :before-llm project/before-llm
+                                                             ;; AND THE COMMANDS THIS SESSION WAS SENT
+                                                             ;; ARE TAKEN AT THIS SEAM, BEFORE the injections are
+                                                             ;; derived: a goal a person has just created (or paused,
+                                                             ;; or cleared) is what THIS call is told about, which is
+                                                             ;; the whole point of draining before deriving.
+                                                             :before-llm before-llm-with-commands
                                                              ;; THE EDGE'S HALF OF THE model/start
                                                              ;; SIGNATURE: the byte measure the
                                                              ;; kernel does not own (see
@@ -1949,6 +1969,10 @@
                                                              :tool-signature context/tool-signature})]
                 (loop []
                   (when-let [ev (async/<!! events)]
+                    ;; WHAT THIS ROUND DID AND HOW IT ENDED, collected as it happens: the round
+                    ;; driver asks those two questions at `:run/done`, and by then the events are
+                    ;; gone (`note-tool-event` is where each answer is kept).
+                    (swap! state note-tool-event ev)
                     ;; WHETHER THIS RUN'S END LEAVES THE TURN OWING ANYTHING, AND WHERE ITS RANGE
                     ;; ENDS (ADR 0006 decision 3). The terminal EVENT arrives before the frame it
                     ;; becomes, so the next line written for this thread IS that frame's line --
@@ -2036,6 +2060,34 @@
                       ;; answers nil).
                       (when-some [snap (numbers-snapshot thread-id)]
                         (project/remember-numbers! thread-id snap))
+                      ;; AND THE GOAL'S TWO END-OF-RUN JOBS, in one guarded block: push what the
+                      ;; model may have changed inside this run, and open the next round if the goal
+                      ;; says so (`.scratch/goal` decisions 3 and 9).
+                      ;;
+                      ;; THE PUSH COMES FIRST because it is about THIS run -- a `create_goal` /
+                      ;; `update_goal` call inside it wrote the record and the row, and a strip
+                      ;; watching the conversation would otherwise keep drawing the goal as it was
+                      ;; until somebody reloaded. One frame per finished run for a session that HAS a
+                      ;; goal, and nothing for one that has none: the payload is the whole answer, so
+                      ;; a repeat costs a client nothing but a redraw it already owed.
+                      ;;
+                      ;; AND THE DRIVER RUNS LAST, after that frame: it may OPEN A RUN, and one
+                      ;; started before this run has finished talking to its clients would be a second
+                      ;; run of one conversation (`refuse-second-run!` exists for exactly that). The
+                      ;; terminal frame has already cleared the registry, which is what makes this
+                      ;; moment the right one.
+                      ;;
+                      ;; NOTHING HERE MAY TAKE A RUN'S ENDING DOWN WITH IT: this is the last thing the
+                      ;; run does, and a store that will not answer would otherwise leave a session
+                      ;; that looks unfinished for the life of the process. The failure is logged and
+                      ;; the run ends as it was going to.
+                      (try
+                        (when (goal/goal-for thread-id)
+                          (goal-send! thread-id))
+                        (when (ended-normally? @state)
+                          (drive-next-round! thread-id run-id (changed-a-file? @state) start-run))
+                        (catch Throwable t
+                          (log/error! :goal/run-end-failed t {:thread-id thread-id :run-id run-id})))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -2774,6 +2826,52 @@
 ;; The door repairs a run that never closed before it reads the record (see the 4b decision
 ;; below); the repair is defined with the read side further down, so it is named here.
 (declare close-off-open-run!)
+(defn- commands-request
+  "The answer to a request that carries COMMANDS and NO QUESTION (`:append` empty) -- the
+  request shape `.scratch/run-commands` decision 1 exists for, and the one that must NOT be
+  answered as 'there is already a run' (it is not a second run: it is a message to the one
+  that is going).
+
+  THREE ANSWERS, and which is which is `harness.edge.commands`'s to say:
+
+    * a command that cannot run without a run in flight -> 409 NAMING IT. `steer` is about
+      'the step in progress' and there is none; an `interrupt` has nothing to ring.
+    * a run of this session IS in flight -> put them in its queue and ACK. The run takes
+      them at its next boundary (`before-llm-with-commands`), which is what makes the
+      order the queue's rather than the socket's.
+    * nothing is running -> run what can be run HERE, in the queue's own priority order,
+      leave the `:wait` commands queued for the next run, and answer what each one did.
+      (`.scratch/run-commands` decision 4 would start a run instead; see the note on
+      `harness.edge.commands/types` for why this build runs them in-process.)
+
+  AN INTERRUPT IS RUNG HERE AND NOT ONLY QUEUED, in both of the last two cases: a command
+  can wait for a boundary, and a person pressing stop cannot."
+  [thread-id commands]
+  (let [refusals (commands/cannot-run-alone thread-id commands)]
+    (cond
+      (seq refusals)
+      (api-response 409 {:threadId thread-id
+                         :error    (str/join " " refusals)
+                         :commands refusals})
+
+      (running? thread-id)
+      (do (commands/enqueue! thread-id commands)
+          (when (some #(= "interrupt" (:type %)) commands) (sessions/cancel! thread-id))
+          (api-response 200 {:threadId thread-id
+                             :runId    (running-run-id thread-id)
+                             :queued   (count commands)}))
+
+      :else
+      (do (commands/enqueue! thread-id commands)
+          (when (some #(= "interrupt" (:type %)) commands) (sessions/cancel! thread-id))
+          (api-response 200 {:threadId thread-id
+                             :runId    nil
+                             :queued   0
+                             :commands (commands/drain! thread-id
+                                                          (fn [command]
+                                                            (execute-command! thread-id command))
+                                                          commands/executable?)})))))
+
 (defn- handle-run
   "The door to the run edge: read the request, decide whether this is a run this home
   answers, and hand the rest over.
@@ -2832,6 +2930,15 @@
       (and (some? held) (not (claims/mine? held)))
       (refuse-served-elsewhere! thread-id held)
 
+
+      ;; 3c. A REQUEST THAT CARRIES THE HARNESS'S WORK AND NOT THE MODEL'S (`.scratch/run-commands`
+      ;; decision 1): `commands`, and no `append`. IT IS NOT A SECOND RUN even when one is
+      ;; going -- it is a message to the run that is -- so it is decided BEFORE the refusal
+      ;; below, which exists to stop two runs of one conversation from interleaving. A request
+      ;; that carries BOTH is a run (`append`) and is refused like one. An `:interrupt` among
+      ;; them still rings the switch, so a stop is never merely queued.
+      (and (seq (:commands input)) (not (seq (:append input))))
+      (commands-request thread-id (vec (:commands input)))
       (running? thread-id)
       (refuse-second-run! thread-id)
 
@@ -3593,7 +3700,7 @@
   one only closed the stream, while the run kept going and the record kept growing.
   A conversation with NO run going here is refused BY NAME rather than answered
   quietly -- 'it is already over' and 'it was stopped' are different things to know."
-  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs" "todos"})
+  #{"rebuild" "compact" "fork" "fork-points" "archive" "stats" "trajectory" "sofar" "page" "delegations" "frames" "cancel" "jobs" "todos" "goal"})
 
 (def ^:private project-verbs
   "The verbs this edge serves under /api/projects/<stem>/. The other half of the
@@ -4169,6 +4276,38 @@
   logs with 'somebody looked'."
   [stem]
   (api-response 200 {:threadId stem :todos (todos/items-for stem)}))
+
+(defn- goal-wire
+  "THE GOAL'S WIRE SHAPE, in ONE function: `{:threadId .. :goal <snapshot|null> :armed? ..}`.
+  Every reader of a goal goes through it -- the route, the push frame, and (through the same
+  snapshot) the model's own `get_goal` -- so 'the three places carry the same fields' is true
+  by construction rather than by three people remembering (`harness.cap.goal-test` pins the
+  server's half of it, `ui/test/suites/goal.ts` the client's).
+
+  `armed?` IS BESIDE `goal`, NEVER INSIDE IT (spec decision 3): the goal is the RECORD's, and
+  'may this process open the next round by itself' is THIS PROCESS's, so a client that merged
+  them would draw a goal as 'stopped' after a restart nobody asked about. The question mark is
+  part of the name on the wire too: it is a yes/no about this process, not a field of the
+  goal."
+  [thread-id]
+  (let [tid (str thread-id)]
+    {:threadId tid
+     :goal     (goal/goal-for tid)
+     :armed?   (goal/armed? tid)}))
+
+(defn- goal-get
+  "GET /api/threads/<stem>/goal -- the session's goal as the store has it, plus whether
+  THIS process may open the next round of it (`.scratch/goal` decision 4).
+
+  IT IS THE READ SIDE OF THE GOAL, NOT A COMMAND: the panel owes a snapshot the moment it
+  opens (docs/rules/panel-data.md) and a snapshot is a GET. Writes go the other way -- as a
+  `goal` COMMAND in a run request -- which is why there is no POST here at all.
+
+  NO LOCATE, NO 404, NO AUDIT LINE: the goal is a row keyed by the thread id, so a stem this
+  home has never heard of answers `goal: null` exactly as a session that never had one does
+  (`todos-get` makes the same three decisions for the same reasons)."
+  [stem]
+  (api-response 200 (goal-wire stem)))
 
 (defn- jobs-get
   "GET /api/threads/<stem>/jobs -- the background commands THIS PROCESS is running for
@@ -5265,6 +5404,185 @@
         (doseq [ch channels]
           (mux-send! ch (mux-frame thread-id payload)))))
     nil))
+
+(defn- goal-send!
+  "PUSH the session's goal to every connection watching THREAD-ID -- one frame per change,
+  the whole payload each time.
+
+  THE FOURTH KIND OF FRAME ON THE SESSION'S SOCKET (`{:type goal ..}`), beside a window's
+  frames, a run's AG-UI events and the fact family, and it exists for the reason `task-send!`
+  does: a goal is a ROW and a piece of process memory, not a line of the record with a `seq`
+  to number and replay -- so there is no cursor to catch a reader up with and the whole answer
+  is what a change sends. A CLIENT MUST RECOGNISE THE NAME (`ui/src/lib/mux.ts`'s `familyOf`):
+  a frame no family claims falls through to the run family and is refused by the AG-UI client's
+  schema, which takes the whole run down with it.
+
+  A NO-OP WHEN NOBODY IS WATCHING, which is the ordinary case for a change made from a script
+  or a test: `mux/channels-for` answers nothing and no payload is built."
+  [thread-id]
+  (let [channels (mux/channels-for thread-id)]
+    (when (seq channels)
+      (let [payload (assoc (goal-wire thread-id) :type "goal")]
+        (doseq [ch channels]
+          (mux-send! ch (mux-frame thread-id payload)))))
+    nil))
+
+;; ------------------------------------------------------- the commands a session is sent
+;;
+;; ONE EXECUTOR FOR EVERY COMMAND THIS BUILD KNOWS (`.scratch/run-commands`), reached from the
+;; two boundaries a command can arrive at: a RUN's pre-LLM seam (a command sent while a run is
+;; going) and the ROUTE (a command sent when nothing is running here). THE SAME FUNCTION AT
+;; BOTH, so a command means one thing however it arrived.
+
+(defn- run-goal-command!
+  "One `{:type \"goal\" ..}` command -> the verb it names, as a PERSON (`:by :human`).
+
+  THE ACTIONS ARE THE DESIGN'S OWN (spec decision 10): `create` / `edit` / `pause` / `resume` /
+  `clear`, and `edit` carries the objective without touching the phase. `resume` is the one
+  that has to say WHO asked: a person's resume lifts their own pause and clears a blocked goal,
+  while the model's cannot (`harness.cap.goal/resume!` refuses it by name) -- this is that
+  door, and the only one."
+  [thread-id {:keys [action objective max_goal_rounds goal_id revision]}]
+  (let [ref   {:id goal_id :revision revision}
+        knobs (cond-> {} (some? max_goal_rounds) (assoc :max-rounds max_goal_rounds))]
+    (case (str action)
+      "create" (goal/create! thread-id objective knobs)
+      "edit"   (goal/edit! thread-id ref objective knobs)
+      "pause"  (goal/pause! thread-id ref)
+      "resume" (goal/resume! thread-id ref {:by :human})
+      "clear"  (goal/clear! thread-id ref)
+      (throw (ex-info (str "a goal command's action must be one of create, edit, pause, resume,"
+                           " clear -- it is " (pr-str action) ".")
+                      {:reason :unknown-goal-action :action action})))))
+
+(defn- execute-command!
+  "One command -> nil when it was done, or `{:reason .. :error ..}` saying why not. Every
+  refusal is the capability's OWN sentence: this function adds no rule of its own, which is
+  what keeps a command and a tool from answering differently about the same goal."
+  [thread-id command]
+  (try
+    (case (:type command)
+      ;; THE VERB FIRST, THE FRAME AFTER -- and the frame goes out for `clear` too, where the
+      ;; payload is `goal: null`: a strip that was told nothing would keep drawing the goal
+      ;; somebody just cleared.
+      "goal" (do (run-goal-command! thread-id command)
+                 (goal-send! thread-id))
+      (throw (ex-info (str "no executor for a " (pr-str (:type command)) " command")
+                      {:reason :unknown-command :type (:type command)})))
+    nil
+    (catch Throwable t
+      {:reason (or (:reason (ex-data t)) :command-refused)
+       :error  (ex-message t)})))
+
+(defn- drain-commands!
+  "Run everything queued for THREAD-ID, in the queue's own priority order, and answer what
+  each one did -- a vector of `{:type .. :ok true}` / `{:type .. :reason .. :error ..}`."
+  [thread-id]
+  (commands/drain! thread-id (fn [command]
+                            (let [answer (execute-command! thread-id command)]
+                              (when (map? answer) answer)))))
+
+(defn- refusal-note
+  "A refused command as a message the MODEL (and the conversation column) can read.
+
+  A COMMAND A RUN EXECUTED HAS NO HTTP ANSWER TO CARRY A REFUSAL (`.scratch/run-commands`
+  decision 6: the route that would have is gone), so this is where a refusal becomes visible --
+  the same shape and the same seam as a job's ending (`cap.jobs/before-llm`), because both are
+  'the harness has something to say that the person did not type'."
+  [{:keys [type reason error]}]
+  {:role    "user"
+   :content (str "<system-reminder>\na " (pr-str type) " command was refused: " error
+                 "\n(reason: " (name (or reason :refused)) ")\n</system-reminder>")})
+
+(defn- before-llm-with-commands
+  "The run's pre-LLM step: take the commands this session was sent, run them, and then derive
+  the injections the run owes -- IN THAT ORDER, so a goal a person just created (or paused)
+  is what this very call is told about."
+  [history thread-id]
+  (let [outcomes (drain-commands! thread-id)]
+    (as-> history h
+      (project/before-llm h thread-id)
+      (into h (keep (fn [o] (when-not (:ok o) (refusal-note o))) outcomes)))))
+
+;; ---------------------------------------------------------------- the round driver
+;;
+;; A RUN THAT ENDED NORMALLY, AND A GOAL THAT IS STILL ACTIVE: open the next round, or stop
+;; and say why (`.scratch/goal` decision 9). This is the heaviest and most dangerous part of
+;; the feature -- the SERVER choosing to spend money -- so the four brakes all live here, in
+;; one function, and none of them is optional.
+
+(def ^:private file-editing-tools
+  "THE TOOLS WHOSE SUCCESS IS 'A FILE CHANGED' -- the whole of the driver's evidence that a round made progress. A list rather than a rule, and the cost is stated in the design: A ROUND THAT PUSHED THINGS FORWARD WITH `bash` (a `git apply`, a build that wrote a generated file) counts as NO PROGRESS, and the goal is blocked for it. That is the price of the cheap criterion, and it is recoverable in one word from a person (`/goal resume`). The other direction is worse, and is why the list is not 'anything that is not `read`': a model that keeps READING files is exactly the loop this brake exists to stop."
+  #{"write" "edit" "replace" "insert" "undo_last_replace"})
+
+(defn- note-tool-event
+  "STATE + ONE KERNEL EVENT -> STATE. The driver asks a finished round two questions, and this is where the answers are collected, one event at a time: (1) did it CHANGE A FILE -- one of `file-editing-tools`, entered with outcome `:pass` (the design's own criterion) and not thrown out of execution? A `replace` that refused a stale anchor changed nothing, and counting it as progress is how a model that keeps failing would keep the driver going; (2) did it end ON ITS OWN TWO FEET -- `:run/interrupt` means a person has a decision to make."
+  [state ev]
+  (case (:type ev)
+    :run/interrupt   (assoc state :interrupted? true)
+    :tool/pre-execute
+    (if (and (= :pass (:outcome ev)) (contains? file-editing-tools (:name ev)))
+      (update state :edits (fnil conj #{}) (:id ev))
+      state)
+    :tool/execute
+    (if (and (some? (:error ev)) (contains? (:edits state #{}) (:id ev)))
+      (update state :failed-edits (fnil conj #{}) (:id ev))
+      state)
+    state))
+
+(defn- changed-a-file?
+  "Did the round STATE describes change one? THE ZERO-PROGRESS QUESTION, and it is about THIS round only -- `note-tool-event` collects into the run's own state, which dies with the run."
+  [state]
+  (boolean (seq (remove (:failed-edits state #{}) (:edits state #{})))))
+
+(defn- ended-normally?
+  "Did this run reach a terminal of its OWN (a finished answer), rather than a person stopping it or a failure? `:terminal` is the frame the emitter sent; an INTERRUPT also ends on RUN_FINISHED (`harness.kernel.loop`), so the event is what tells the two apart."
+  [state]
+  (and (= "RUN_FINISHED" (:terminal state)) (not (:interrupted? state))))
+
+(defn- drive-next-round!
+  "THREAD-ID's run RUN-ID has finished: decide whether a goal round opens after it, and open
+  it. OPEN! is the door that starts a run -- the caller passes `start-run` -- which is what
+  lets a test watch the decision without a provider.
+  
+  THE FOUR GATES, each of which SILENTLY STOPS (nothing written, nothing started):
+  
+    active    a paused, blocked or completed goal is one somebody stopped -- for now, or for
+              good -- and the driver does not argue with that.
+    armed     this process's permission, which a restart, a rebuild and a fork all drop, and
+              only a person's message or `resume` puts back.
+    rounds    `rounds < max-rounds`, the fuse. Reaching it leaves the phase ALONE (still
+              active), so the strip can say 'it has run as many rounds as it may'.
+    progress  the round that just ended changed a file. THIS IS THE ONE THAT ACTS: a round
+              that changed nothing gets the goal BLOCKED with `no-progress` -- the reference's
+              642M-token accident is why (`.scratch/goal` decision 9).
+  
+  THE COUNT LANDS IN THE RECORD BEFORE THE RUN STARTS (`note-round!`), so a process that dies
+  mid-round folds back the round it opened rather than losing it."
+  [thread-id run-id progress? open!]
+  (let [g (goal/goal-for thread-id)]
+    (when (and g (= "active" (:phase g)) (goal/armed? thread-id))
+      (cond
+        (>= (long (:rounds g)) (long (:max-rounds g)))
+        (do (log/info! :goal/rounds-exhausted
+                       {:thread-id thread-id :goal (:id g) :rounds (:rounds g)})
+            nil)
+
+        (not progress?)
+        (do (goal/block! thread-id {:id (:id g) :revision (:revision g)}
+                         {:code      "no-progress"
+                          :reason    "the round that just finished changed no file"
+                          :immediate? true})
+            (log/warn! :goal/no-progress {:thread-id thread-id :run-id run-id :goal (:id g)})
+            nil)
+
+        :else
+        (let [g    (goal/note-round! thread-id {:id (:id g) :revision (:revision g)})
+              turn (assoc (goal/round-turn g) :id (str run-id "-goal-round-" (:rounds g)))]
+          (log/info! :goal/round-opened {:thread-id thread-id :run-id run-id
+                                         :goal (:id g) :round (:rounds g)})
+          (open! {:threadId (str thread-id) :append [turn]}
+                 (str (java.util.UUID/randomUUID))))))))
 
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
@@ -7102,6 +7420,7 @@
         [:get "delegations"] (delegations-get stem)
         [:get "frames"]    (frames-get stem)
         [:get "todos"]    (todos-get stem)
+        [:get "goal"]     (goal-get stem)
         (api-response 405 {:error "method not allowed"}))
       (if-some [{:keys [verb stem]} (stem-verb-route "providers" provider-verbs (:uri req))]
         (case [(:request-method req) verb]
@@ -7207,6 +7526,18 @@
                       (Thread. ^Runnable (fn [] (log/info! :shutdown {:root root}))
                                "harness-shutdown"))))
 
+(defn- install-goal-writer!
+  "Hand `harness.cap.goal` THIS namespace's record writer, so a goal change becomes a `goal/change` fact row on the conversation's own file. A RUN ID OF NIL IS THE HONEST ONE: a goal changes outside any run as often as inside one. IT IS ITS OWN FUNCTION RATHER THAN THREE LINES INSIDE `start!` because a test wants the REAL writer without a socket (harness.edge.goal-http-test), and a goal that landed in a fake record would be a test of the fake."
+  []
+  (goal/set-record-writer!
+   (fn [thread-id kind payload]
+     ;; A RUN ID OF NIL IS THE HONEST ONE: a goal changes outside any run as often as inside one
+     ;; (a person's `/goal resume` after a restart has no run in flight).
+     (log! thread-id nil kind payload)))
+  ;; NIL, SO THIS CANNOT BE MISTAKEN FOR A TEARDOWN: `start!` collects thunks it calls on the
+  ;; way out, and a function that ANSWERS the writer is not one of them (see the call there).
+  nil)
+
 (defn start!
   "Start the server and return its stop fn. Default port is 8080.
 
@@ -7257,6 +7588,16 @@
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
+                   ;; THE GOAL'S RECORD DOOR (`.scratch/goal`): a goal change is a FACT on the
+                   ;; conversation's record, and appending a row is THIS namespace's business -- it
+                   ;; resolves WHERE a conversation's file is, writes the file's header and stamps the
+                   ;; row's envelope. The capability that knows what the row SAYS is handed the writer
+                   ;; here, exactly as the subagent runner above is handed over. A run id of nil is the
+                   ;; honest one: a goal changes outside any run as often as inside one (the strip's
+                   ;; command runs in a run, but a `/goal resume` after a restart has no run yet).
+                   ;; IT IS NOT INSTALLED HERE: a teardown is a THUNK, and this one is a
+                   ;; closure -- see `install-goal-writer!` and the call below, beside the record
+                   ;; writer's own step, where a thing that must NOT be called on the way out goes.
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
                    ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
                    ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
@@ -7290,6 +7631,12 @@
     ;; server this process starts, and a suite that starts a hundred must not
     ;; leave a hundred writer threads behind (or stop the one it has).
     (stream/prepare-with! carry-back!)
+    ;; AND THE GOAL'S RECORD DOOR (`.scratch/goal`), beside it and for the same reason: a
+    ;; capability is handed the writer THIS process has -- one writer serves every server the
+    ;; process starts -- and there is nothing to hand back at the end, so it is not in the
+    ;; teardown list above (it was, once, and a test suite that stopped a server called the
+    ;; writer fn as a thunk: `ArityException`, 205 errors in one full run).
+    (install-goal-writer!)
     ;; AND THE RECORD'S FIRST LINE (ticket 06): what a file's header says is the EDGE's to say --
     ;; the row vocabulary is this namespace's (`row-of`) and the conversation's identity is the
     ;; HOME's. The writer only knows WHEN one is due.

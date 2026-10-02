@@ -46,6 +46,31 @@
       "pending": "待处理"
     }
   },
+  "goal": {
+    "phase": {
+      "active": "进行中",
+      "paused": "已暂停",
+      "blocked": "卡住了",
+      "completed": "已完成"
+    },
+    "armed": {
+      "running": "自动续跑中",
+      "stopped": "已停（要人再说一句）"
+    },
+    "rounds": "第 {{round}}/{{max}} 轮",
+    "blocked": "{{code}}：{{reason}}",
+    "edit": {
+      "label": "目标"
+    },
+    "action": {
+      "pause": "暂停",
+      "resume": "恢复",
+      "edit": "编辑",
+      "clear": "清除",
+      "save": "保存",
+      "cancel": "取消"
+    }
+  },
   "error": {
     "details": "详情"
   }

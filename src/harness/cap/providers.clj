@@ -477,10 +477,12 @@
 
 (def ^:private session-keys
   "The keys config.edn's :session section may carry -- the seven harness.edn used to hold,
-  unchanged, because that move was a change of address rather than of meaning. A NAMED SET
-  for the reason the other sections' are: a typo in a key that decides how a session runs
-  must fail by name rather than leave the session behaving as if nothing had been written."
-  #{:editing :compaction :llm :approval :skills :instructions :subagents})
+  unchanged, because that move was a change of address rather than of meaning, PLUS :goal
+  (`.scratch/goal`), the knob that bounds a goal's rounds and how long a blocker has to be
+  reported before it stands. A NAMED SET for the reason the other sections' are: a typo in a
+  key that decides how a session runs must fail by name rather than leave the session
+  behaving as if nothing had been written."
+  #{:editing :compaction :llm :approval :skills :instructions :subagents :goal})
 
 (def ^:private mcp-keys
   "The keys config.edn's :mcp section may carry. One: :servers, the {name declaration}

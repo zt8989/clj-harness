@@ -61,6 +61,7 @@ import { threadMessagesSuite } from "./suites/thread-messages";
 import { timeoutSuite } from "./suites/llm-timeout";
 import { normalizationSuite } from "./suites/normalization";
 import { composerTodosSuite } from "./suites/composer-todos";
+import { goalSuite } from "./suites/goal";
 import { composerStateSuite } from "./suites/composer-state";
 import { composerContextBarSuite } from "./suites/composer-context-bar";
 import { sessionErrorSuite } from "./suites/session-error";
@@ -83,7 +84,7 @@ import { securityPathsSuite } from "./suites/security-paths";
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
 /// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, securityPathsSuite, sessionErrorSuite, trajectorySuite];
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, securityPathsSuite, sessionErrorSuite, goalSuite, trajectorySuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -594,7 +595,18 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// 203 -> 205: the home's statistics are the right-hand column's third state
 /// (`.scratch/global-stats-panel/`) -- the trailing `…` that opens it, and the column itself,
 /// which draws two rankings on sight and folds the token-per-model one away.
-const EXPECTED_CASES = 215;
+///
+/// 215 -> 225: the `goal` suite, appended to `SUITES` -- the goal strip above the composer and
+/// `/goal …` as the composer reads it (`.scratch/goal`, tickets 07 and 08). TEN cases: the empty
+/// state (no goal, zero nodes), the hands each phase-and-arm combination draws, the rounds, the
+/// blocker and the full objective the fold carries, the words from the catalogs in both
+/// languages, the parser's six shapes and its refusals, the read verb's doorbell (`/goal` alone
+/// rings the strip and sends nothing), the fence a typed command names (the goal on screen,
+/// published by the strip), the `goal` frame reaching only the conversation it is about (driven
+/// through the real `deliver` with a stand-in socket), and one source read -- the snapshot, the
+/// frame, the two facts and the reconnect, with no timer anywhere. A press, a fold and a real run
+/// are the browser walkthrough's half.
+const EXPECTED_CASES = 225;
 
 
 let total = 0;

@@ -1,0 +1,28 @@
+{
+  "turns": [
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "g-w1",
+          "name": "write",
+          "arguments": { "path": "goal-walkthrough-scratch.txt", "content": "first edit\n" }
+        }
+      ]
+    },
+    { "content": "第一处写掉了。" },
+    { "content": "这一轮只读：不动任何文件。" },
+    {
+      "content": "",
+      "tool-calls": [
+        {
+          "id": "g-w2",
+          "name": "write",
+          "arguments": { "path": "goal-walkthrough-scratch.txt", "content": "second edit\n" }
+        }
+      ]
+    },
+    { "content": "第二处写掉了。" },
+    { "content": "做完了。" }
+  ]
+}

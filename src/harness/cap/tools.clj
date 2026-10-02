@@ -36,6 +36,7 @@
             [harness.cap.project :as project]
             [harness.cap.skills :as skills]
             [harness.cap.todos :as todos]
+            [harness.cap.goal :as goal]
             [harness.cap.web :as web]
             [harness.cap.web.search :as search]
             [harness.infra.shell :as shell]
@@ -1285,6 +1286,190 @@
   ;; there is no second way to ask for it. `{}` and `[]` are what a schema with
   ;; nothing to declare looks like -- the tool takes an empty object of arguments.
   (tool todo-read-description {} [] t-todo-read))
+
+;; ------------------------------------------- get_goal / create_goal / update_goal
+;;
+;; THE MODEL'S HALF OF A SESSION'S GOAL (`.scratch/goal` decision 4). The RULES are
+;; harness.cap.goal's -- the four phases, the `{id, revision}` fence, which hand may resume
+;; what -- and these three tools only carry them: every refusal a model can act on is raised
+;; THERE, once, and arrives here as the exception's own sentence.
+;;
+;; `get_goal` IS THE FENCE'S FEEDING TROUGH, not a convenience: `update_goal` has to name a
+;; goal id and a revision, so the model reads them off this answer and copies them. That is
+;; why the answer leads with the two and says so, rather than describing a goal in prose.
+
+(def ^:private get-goal-description
+  (str "Read this session's goal as it stands: the objective, its phase (active / paused /"
+       " blocked / completed), how many rounds it has run, and the id and revision every"
+       " update has to name. "
+       "CALL THIS BEFORE update_goal AND COPY ITS goal_id AND revision EXACTLY: a write naming"
+       " a snapshot that has moved is refused by name, and this answer is where the current"
+       " pair comes from. "
+       "A session with no goal answers so in words, rather than with an empty object. A person"
+       " sets a goal with `/goal <objective>`; create_goal is the other way in."))
+
+(def ^:private create-goal-description
+  (str "Create this session's goal: one objective the session is pushed towards across many"
+       " rounds, with a round driver that opens the next round by itself while the goal is"
+       " active. "
+       "USE IT WHEN THE PERSON ASKS FOR WORK THAT WILL TAKE MANY ROUNDS -- in any language, and"
+       " inferred from their own words; it is the same request `/goal <objective>` makes. NOT"
+       " for routine single-turn work: if this turn can finish it, there is no goal to create,"
+       " and a goal that is done before it is read is noise in every later round. "
+       "REFUSED WHEN THE SESSION ALREADY HAS AN UNFINISHED GOAL (`:goal-exists`): finish that"
+       " one with update_goal complete, or tell the person they can clear it. "
+       "Call this at most ONCE per message: there is nothing to merge two goals into."))
+
+(def ^:private update-goal-description
+  (str "Change this session's goal. `goal_id` and `revision` must be the pair get_goal"
+       " answered -- copy them exactly; a stale pair is refused (`:goal-moved`) and the answer"
+       " says where the goal is now, so read it again. "
+       "`action` is one of: "
+       "\"edit\" replaces the objective (and `max_goal_rounds`, when given) and touches"
+       " neither the phase nor the round driver; "
+       "\"pause\" stops the pushing, and either hand may do it; "
+       "\"resume\" only works on an ACTIVE goal this process had stopped carrying on with (a"
+       " restart, a fork) -- a goal a PERSON paused is theirs to resume (`:paused-by-human`),"
+       " and so is a blocked one (`:blocked-needs-a-person`): say what is in the way and stop; "
+       "\"complete\" says the objective is achieved and stops the rounds; "
+       "\"block\" reports an obstacle as `blocked_reason` -- a kebab-case code first, then a"
+       " sentence saying what it is, e.g. \"no-credentials: the API key is gone from .env\"."
+       " ONE REPORT IS NOT ENOUGH: the same code has to come back for `block-rounds` rounds in"
+       " a row (three by default) before the goal counts as blocked, and a DIFFERENT code starts"
+       " the count over. "
+       "You cannot clear a goal: that is a person's (`/goal clear`)."))
+
+(defn- goal-line
+  "SNAPSHOT -> the line (or three) a model reads a goal in: what it is called, where it stands, and
+  what is in the way when something is."
+  [g block-rounds]
+  (str "goal " (:id g) " revision " (:revision g) " -- " (:phase g)
+       ", round " (:rounds g) "/" (:max-rounds g) "\n"
+       "objective: " (:objective g)
+       (when-some [b (:blocked g)]
+         (str "\nblocked by " (:code b) ": " (:reason b)))
+       (when-some [p (:pending-block g)]
+         (str "\npending blocker " (:code p) " (" (:reports p) " of " block-rounds
+              " rounds in a row): " (:reason p)))))
+
+(defn- goal-answer
+  "The WHOLE answer a goal tool gives: where the goal stands, and what an update needs to name."
+  [g]
+  (str (goal-line g (:block-rounds (goal/config kernel-tools/*thread-id*))) "\n"
+       "To change it, call update_goal with goal_id \"" (:id g) "\" and revision "
+       (:revision g) " -- copy both from this answer exactly."))
+
+(defn- t-get-goal
+  "`get_goal`'s body. No session and no goal are two different answers: a nil THREAD-ID is refused by harness.cap.goal, while a session without a goal is told so, with the two ways to get one."
+  [_]
+  (if-some [g (goal/goal-for kernel-tools/*thread-id*)]
+    (goal-answer g)
+    (str "there is no goal on this session. A goal is where a conversation is going across"
+         " many rounds: a person sets one with `/goal <objective>`, and create_goal is the"
+         " model's way in -- for work that will take many rounds, not for this turn's task.")))
+
+(defn- t-create-goal
+  "`create_goal`'s body. The rules are harness.cap.goal/create!'s; the one thing here is the
+  per-MESSAGE rule, because this is the layer that sees a whole message."
+  [args]
+  (when-not (kernel-tools/sole-call-of-its-name? "create_goal")
+    (throw (ex-info (str "this message holds more than one create_goal. There is one goal at a"
+                         " time, so two calls have nothing to merge -- NEITHER was applied. Send"
+                         " one, and change it later with update_goal.")
+                    {:reason :second-create-in-turn})))
+  (let [g (goal/create! kernel-tools/*thread-id*
+                        (:objective args)
+                        (cond-> {}
+                          (some? (:max_goal_rounds args)) (assoc :max-rounds (:max_goal_rounds args))))]
+    (str "created.\n" (goal-answer g))))
+
+(defn- blocker
+  "`blocked_reason` as the model wrote it -> `{:code .. :reason ..}`.
+  
+  THE CODE COMES FIRST: the first token, when it reads as a kebab-case code, names the obstacle
+  and the rest of the string says what it is. A string that does not open with a code is taken
+  whole as the reason under the code `blocked`."
+  [s]
+  (let [s (str/trim (str s))]
+    (when (str/blank? s)
+      (throw (ex-info (str "update_goal's block wants a `blocked_reason`: a kebab-case code"
+                           " naming the obstacle, then a sentence saying what it is (for"
+                           " example \"no-credentials: the API key is gone from .env\").")
+                      {:reason :no-blocker-reason})))
+    (let [[head & more] (str/split s #"\s+" 2)
+          code          (some-> head (str/replace #":$" ""))]
+      (if (re-matches #"[a-z][a-z0-9-]*" (str code))
+        {:code   code
+         :reason (or (not-empty (str/trim (str/join " " more))) code)}
+        {:code "blocked" :reason s}))))
+
+(defn- t-update-goal
+  "`update_goal`'s body: five actions, each of which is one verb in harness.cap.goal. No sole-call
+  rule here -- the fence refuses a second call by itself, because the second one names a
+  revision the first has already moved."
+  [args]
+  (let [tid    kernel-tools/*thread-id*
+        ref    {:id (:goal_id args) :revision (:revision args)}
+        action (str (:action args))]
+    (case action
+      "edit"     (goal/edit! tid ref (:objective args)
+                         (cond-> {}
+                           (some? (:max_goal_rounds args)) (assoc :max-rounds (:max_goal_rounds args))))
+      "pause"    (goal/pause! tid ref)
+      "resume"   (goal/resume! tid ref {:by :model})
+      "complete" (goal/complete! tid ref)
+      "block"    (goal/block! tid ref (blocker (:blocked_reason args)))
+      (throw (ex-info (str "update_goal's action must be one of edit, pause, resume, complete,"
+                           " block -- it is " (pr-str action) ".")
+                      {:reason :unknown-goal-action :action action})))))
+
+(defn- t-update-goal-answer
+  "`update_goal` answers the goal AS IT NOW STANDS, which is not always the snapshot the verb
+  returned: a `resume` on an active-but-disarmed goal changes no field at all (it re-arms this
+  process), so this reads the goal back once and the model always sees one shape."
+  [args]
+  (let [g (t-update-goal args)]
+    (str (goal-answer (goal/goal-for kernel-tools/*thread-id*)) "\n"
+         "(`" (str (:action args)) "` applied.)")))
+
+(register! "get_goal"
+  ;; NO PARAMETERS, and said rather than left out: a goal belongs to the session, so there is
+  ;; no second way to ask for it. `{}` and `[]` are what a schema with nothing to declare
+  ;; looks like -- the tool takes an empty object of arguments.
+  (tool get-goal-description {} [] t-get-goal))
+
+(register! "create_goal"
+  (tool create-goal-description
+        {"objective" {:type "string"
+                      :description (str "One sentence saying where this session is going --"
+                                        " the person's own words, not a plan for this turn.")}
+         "max_goal_rounds" {:type "integer"
+                            :description (str "How many rounds this goal may open before it"
+                                              " stops by itself. Leave it out for the harness"
+                                              " default (" goal/default-max-rounds "): the cap"
+                                              " is a fuse, not a target.")}}
+        [:objective] t-create-goal))
+
+(register! "update_goal"
+  (tool update-goal-description
+        {"goal_id" {:type "string"
+                    :description (str "The goal's id, copied from get_goal's answer verbatim.")}
+         "revision" {:type "integer"
+                     :description (str "The revision get_goal answered, copied verbatim. A"
+                                       " snapshot that has moved is refused.")}
+         "action" {:type "string"
+                   :enum ["edit" "pause" "resume" "complete" "block"]
+                   :description (str "What to do with the goal -- see the tool description")}
+         "objective" {:type "string"
+                      :description (str "The new objective, for action \"edit\".")}
+         "max_goal_rounds" {:type "integer"
+                            :description (str "The new round cap, for action \"edit\".")}
+         "blocked_reason" {:type "string"
+                           :description (str "For action \"block\": a kebab-case code naming"
+                                             " the obstacle, then a sentence saying what it"
+                                             " is -- e.g. \"no-credentials: the API key is"
+                                             " gone from .env\".")}}
+        [:goal_id :revision :action] t-update-goal-answer))
 
 ;; ------------------------------------------------------------------ web_fetch
 ;;
