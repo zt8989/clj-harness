@@ -211,7 +211,7 @@
           ;; Both feature sets now: this store runs BOTH chains' steps -- the
           ;; project/session tables (with `schema_steps` recording them) and the
           ;; four anchor tables.
-          (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+          (is (= ["goals" "hashline_ownership" "hashline_sessions" "hashline_snapshots"
                       "hashline_undo" "messages" "model_calls" "projection_offsets"
                       "projects" "schema_steps" "session_claims"
                       "sessions" "todos" "tool_calls"]
@@ -366,7 +366,7 @@
               (let [fact (last (db/recoveries))]
                 (is (= (str db-file) (:path fact)))
                 (is (seq (:moved fact)))))            (testing "the rebuilt store carries the schema and nothing of the wreck"
-              (is (= ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+              (is (= ["goals" "hashline_ownership" "hashline_sessions" "hashline_snapshots"
                       "hashline_undo" "messages" "model_calls" "projection_offsets"
                       "projects" "schema_steps" "session_claims"
                       "sessions" "todos" "tool_calls"]
@@ -996,6 +996,20 @@
                ;; the name is chosen against the guard below, where `content` would
                ;; both trip it and say less.
                "todos"              #{"thread_id" "items" "updated_at"}
+               ;; THE SESSION'S GOAL (harness.cap.goal). NOT A SECOND TRUTH and not a
+               ;; projected content table either: it is a MATERIALIZED FOLD -- the
+               ;; conversation's `goal/change` fact rows folded to one snapshot, the same
+               ;; relationship `sessions.numbers` has to the model/* family and for the same
+               ;; reasons. TWO HANDS WRITE THE GOAL (a person outside any run, the model inside
+               ;; one) and both ask 'what is it now' between their writes, so the first read is
+               ;; ONE SELECT instead of a walk of the whole record; the fold stays the repair
+               ;; path (`goal-from-records`) and the acceptance that they agree is pinned by a
+               ;; test (`sessions.numbers`'s '折 = 那一行' is the same test). It is written whole,
+               ;; in place, with no history and never queried by element -- which is why it is
+               ;; ONE JSON COLUMN and not a row per change. The column is named `goal` for the
+               ;; same reason `todos.items` is not `content`: a name that trips the guard below
+               ;; would also say less about what it holds.
+               "goals"              #{"thread_id" "goal" "updated_at"}
                ;; WHO IS SERVING A CONVERSATION RIGHT NOW (harness.cap.claims): a
                ;; row per live claim, DELETED when the claim is handed back, and
                ;; rewritten in place when one process takes over from a process
@@ -1070,7 +1084,7 @@
         (let [declared-state-tables #{"projects" "sessions" "schema_steps"
                                       "hashline_snapshots" "hashline_ownership"
                                       "hashline_sessions" "hashline_undo" "todos"
-                                      "session_claims"}
+                                      "goals" "session_claims"}
               ;; THE PROJECTION'S TABLES ARE TABLES TOO (ADR 0008) -- listed here so that 'the store's
               ;; tables are exactly the ones the home declared' keeps meaning something now that two of
               ;; them are content.

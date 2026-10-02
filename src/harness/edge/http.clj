@@ -122,6 +122,7 @@
             [harness.cap.jobs :as jobs]
             [harness.cap.subagents :as subagents]
             [harness.cap.todos :as todos]
+            [harness.cap.goal :as goal]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.frame-bus :as frame-bus]
             [harness.cap.hooks :as cap-hooks]
@@ -1547,6 +1548,12 @@
             ;; own entries cover the birth, when `history` is empty. Reading the log
             ;; instead would be the second truth ADR 0002 refuses.
             (project/remember-send! thread-id (ag/first-user-text (into history (:append input))))
+            ;; AND A MESSAGE IS THE OTHER WAY BACK FROM `disarmed` (`.scratch/goal` decision 3):
+            ;; opening a conversation is not asking for its goal to carry on, saying something to
+            ;; it is. An active goal this process had stopped pushing (a restart, a rebuild, a fork)
+            ;; is allowed to open the next round again from here -- and a goal that is paused,
+            ;; blocked, completed or cleared is not touched by this (`arm-if-active!`).
+            (when (seq (:append input)) (goal/arm-if-active! thread-id))
             (host/ring!)
             ;; A malformed input, an unreadable prompt, a bad config, an image aimed at
             ;; a text-only model -- or a resume naming an interrupt this process never
@@ -7257,6 +7264,15 @@
                    ;; The runner is passed in because running a conversation is this
                    ;; namespace's business, not a capability's.
                    (subagents/install! {:run run-subagent!})
+                   ;; THE GOAL'S RECORD DOOR (`.scratch/goal`): a goal change is a FACT on the
+                   ;; conversation's record, and appending a row is THIS namespace's business -- it
+                   ;; resolves WHERE a conversation's file is, writes the file's header and stamps the
+                   ;; row's envelope. The capability that knows what the row SAYS is handed the writer
+                   ;; here, exactly as the subagent runner above is handed over. A run id of nil is the
+                   ;; honest one: a goal changes outside any run as often as inside one (the strip's
+                   ;; command runs in a run, but a `/goal resume` after a restart has no run yet).
+                   (goal/set-record-writer! (fn [thread-id kind payload]
+                                              (log! thread-id nil kind payload)))
                    ;; THE CONTENT PROJECTION (ADR 0008): a background pass that copies each session's
                    ;; NEW BYTES into the store, OFF THE WRITE PATH, and it is BACK ON (2026-09-29) after
                    ;; a day of being paused -- see `.scratch/memory-hygiene/` tickets 01 (why it was
