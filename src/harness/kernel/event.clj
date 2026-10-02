@@ -201,16 +201,18 @@
   ATTEMPT IS THE ONE THAT JUST FAILED, counting from 1, and LIMIT is the RETRY BUDGET
   for that call (`harness.edn`'s `:llm :idle-timeout-retries`, 3 by default): the two
   together are what a person is told -- 'the 2nd try'. RETRYING? says whether another
-  attempt follows THIS one; false with a budget left over is not a bug, it is `emitted?`
+  attempt follows THIS one; false with a budget left over is not a bug, it is `answered?`
   doing its job (see below), and false with the budget spent is the end of the road --
   the run dies on the same failure the frame just announced.
 
-  EMITTED? IS THE REASON THERE IS SOMETIMES NO RETRY, and it is the honest half of this
-  event: a call that had ALREADY put text or reasoning on the wire cannot be retried,
-  because the client has seen a half-written answer and a second attempt would append
-  to it -- two answers where the model gave one. A timeout with nothing emitted is
-  retried; a timeout AFTER something was emitted ends the run. The line is the user's
-  (question 1 of `.scratch/llm-idle-timeout/spec.md`).
+  ANSWERED? IS THE REASON THERE IS SOMETIMES NO RETRY, and it is the honest half of this
+  event: a call that had ALREADY begun its answer -- text on the wire, or a tool call --
+  cannot be retried, because the client has seen a half-written answer and a second attempt
+  would append to it -- two answers where the model gave one. A timeout with nothing answered
+  is retried; a timeout AFTER the answer had begun ends the run. THINKING IS NOT ANSWERING
+  (2026-10-02): a call that had only been thinking is retried exactly like one that had said
+  nothing at all, and `harness.kernel.loop/answered` is where that is argued. The line is the
+  user's (question 1 of `.scratch/llm-idle-timeout/spec.md`, revised).
 
   THE WIRE TURNS THIS INTO A CUSTOM FRAME THE CLIENT DRAWS AND THE RECORD NEVER KEEPS
   (`harness.edge.ag-ui`): a stall is a fact about a call in flight, and the record is
@@ -219,13 +221,13 @@
   ONE KEY PER THING SAID, AND `:limit` COUNTS RETRIES RATHER THAN TRYING TO COUNT
   ATTEMPTS: the edge hands this layer the same number it hands `harness.edn`, so a
   frame and the config that produced it cannot disagree about what the budget was."
-  [idle-ms attempt limit retrying? emitted?]
+  [idle-ms attempt limit retrying? answered?]
   {:type     :model/timeout
    :idle-ms  idle-ms
    :attempt  attempt
    :limit    limit
    :retrying retrying?
-   :emitted  emitted?})
+   :answered answered?})
 
 (defn run-end [] {:type :run/end})
 

@@ -313,14 +313,15 @@
   "WHAT A MODEL CALL THAT WENT QUIET FOR TOO LONG IS REFUSED WITH -- the sentence the run
   ends on, and it names WHICH of the two endings this was.
 
-  A TIMEOUT WITH NOTHING EMITTED IS RETRIABLE, and this is only read once the retries have
-  run out; a timeout AFTER the call had already put something on the wire is not, and the
-  second sentence says why rather than leaving a person to guess at the difference. The
-  reason is not tidiness: a client that has been shown half an answer would be shown the
-  whole thing twice if the call were made again -- the retry appends to the message the
-  first attempt opened."
-  [idle-ms attempt limit emitted?]
-  (if emitted?
+  A TIMEOUT WITH THE ANSWER NOT YET BEGUN IS RETRIABLE -- nothing said at all, or nothing but
+  thinking (`answered`) -- and this is only read once the retries have run out; a timeout
+  AFTER text or a tool call was on the wire is not, and the second sentence says why rather
+  than leaving a person to guess at the difference. The reason is not tidiness: a client that
+  has been shown half an answer would be shown the whole thing twice if the call were made
+  again -- the retry appends to the message the first attempt opened. A thought is not that
+  message, which is why it does not end the run."
+  [idle-ms attempt limit answered?]
+  (if answered?
     (str "the model went quiet" (when idle-ms (str " for " idle-ms " ms"))
          " (attempt " attempt ") after it had already answered part of this turn, so the"
          " run was cut off: that half-written answer cannot be retried without the client"
@@ -418,15 +419,25 @@
             :port     port
             :stopped? (and (some? wake) (identical? port wake))}))))))
 
-(def ^:private arrived
-  "The kernel events that mean THE VENDOR SAID SOMETHING -- the ones a client is handed a
-  frame for. This is the whole input to the idle guard's retry decision (`emitted?` in
-  `model-call-watched`), and it is spelled out rather than asked as 'any event at all'
-  because two of the events on this channel are emitted BY THE LOOP around the call:
-  `:model/start` before the request, and `:model/end` in its catch. Counting those would
-  make every silent call look like one that had already answered -- and an answer already
-  on the client's screen is exactly what forbids a retry."
-  #{:text/delta :reasoning/delta :tool/call})
+(def ^:private answered
+  "The kernel events that mean THE CALL HAD BEGUN ITS ANSWER -- text on the wire, or a tool
+  call -- and so cannot be made again. The whole input to the idle guard's retry decision
+  (`answered?` in `model-call-watched`), and it is spelled out rather than asked as 'any
+  event at all' because two of the events on this channel are emitted BY THE LOOP around the
+  call: `:model/start` before the request, and `:model/end` in its catch. Counting those
+  would make every silent call look like one that had already answered -- and an answer
+  already on the client's screen is exactly what forbids a retry.
+
+  REASONING IS NOT ONE OF THEM (2026-10-02), and that is the difference between THINKING and
+  ANSWERING: a call that had only thought and then went quiet is cut off and tried again,
+  exactly like one that had said nothing at all. The reason a half-written answer forbids a
+  retry -- 'the client would be shown it twice' -- does not reach a half-written thought, and
+  the long silence of a thinking model is where a vendor is most likely to have died. What it
+  costs is the abandoned thought staying on the screen beside the new attempt's, which is
+  honest: frames already sent cannot be recalled. Reasoning is not in the record anyway
+  (`harness.edge.http/reasoning-frame?`, ADR 0009), so the record keeps only the attempt
+  that won."
+  #{:text/delta :tool/call})
 
 (def ^:private alive
   "The kernel events that ARM AND RE-ARM the idle deadline: the call's own boundaries plus
@@ -481,8 +492,9 @@
   its MCP servers, and a server that takes 600 ms to fail would otherwise be read as a
   vendor that had gone quiet (`alive`).
 
-  AND WHAT THE DECISION IS, in one place: a timeout that emitted NOTHING is retried while
-  the budget lasts; a timeout that emitted SOMETHING ends the run, because the half-written
+  AND WHAT THE DECISION IS, in one place: a timeout that had not yet BEGUN THE ANSWER is
+  retried while the budget lasts -- nothing said at all, or nothing but thinking (`answered`);
+  a timeout once text or a tool call is on the wire ends the run, because the half-written
   answer is already on the client's screen (`timeout-sentence`); an ordinary failure is
   rethrown untouched; and a stop still wins over all of it.
 
@@ -505,7 +517,7 @@
             ;; UNARMED UNTIL THE CALL BEGINS -- nil, and not 'now': see `alive`. The
             ;; deadline must not count the vendor's own setup work.
             last-at   (atom nil)
-            seen?     (atom false)
+            answered? (atom false)
             end-seen? (atom false)
             ;; THE ATTEMPT'S OWN STATE OF BEING LISTENED TO (`announced!` reads it): `:open`
             ;; while the vendor may still speak, `:announcing` once this attempt has claimed its
@@ -516,13 +528,13 @@
                         (when (and (not= :dropped @gate) (not (stop/rung? cancel)))
                           (when (contains? alive (:type e))
                             (reset! last-at (System/currentTimeMillis)))
-                          ;; WHAT COUNTS AS 'SAID SOMETHING' IS WHAT THE VENDOR SAID, not
+                          ;; WHAT COUNTS AS HAVING ANSWERED IS WHAT THE VENDOR SAID, not
                           ;; what this layer says around it: `:model/start` and `:model/end`
                           ;; are emitted HERE (before the request and in its catch) and the
-                          ;; one thing they must never do is make a silent call look like one
-                          ;; that had already answered -- a retry would then be refused for a
-                          ;; message the client never saw.
-                          (when (contains? arrived (:type e)) (reset! seen? true))
+                          ;; one thing they must never do is make a call that said only those
+                          ;; look like one that had answered -- a retry would then be refused
+                          ;; for a message the client never saw.
+                          (when (contains? answered (:type e)) (reset! answered? true))
                           (when (= :model/end (:type e)) (reset! end-seen? true))
                           (emit e)))
             ;; THE ONE WAY AN ANSWER REACHES THE HISTORY, THE ACCOUNT AND THE RECORD, handed to
@@ -543,13 +555,13 @@
                                            (catch Throwable t t))))
             answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
         (when (:stopped? answer) (stopped!))
-        (let [value    (:value answer)
-              timed?   (or (:idle? answer) (llm/idle-timeout? value))
-              emitted? @seen?]
+        (let [value  (:value answer)
+              timed? (or (:idle? answer) (llm/idle-timeout? value))]
           (cond
-            ;; NOTHING WAS SAID AND THERE IS BUDGET LEFT: cut the attempt off and try
-            ;; again. Its end is written here because its thread is still running.
-            (and timed? (not emitted?) (< attempt (+ 1 limit)))
+            ;; THE ANSWER HAD NOT BEGUN AND THERE IS BUDGET LEFT: cut the attempt off and
+            ;; try again -- nothing said at all, or nothing but thinking. Its end is written
+            ;; here because its thread is still running.
+            (and timed? (not @answered?) (< attempt (+ 1 limit)))
             ;; DROPPING IT IS A CLAIM ON THE SAME GATE `announced!` CLAIMS, and the old value
             ;; says which way the race went: `:announcing` means the attempt answered while the
             ;; deadline was firing, so its message is already in the history and on the record --
@@ -569,10 +581,10 @@
             (if (= :announcing (reset! gate :dropped))
               (do (reset! gate :announcing) (late))
               (do (cut-off-call! end-seen? emit)
-                  (emit (ev/model-timeout idle-ms attempt limit false emitted?))
-                  (throw (ex-info (timeout-sentence idle-ms attempt limit emitted?)
+                  (emit (ev/model-timeout idle-ms attempt limit false @answered?))
+                  (throw (ex-info (timeout-sentence idle-ms attempt limit @answered?)
                                   {:llm/idle-timeout true :idle-ms idle-ms
-                                   :attempt attempt :limit limit :emitted emitted?}))))
+                                   :attempt attempt :limit limit :answered @answered?}))))
 
             (instance? Throwable value) (throw value)
 

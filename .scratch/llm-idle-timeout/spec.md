@@ -91,7 +91,8 @@ deadline 能把它救出来。它赢了 `alts!!` 之后，这次尝试被**放�
 
 ## 非目标
 
-- **不给「已经出过内容」的那次超时做重试**（问 1 的答案）。
+- **不给「已经出过内容」的那次超时做重试**（问 1 的答案）。**2026-10-02 改了一半**：一律出过正文/工具调用
+  了的才不重试，出过思考的照重试——见文末修订。
 - **不改 stop 的语义**：stop 仍然最高优先（`(:stopped? answer)` 在空闲判定之前），
   被放弃的调用仍然只是「不再听它」。
 - **不把这一帧写进记录、也不在 rebuild 里恢复它**。
@@ -143,3 +144,19 @@ kernel 的那个 deadline。
 
 **代价（照实记）**：一个真死了的调用现在要 30 秒才被放弃，4 次尝试的最坏情形从 ~2 秒变成 ~2 分钟——
 这正是主人要的取舍（宁可等一个慢厂商，也不要一次自伤的 400）。这一帧仍然只上屏、不落盘。
+
+## 修订（2026-10-02）——“出过思考”不再算“已经出过内容”
+
+上面「非目标」的第一条被主人改了：**思考不是内容**。
+
+- 判据从「厂商说过话」收窄成「**答案已经开口**」：`harness.kernel.loop/answered` 只认 `:text/delta` 与
+  `:tool/call`，`:reasoning/delta` 不在里面。`alive`（谁给 deadline 上弦、续弦）**不变**——厂商在吐思考就
+  不是断线。
+- 于是「思考到一半卡住 30 秒」和「一个字都没说」走同一条路：掐掉、重试，默认 3 次（最多 4 次尝试）。
+- 帧上的字段跟着改名：`:emitted` → `:answered`（`harness.kernel.event/model-timeout`、`harness.edge.ag-ui`
+  的 CUSTOM 帧、`ui/src/lib/llm-timeout.ts` 一路改到）。它现在说的是「答案开没开口」，再叫 emitted 就是撒谎。
+- **代价（照实记）**：被放弃的那次思考已经在客户端屏幕上了，帧收不回——重试会在这段思考下面再接一段新的。
+  记录里没这个问题：推理帧本来就不进记录（`harness.edge.http/reasoning-frame?`，ADR 0009），记录只留下赢的那次尝试。
+- 机器门：`test/harness/kernel/loop_test.clj/a-timeout-after-only-thinking-is-retried`；
+  `a-timeout-after-the-answer-had-begun-is-not-retried` 与 `a-timeout-after-only-thinking-is-retried` 两条一起
+  把这条线钉住。
