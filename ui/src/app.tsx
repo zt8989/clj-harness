@@ -1588,11 +1588,24 @@ export function App() {
   // in the left column, and a session that failed is no longer DROPPED. `null` for a
   // session is the ordinary answer (no failure, or one a new run cleared).
   const [sessionErrors, setSessionErrors] = useState<Record<string, SessionFailure>>({});
-  // WHICH VIEW THE COLUMN SHOWS. Session-scoped UI state and deliberately NOT
-  // persisted: it is a way of looking at the conversation in front of you, not a
-  // preference about sessions, and a stored one would surprise a reader on the
-  // next launch.
-  const [view, setView] = useState<"conversation" | "trajectory">("conversation");
+  // WHICH VIEW EACH SESSION'S COLUMN SHOWS, keyed by session -- a map, like
+  // `windows` and `sessionErrors` above. It was a single page-level value once,
+  // and the switch then leaked across sessions: turn one session to the
+  // trajectory and the next one you opened (or minted) arrived already on the
+  // trajectory too. Deliberately NOT persisted, as before: it is a way of
+  // looking at the conversation in front of you, not a preference about
+  // sessions, and a stored one would surprise a reader on the next launch.
+  // A session with no entry reads as `conversation`.
+  const [views, setViews] = useState<Record<string, "conversation" | "trajectory">>({});
+  const viewOf = useCallback(
+    (threadId: string) => views[threadId] ?? "conversation",
+    [views],
+  );
+  const setViewOf = useCallback(
+    (threadId: string, view: "conversation" | "trajectory") =>
+      setViews((prev) => ({ ...prev, [threadId]: view })),
+    [],
+  );
   // WHETHER THE SIDEBAR IS FOLDED AWAY, and it is the PAGE's state rather than the
   // sidebar's for the one reason a component cannot solve: on a NARROW window a folded
   // sidebar is a hidden subtree, so it cannot draw the control that unfolds it -- the
@@ -2117,8 +2130,8 @@ export function App() {
             >
               <SessionColumn
                 threadId={host.id}
-                view={view}
-                onView={setView}
+                view={viewOf(host.id)}
+                onView={(next) => setViewOf(host.id, next)}
                 folded={folded}
                 record={records[host.id] ?? null}
                 window={windows[host.id] ?? null}
