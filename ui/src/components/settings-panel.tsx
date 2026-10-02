@@ -88,7 +88,7 @@ import {
 import { hasKey, splitByKey } from "@/lib/provider-key";
 import { effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
-import { getSettings, type Settings, type Tier } from "@/lib/settings";
+import { getSettings, type Settings } from "@/lib/settings";
 import {
   listSubagents,
   putSubagent,
@@ -103,47 +103,19 @@ import {
 /// `TFunction` import is a TYPE import, so nothing is added to the runtime graph.
 type Translate = TFunction<"settings">;
 
-/// How a tier reads on screen. `catalog` is spelled out rather than shown as the
-/// word: "the provider's default" says what happened, where "catalog" is a name for
-/// a table nobody outside this repo has seen.
-///
-/// THE WORD IS OURS, THE KEY IS THE SERVER'S. `Tier` is the server's vocabulary --
-/// `config` / `session` / `request` / `catalog` -- while "this session" and "本次请求"
-/// are what a reader gets. Each entry therefore closes over its own key, written
-/// literally (`t("tier.session")`), so a tier the server adds cannot render its raw
-/// keyword on screen: a `t(`tier.${tier}`)` would have no sentence to fall back on.
-const TIER_LABELS: Record<Tier, (t: Translate) => string> = {
-  config: (t) => t("tier.config"),
-  session: (t) => t("tier.session"),
-  request: (t) => t("tier.request"),
-  catalog: (t) => t("tier.catalog"),
-};
 
 /// Where a provider came from, in the words a person would use. The three are
 /// different edits -- a built-in, your own vendor, your own patch of a built-in --
 /// and only the second and third are yours to change or remove.
 ///
-/// Same rule as `TIER_LABELS`: `Origin` is the server's keyword, the word is ours,
-/// and each branch writes its own literal key.
+/// THE WORD IS OURS, THE KEY IS THE SERVER'S: `Origin` is the server's keyword, the word
+/// is ours, and each branch writes its own literal key.
 const ORIGIN_LABELS_PROVIDER: Record<Origin, (t: Translate) => string> = {
   builtin: (t) => t("origin.builtin"),
   user: (t) => t("origin.user"),
   "builtin-patched": (t) => t("origin.builtinPatched"),
 };
 
-/// NOTE: the path is shown WHOLE, never shortened to its last segments. A
-/// "…/foo/.clj-harness" would be prettier and would also hide the one thing this
-/// row is for -- the ticket asks for the ABSOLUTE path precisely so a person can
-/// tell which home they are looking at, and two homes ending in the same three
-/// segments is the case that matters most. It wraps instead.
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[7.5rem_1fr] items-baseline gap-x-2 py-0.5">
-      <span className="text-muted-foreground text-xs">{label}</span>
-      <span className="min-w-0 text-xs break-words">{children}</span>
-    </div>
-  );
-}
 
 /// The server's sentence, shown where the thing it is about would have been. One
 /// component, because a refusal in the panel and a refusal in a form have to look
@@ -463,57 +435,11 @@ const LanguageRow: FC = () => {
 // (`test/suites/security-paths.tsx`). See that file for the two-group design.
 
 const GeneralPage: FC<{
-  settings: Settings | null;
   registry: Registry | null;
   onChanged: () => void;
-}> = ({ settings, registry, onChanged }) => {
-  const { t } = useTranslation("settings");
-  const tier = (knob: "provider" | "model" | "reasoning-effort") => settings?.tiers[knob];
+}> = ({ registry, onChanged }) => {
   return (
     <div data-slot="settings-page-general" className="flex flex-col gap-4">
-      {/* The report is ABSENT when it could not be resolved -- and the controls
-          below are still here, which is what makes a broken home fixable from the
-          page that shows it is broken. */}
-      {settings !== null && (
-      <section data-slot="settings-model">
-        <SectionTitle>{t("report.title")}</SectionTitle>
-        <Row label={t("report.provider")}>
-          <code data-slot="settings-provider" className="font-mono">
-            {settings.provider ?? "—"}
-          </code>
-          {settings["display-name"] !== undefined && (
-            <span className="text-muted-foreground"> ({settings["display-name"]})</span>
-          )}
-          {tier("provider") !== undefined && (
-            <span className="text-muted-foreground"> · {TIER_LABELS[tier("provider")!](t)}</span>
-          )}
-        </Row>
-        <Row label={t("report.model")}>
-          <code data-slot="settings-model-id" className="font-mono">
-            {settings.model ?? "—"}
-          </code>
-          {tier("model") !== undefined && (
-            <span className="text-muted-foreground"> · {TIER_LABELS[tier("model")!](t)}</span>
-          )}
-        </Row>
-        <Row label={t("report.reasoning")}>
-          <span data-slot="settings-reasoning">{settings["reasoning-effort"] ?? "—"}</span>
-          {tier("reasoning-effort") !== undefined && (
-            <span className="text-muted-foreground">
-              {" "}
-              · {TIER_LABELS[tier("reasoning-effort")!](t)}
-            </span>
-          )}
-        </Row>
-        {settings["base-url"] !== undefined && (
-          <Row label={t("report.endpoint")}>
-            <code className="text-muted-foreground font-mono break-all">
-              {settings["base-url"]}
-            </code>
-          </Row>
-        )}
-      </section>
-      )}
 
       {registry !== null && <Defaults registry={registry} onChanged={onChanged} />}
 
@@ -1941,7 +1867,7 @@ export const SettingsPanel: FC<{
             )}
 
             {page === "general" && (settings !== null || registry !== null) && (
-              <GeneralPage settings={settings} registry={registry} onChanged={reload} />
+              <GeneralPage registry={registry} onChanged={reload} />
             )}
             {page === "models" && (
               <ModelsPage registry={registry} failure={registryFailure} onChanged={reload} />

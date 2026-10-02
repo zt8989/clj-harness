@@ -35,19 +35,6 @@
     "rereadTitle": "再读一遍这些文件",
     "back": "返回"
   },
-  "report": {
-    "title": "当前生效",
-    "provider": "提供方",
-    "model": "模型",
-    "reasoning": "思考档",
-    "endpoint": "端点"
-  },
-  "tier": {
-    "config": "config.edn",
-    "session": "本会话",
-    "request": "本次请求",
-    "catalog": "提供方的默认"
-  },
   "defaults": {
     "title": "默认档",
     "introLead": "新会话从这里开始——",
