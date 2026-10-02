@@ -462,14 +462,25 @@
     (swap! finished dissoc thread-id)
     (announce! parent)
     (fn end! []
-      ;; THE ENDING IS STAMPED ONLY IF THIS IS STILL THE LIVE DELEGATION (the `id` check
-      ;; below), which is the same rule the removal follows: ending the FIRST delegation must
-      ;; not stop the second one's clock.
-      (when (= id (get-in @live [thread-id :id]))
-        (remember-finished! thread-id)
-        (announce! parent))
-      (swap! live (fn [m] (if (= id (get-in m [thread-id :id])) (dissoc m thread-id) m)))
-      nil)))
+      ;; THE ENTRY LEAVES BEFORE ANYBODY IS TOLD, and that order is the whole of it. A frame
+      ;; built while the entry is still in `live` reports this delegation as STILL RUNNING
+      ;; (`runs` reads the live table for `:running`), so the last word a pane heard about it
+      ;; would be "running" and the row would sit there saying 运行中 for good -- measured
+      ;; against a background delegation, whose pane IS watching while it ends.
+      ;;
+      ;; THE ENDING IS STAMPED ONLY IF THIS WAS STILL THE LIVE DELEGATION (the `id` check),
+      ;; which is the same rule the removal follows: ending the FIRST delegation must not
+      ;; stop the second one's clock. Removal and the `ended?` flag come out of ONE swap, so
+      ;; 'this call removed the entry' and 'this call may announce' cannot disagree.
+      (let [ended? (volatile! false)]
+        (swap! live (fn [m]
+                      (if (= id (get-in m [thread-id :id]))
+                        (do (vreset! ended? true) (dissoc m thread-id))
+                        m)))
+        (when @ended?
+          (remember-finished! thread-id)
+          (announce! parent))
+        nil))))
 
 (defn live-subagent
   "What THREAD-ID is running as, or nil when it is not a subagent thread."
