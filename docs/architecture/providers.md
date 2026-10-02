@@ -2,12 +2,12 @@
 
 `harness.cap.providers` 装着 provider 这件事的两半：**目录**（有哪些厂商与 model）与**谁赢**（本次用什么）。
 
-## 一份配置，四节：`config.edn`
+## 一份配置，六节：`config.edn`
 
-配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好四节——`:default`（三个旋钮的默认档）、
-`:providers`（厂商目录）、`:ui`（界面自己的设置，今天只有 `:language`）与 `:security`（这一家点名的
-**敏感路径**，见下一节注）：
-`:providers`（厂商目录）与 `:ui`（界面自己的设置，今天只有 `:language`）：
+配置家**只有一个文件**：`~/.clj-harness/config.edn`，顶层恰好六节——`:default`（三个旋钮的默认档，
+或一个 inline 描述的 provider）、`:providers`（厂商目录）、`:ui`（界面自己的设置，今天只有 
+`:language`）、`:security`（这一家点名的**敏感路径**）、`:session`（会话怎么跑，以及按模型覆盖它的 
+`:groups`）与 `:mcp`（把工具交给哪些外部程序）：
 
 ```edn
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
@@ -116,6 +116,40 @@ write / edit / glob / grep）落到上面就 park 等一个人点头——**哪�
 `POST /api/model` **先解析后写**：provider 名不在目录里、或 model id 不是该 provider 声明的，当场指名失败、
 session 保持原样、日志里一行不落。先写后败会把一个每轮都跑不起来的配置
 钉在会话上，而报错要等到**下一次** run 才出现。
+
+## 会话分组：`:session` 是默认组，`:groups` 按模型覆盖
+
+`:session` 那一节——editing / compaction / llm / approval / skills / instructions / subagents——
+从前是**整个家的一份答案**；现在它叫**默认组**，并多一个键 `:groups`：
+
+```edn
+{:session
+ {:editing {:mode :hashline}                  ; 默认组：适配所有模型
+  :groups
+  [{:name   "本地小模型"
+    :models [{:provider :local :model "qwen3"}]
+    :editing {:mode :str-replace}
+    :llm     {:idle-timeout-ms 0}}]}}
+```
+
+- **默认组适配所有模型**：`:session` 顶层那七个键就是它，行为与从前逐字节相同。
+- **一个组 = 一个名字 + 它服务的模型 + 要覆盖的块。** 挑组用的是会话**当前解析出的** provider/model
+  （`active-provider`，即三档折叠的结果）：`(:models g)` 里任一 `{:provider :x :model "id"}`
+  命中即算；`:provider` 省略表示「任何厂商的这一个 id」。
+- **逐键合并，文件顺序靠后的赢。** 命中多个组时按顺序依次覆盖；每个块内部也是逐键——只写
+  `{:editing {:grep false}}` 的组保留默认组的 `:mode`。默认组永远在最底下。
+- **模型解析不出来时只回落默认组**（家里还没配 provider、模型没登记），不报错：默认组是地板。
+- **`:subagents` 不是组的键。** 它是这一家的事实（委派工具与面板读同一份名册），不属于某个模型；
+  组里写它会**指名失败**，它照旧在「Subagents」页编辑。
+- **写的一侧**：`POST /api/session {default?, groups?}`。`default` 里某个块写成 `null` 是**删掉**它
+  （与「别动」不同），`groups` 整份替换（`[]` 清空），两个半边都可以缺席。规矩与 `/api/security`
+  一致：先校验整份、再原子落盘 + 一代 `.bak`，被拒时一个字节都不写。JSON 里没有关键字，所以
+  `:editing :mode` 与组里的 `:provider` 在写入时被还原成关键字（`canonical-session-block`）。
+- **读的一侧**：`GET /api/session` 答 `{:default .. :groups .. :path ..}`，是这个家的事实（没有
+  threadId），**一切按文件里的原样**（`~` 也是）——表单编辑的就是文件。某个会话实际落到哪一组是另一个
+  问题，由 `session-config` 按那个会话的模型现算。两件事，两个入口。
+- **设置页**：侧边栏「设置」的「会话行为」页就是这两半的编辑器（默认组 + 分组表，模型从
+  `GET /api/providers` 的目录里选）。
 
 ## api-key
 

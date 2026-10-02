@@ -5937,6 +5937,62 @@
           (api-response 400 {:error error})
           (api-response 200 (security-wire)))))))
 
+(defn- session-wire
+  "providers/session-config-for-panel -> the shape that may leave this process: the two
+  halves of config.edn's :session the Session behaviour page edits -- the DEFAULT
+  group's blocks, and the per-model :groups -- rendered for JSON, and the file they
+  live in."
+  []
+  (let [{:keys [default groups path]} (providers/session-config-for-panel)]
+    {:default (providers/render-config default)
+     :groups  (mapv providers/render-config groups)
+     :path    path}))
+
+(defn- session-get
+  "GET /api/session -- config.edn's :session as the settings panel's Session
+  behaviour page reads it: the DEFAULT group's blocks (what every model is served by)
+  and the per-model :groups, both AS THE FILE HOLDS THEM, plus the file's path.
+
+  A ROUTE OF ITS OWN, for the reason /api/security and /api/language are: this is a fact
+  about the HOME, not about a session, so it is asked with no threadId. Which group a
+  SESSION is served by is a different question, answered from that session's model by
+  harness.cap.providers/session-config.
+
+  READ-ONLY, and leaves no trace -- like GET /api/security and GET /api/settings, only a
+  route that can CHANGE something writes an audit line."
+  [_req]
+  (api-response 200 (session-wire)))
+
+(defn- session-post
+  "POST /api/session {default?, groups?} -- write config.edn's :session the Session
+  behaviour page edits, and answer the section read back in GET's shape.
+
+  TWO HALVES, EITHER MAY BE LEFT OUT: `default` sets the blocks every model is served
+  by (a block written as null REMOVES it), and `groups` replaces the per-model list
+  whole ([] removes them). A half that is absent is left exactly as it was, so a form
+  that changed one group does not have to restate the default group.
+
+  A REFUSED VALUE IS A 400 WITH THE SERVER'S SENTENCE and nothing is written, the rule
+  POST /api/security and POST /api/language keep. The answer is the section READ BACK
+  rather than the body that was sent."
+  [req]
+  (let [parsed (try {:ok (json/read-str (slurp (:body req) :encoding "UTF-8") :key-fn keyword)}
+                    (catch Throwable _ {:bad true}))
+        {:keys [ok bad]} parsed]
+    (cond
+      bad
+      (api-response 400 {:error "request body is not valid JSON"})
+
+      (not (map? ok))
+      (api-response 400 {:error "request body must be a JSON object with default and/or groups"})
+
+      :else
+      (let [answer (try {:ok (providers/set-session-config! ok)}
+                        (catch Throwable t {:error (ex-message t)}))]
+        (if-some [error (:error answer)]
+          (api-response 400 {:error error})
+          (api-response 200 (session-wire)))))))
+
 (defn- settings-get
   "GET /api/settings?threadId=.. -- the read-only settings panel's answer: what
   configuration is in force for this session, where each choice came from, where
@@ -6935,6 +6991,12 @@
     (case (:request-method req)
       :get  (security-get req)
       :post (security-post req)
+      (api-response 405 {:error "method not allowed"}))
+
+    (= "/api/session" (:uri req))
+    (case (:request-method req)
+      :get  (session-get req)
+      :post (session-post req)
       (api-response 405 {:error "method not allowed"}))
 
     (= "/api/settings" (:uri req))

@@ -124,13 +124,19 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 ### 其余旋钮
 
 ```clojure
-;; ~/.clj-harness/config.edn；项目级在 <项目>/config.edn 的 :session，整键替换用户级
+;; ~/.clj-harness/config.edn 的 :session —— 会话怎么跑（默认组，适配所有模型）
 {:editing      {:mode :hashline}                 ; 默认按锚点；:str-replace 是原版 edit
  :instructions {:files ["AGENTS.md"]}            ; 整表替换默认值；相对路径按项目根解析
- :skills       {:roots ["/abs/skills" ".agents/skills"]}}
+ :skills       {:roots ["/abs/skills" ".agents/skills"]}
+
+ ;; :groups 按模型覆盖默认组：命中的组逐键盖上去，文件里靠后的赢
+ :groups [{:name   "本地小模型"
+           :models [{:provider :local :model "qwen3"}]
+           :editing {:mode :str-replace}}]}
 ```
 
-`:editing` 是**唯一逐键**合成的块，全部键与默认值都在 `config.edn.example`。
+`:editing` 是**唯一逐键**合成的块，全部键与默认值都在 `config.edn.example`。默认组与每个分组都
+能在侧边栏「设置」的 **会话行为**（Session behaviour）页里改；哪个会话落到哪一组，由服务器按它跑的模型现算。
 
 - **hook**（`hooks.edn`）：一个 hook 点上一行声明，`:command`（经 shell）或 `:run`（进程内函数，
   只有配置家与本会话能写）。payload 走 stdin JSON，退出码 **0 放行 / 2 阻断**（stderr 回喂模型），

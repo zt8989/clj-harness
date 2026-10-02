@@ -20,6 +20,7 @@
     "general": "General",
     "models": "Models",
     "mcp": "MCP servers",
+    "groups": "会话行为",
     "subagents": "子agent",
     "sessions": "会话"
   },
@@ -175,6 +176,82 @@
     "errorNote": "什么都没写——config.edn 的 :session 与改之前一模一样。",
     "problemLead": "config.edn 的 :session :subagents 块里有认不下来的东西：",
     "problemTail": " 这个会话用的还是那两个内置的。"
+  },
+  "groups": {
+    "title": "会话行为",
+    "intro": "一次会话怎么跑——用哪套文件编辑、什么时候压缩、模型沉默多久算断线、围栏放行哪些路径、读哪些技能与指令。默认组适配所有模型；一个分组点名它服务的模型，并逐键覆盖默认组。某个会话落到哪一组，由服务器按它跑的模型解析。",
+    "defaultTitle": "默认组——适配所有模型",
+    "defaultHint": "这就是 config.edn 自己的 :session。六个块直接编辑——除非下面的分组另有说法，所有模型都由它们服务；:skills / :instructions 留空则沿用内置的。",
+    "groupsTitle": "分组",
+    "groupsHint": "每个分组点名它服务的模型并覆盖默认组；分组没写的块沿用默认组的值。",
+    "add": "新增分组",
+    "loading": "正在读会话行为…",
+    "empty": "还没有分组——所有模型都由默认组服务。",
+    "save": "保存分组",
+    "saveDefault": "保存默认组",
+    "cancel": "取消",
+    "back": "返回",
+    "remove": "删除分组",
+    "removeTitle": "删除这个分组？它的模型会回落到默认组。",
+    "removeAll": "删除全部分组",
+    "name": "名称",
+    "nameHintNew": "这个分组在清单里叫什么——非空且不重复。",
+    "nameHintEdit": "名称只是个标签；保存时整份文件会重写。",
+    "models": "它服务的模型",
+    "modelsHint": "至少选一个。一个不服务任何模型的分组匹配不到会话，会被拒。",
+    "modelsNone": "目录里还没有模型——先去 Models 页加一家厂商。",
+    "servesNothing": "还没有服务任何模型",
+    "where": "写进 {{file}}。",
+    "errorNote": "什么都没写——config.edn 的 :session 与改之前一模一样。",
+    "block": {
+      "editing": "文件编辑",
+      "compaction": "上下文压缩",
+      "llm": "空闲守卫",
+      "approval": "项目围栏",
+      "skills": "技能",
+      "instructions": "指令",
+      "editingDefault": "所有模型都这样编辑文件，除非下面的分组另有说法。",
+      "editingGroup": "开：这个分组的模型这样编辑文件。关：沿用默认组。",
+      "compactionDefault": "所有模型都按这些数字压缩，除非下面的分组另有说法。",
+      "compactionGroup": "开：这个分组的模型这样压缩。关：沿用默认组的比例。",
+      "llmDefault": "所有模型都按这些超时守卫，除非下面的分组另有说法。",
+      "llmGroup": "开：这个分组的模型按这个守卫。关：沿用默认组的超时。",
+      "approvalDefault": "所有模型都用这道围栏，除非下面的分组另有说法。空围栏与不写围栏是一回事，不想加就留空。",
+      "approvalGroup": "开：这个分组的模型用这道围栏。关：沿用默认组。",
+      "skillsDefault": "所有模型都读这些根目录；留空就用内置根目录。",
+      "skillsGroup": "开：这个分组的模型读这些根目录。关：沿用默认组。",
+      "instructionsDefault": "所有模型都读这些文件；留空就用内置的 AGENTS.md。",
+      "instructionsGroup": "开：这个分组的模型读这些文件。关：沿用默认组。"
+    },
+    "editing": {
+      "mode": "实现",
+      "modeHashline": "hashline——读回来带锚点",
+      "modeStrReplace": "str-replace——精确的 old_string",
+      "grep": "grep 工具",
+      "requirePath": "编辑时必须带路径",
+      "strictInput": "严格输入（拒绝，不改正）",
+      "diffContext": "diff 上下文行数"
+    },
+    "compaction": {
+      "threshold": "阈值比例",
+      "retain": "保留比例",
+      "overflowRetries": "超长重试次数",
+      "maxTokens": "摘要输出上限（token）"
+    },
+    "llm": {
+      "idleTimeoutMs": "空闲超时（毫秒）",
+      "idleTimeoutRetries": "空闲重试次数"
+    },
+    "approval": {
+      "strict": "严格——项目里每个路径都挂起",
+      "allow": "额外放行路径（一行一条）"
+    },
+    "skills": {
+      "roots": "技能根目录（一行一条）"
+    },
+    "instructions": {
+      "files": "指令文件（一行一条）"
+    }
   },
   "sessions": {
     "title": "会话",

@@ -20,6 +20,7 @@
     "general": "General",
     "models": "Models",
     "mcp": "MCP servers",
+    "groups": "Session behaviour",
     "subagents": "Subagents",
     "sessions": "Sessions"
   },
@@ -178,6 +179,82 @@
     "errorNote": "Nothing was written — config.edn's :session is exactly as it was.",
     "problemLead": "config.edn's :session :subagents block says something that could not be honoured: ",
     "problemTail": " The built-ins are still what this session uses."
+  },
+  "groups": {
+    "title": "Session behaviour",
+    "intro": "How a session runs — which file-editing implementation it gets, when it compacts, how long a silent model call may sit, what the fence frees, which skills and instructions it reads. The default group serves every model; a group names the models it serves and overrides the default group, key by key. Which group a session gets follows the model it runs on, resolved by the server.",
+    "defaultTitle": "Default group — every model",
+    "defaultHint": "config.edn's own :session. Edit the six blocks directly — every model is served by them unless a group below says otherwise; a :skills / :instructions list left empty keeps the built-in one.",
+    "groupsTitle": "Groups",
+    "groupsHint": "Each group names the models it serves and overrides the default group. A block a group leaves off keeps the default group's value.",
+    "add": "Add group",
+    "loading": "Reading how this session runs…",
+    "empty": "No groups yet — every model is served by the default group.",
+    "save": "Save group",
+    "saveDefault": "Save default group",
+    "cancel": "Cancel",
+    "back": "Back",
+    "remove": "Remove group",
+    "removeTitle": "Remove this group? Its models fall back to the default group.",
+    "removeAll": "Remove all groups",
+    "name": "Name",
+    "nameHintNew": "What this group is called in the list — a non-empty, unique string.",
+    "nameHintEdit": "The name is only a label; the file is rewritten whole on save.",
+    "models": "Models it serves",
+    "modelsHint": "Select one or more. A group with no model cannot match a session, and is refused.",
+    "modelsNone": "No models in the catalog yet — add a provider on the Models page first.",
+    "servesNothing": "Serves no model yet",
+    "where": "Written to {{file}}.",
+    "errorNote": "Nothing was written — config.edn's :session is exactly as it was.",
+    "block": {
+      "editing": "File editing",
+      "compaction": "Compaction",
+      "llm": "Idle guard",
+      "approval": "Project fence",
+      "skills": "Skills",
+      "instructions": "Instructions",
+      "editingDefault": "Every model edits files this way, unless a group below says otherwise.",
+      "editingGroup": "On: this group's models edit files this way. Off: the default group's editing stands.",
+      "compactionDefault": "Every model compacts by these numbers, unless a group below says otherwise.",
+      "compactionGroup": "On: this group's models compact this way. Off: the default group's ratios stand.",
+      "llmDefault": "Every model is guarded by these timeouts, unless a group below says otherwise.",
+      "llmGroup": "On: this group's models are guarded this way. Off: the default group's timeouts stand.",
+      "approvalDefault": "Every model gets this fence, unless a group below says otherwise. An empty fence and no fence are the same fence, so leave it empty to add nothing.",
+      "approvalGroup": "On: this group's models get this fence. Off: the default group's fence stands.",
+      "skillsDefault": "Every model reads these roots; leave it empty to use the built-in ones.",
+      "skillsGroup": "On: this group's models read these roots. Off: the default group's roots stand.",
+      "instructionsDefault": "Every model reads these files; leave it empty to use the built-in AGENTS.md.",
+      "instructionsGroup": "On: this group's models read these files. Off: the default group's files stand."
+    },
+    "editing": {
+      "mode": "Implementation",
+      "modeHashline": "hashline — read returns anchors",
+      "modeStrReplace": "str-replace — an exact old_string",
+      "grep": "grep tool",
+      "requirePath": "require path on an edit",
+      "strictInput": "strict input (refuse, do not fix)",
+      "diffContext": "diff context lines"
+    },
+    "compaction": {
+      "threshold": "Threshold ratio",
+      "retain": "Retain ratio",
+      "overflowRetries": "Overflow retries",
+      "maxTokens": "Summary output cap (tokens)"
+    },
+    "llm": {
+      "idleTimeoutMs": "Idle timeout (ms)",
+      "idleTimeoutRetries": "Idle retries"
+    },
+    "approval": {
+      "strict": "Strict — every project path parks",
+      "allow": "Extra free paths (one per line)"
+    },
+    "skills": {
+      "roots": "Skill roots (one per line)"
+    },
+    "instructions": {
+      "files": "Instruction files (one per line)"
+    }
   },
   "sessions": {
     "title": "Conversations",

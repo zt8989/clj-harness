@@ -2113,6 +2113,123 @@
         (is (str/includes? (ex-message e) ":mcp")
             "and where the MCP servers go")))))
 
+;; ------------------------------------------------------- the :session :groups
+
+(defn- groups-config
+  "config.edn text for SESSION -- an EDN :session map -- over a two-model :alpha
+  vendor. `pr-str` rather than a template string, so a case writes the shape it
+  means and the test's own quoting cannot decide the answer."
+  [session]
+  (pr-str {:default   {:provider :alpha :model "one"}
+           :providers {:alpha {:protocol :openai-completions
+                               :base-url "https://alpha/v1"
+                               :model    "one"
+                               :models   {"one" {:input #{:text} :output #{:text}}
+                                          "two" {:input #{:text} :output #{:text}}}}}
+           :session   session}))
+
+(defn- with-groups [session f]
+  (with-config-text (groups-config session) f))
+
+(deftest a-group-overrides-the-default-group-for-the-model-it-serves
+  (with-groups {:editing {:mode :hashline :grep true}
+                :groups [{:name "replace-editing"
+                          :models [{:provider :alpha :model "two"}]
+                          :editing {:grep false}}]}
+    (fn []
+      (testing "a session on a model no group serves gets the default group"
+        (providers/set-override! "grp-one" {:model "one"})
+        (try (is (= {:editing {:mode :hashline :grep true}}
+                    (providers/session-config "grp-one")))
+             (finally (providers/set-override! "grp-one" nil))))
+      (testing "a served model gets the group's block laid over, KEY BY KEY"
+        ;; The group named only :grep; :mode is still the default group's, which is
+        ;; what makes 'change one knob' a thing a group can say.
+        (providers/set-override! "grp-two" {:model "two"})
+        (try (is (= {:editing {:mode :hashline :grep false}}
+                    (providers/session-config "grp-two")))
+             (finally (providers/set-override! "grp-two" nil))))
+      (testing "and a nil thread asks the home's own answer -- the default group"
+        (is (= {:editing {:mode :hashline :grep true}} (providers/session-config)))))))
+
+(deftest a-group-may-match-by-model-id-alone
+  ;; Leaving :provider out says 'this id, from whoever serves it' -- the same
+  ;; endpoint reached through two vendors is one model to a person.
+  (with-groups {:groups [{:name "by-id" :models [{:model "two"}]
+                          :llm {:idle-timeout-ms 7}}]}
+    (fn []
+      (providers/set-override! "grp-two" {:model "two"})
+      (try (is (= {:llm {:idle-timeout-ms 7}} (providers/session-config "grp-two")))
+           (finally (providers/set-override! "grp-two" nil))))))
+
+(deftest a-later-matching-group-wins-a-key-two-groups-name
+  (with-groups {:llm {:idle-timeout-ms 1}
+                :groups [{:name "first"  :models [{:model "two"}] :llm {:idle-timeout-ms 2}}
+                          {:name "second" :models [{:model "two"}] :llm {:idle-timeout-ms 3}}]}
+    (fn []
+      (providers/set-override! "grp-two" {:model "two"})
+      (try (is (= 3 (get-in (providers/session-config "grp-two") [:llm :idle-timeout-ms]))
+               "file order: the last group that names a key wins it")
+           (finally (providers/set-override! "grp-two" nil))))))
+
+(deftest a-malformed-group-fails-by-name
+  (doseq [[what raw needle]
+          [["an unknown key"        {:session {:groups [{:name "g" :models [{:model "two"}] :editng {}}]}} :editng]
+           ["a missing name"        {:session {:groups [{:models [{:model "two"}]}]}} :name]
+           ["an empty name"         {:session {:groups [{:name "" :models [{:model "two"}]}]}} :name]
+           ["no models"             {:session {:groups [{:name "g" :models []}]}} :models]
+           ["models not a list"     {:session {:groups [{:name "g" :models {:model "two"}}]}} :models]
+           ["a model with no id"    {:session {:groups [{:name "g" :models [{}]}]}} :model]
+           ["groups not a list"     {:session {:groups {:name "g"}}} :groups]
+           ["a block that is not a map" {:session {:groups [{:name "g" :models [{:model "two"}] :editing 3}]}} :editing]
+           ["a duplicated name"     {:session {:groups [{:name "g" :models [{:model "two"}]}
+                                                           {:name "g" :models [{:model "two"}]}]}} "twice"]]]
+    (with-config-text (pr-str raw)
+      (fn []
+        (let [e (try (providers/config) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e) (str what " must fail"))
+          (when e
+            (is (str/includes? (ex-message e) (name needle))
+                (str what " names " (name needle)))))))))
+
+(deftest set-session-config-writes-the-default-group-and-the-groups
+  (with-groups {:editing {:mode :hashline}}
+    (fn []
+      (providers/set-session-config!
+       {:default {:llm {:idle-timeout-ms 5}}
+        :groups  [{:name "g"
+                   :models [{:provider "alpha" :model "two"}]
+                   :editing {:mode "str-replace" :grep false}}]})
+      (testing "the wire's two strings come back as the keywords the file holds"
+        (let [{:keys [default groups]} (providers/session-config-for-panel)]
+          (is (= {:editing {:mode :hashline} :llm {:idle-timeout-ms 5}} default))
+          (is (= [{:name "g"
+                   :models [{:provider :alpha :model "two"}]
+                   :editing {:mode :str-replace :grep false}}] groups))))
+      (testing "a block written as null is REMOVED, and a block left out is untouched"
+        (providers/set-session-config! {:default {:editing nil}})
+        (is (= {:llm {:idle-timeout-ms 5}} (:default (providers/session-config-for-panel)))))
+      (testing "an empty groups list removes them"
+        (providers/set-session-config! {:groups []})
+        (is (= [] (:groups (providers/session-config-for-panel)))))
+      (testing "a refused half writes NOTHING"
+        (providers/set-session-config! {:groups [{:name "keep" :models [{:model "two"}]}]})
+        (let [before (slurp (home/config-file) :encoding "UTF-8")
+              e      (try (providers/set-session-config! {:default {:wot 1}}) nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? e))
+          (is (str/includes? (ex-message e) "wot"))
+          (is (= before (slurp (home/config-file) :encoding "UTF-8"))))))))
+
+(deftest set-session-config-leaves-every-other-key-alone
+  (with-groups {:subagents {"mine" {:description "x" :baseline :read-only}}}
+    (fn []
+      (providers/set-session-config! {:default {:llm {:idle-timeout-ms 5}}})
+      (is (= {"mine" {:description "x" :baseline :read-only}}
+             (get-in (providers/config) [:session :subagents]))
+          ":subagents is not this writer's, and a save that dropped it would delete a roster")
+      (is (= {:llm {:idle-timeout-ms 5}} (:default (providers/session-config-for-panel)))))))
+
 ;; ---------------------------------------------------- instruction delivery bit
 
 (def ^:private iu-reg

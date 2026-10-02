@@ -15,7 +15,8 @@
 ;;   :security   the paths this home calls sensitive: a file tool aimed at one of them
 ;;               parks for your approval, even when the path is inside the project
 ;;   :session    how a session runs: editing / compaction / llm / approval / skills /
-;;               instructions / subagents -- what harness.edn used to hold, keys unchanged
+;;               instructions / subagents, plus :groups -- per-model overrides of those
+;;               blocks (what harness.edn used to hold, keys unchanged)
 ;;   :mcp        the outside programs whose tools join this session: {:servers {..}}
 ;;
 ;; SIX SECTIONS, ONE FILE, because they are all facts about this ONE HOME -- which vendors
@@ -38,7 +39,7 @@
 {:default {:provider :openrouter :model "anthropic/claude-sonnet-4.5" :reasoning-effort "high"}
 
  :ui {:language :en}                        ; English (en) or Chinese (zh)
- :security {:sensitive-paths ["~/.ssh/" "~/.aws/" "~/.config/gh/hosts.yml"]}
+ :security {:sensitive-paths ["~/.ssh/" "~/.aws/" "~/.config/gh/hosts.yml"]}  ; added on top of the built-in list; [] adds none
 
  :session
  { :editing
@@ -118,7 +119,26 @@
    ;; true takes the project directory ITSELF out of the allowed set: every file
    ;; tool parks, even for files in the project. The configuration home is never
    ;; tightened.
-   :strict false}}
+   :strict false}
+
+  ;; GROUPS -- THE PER-MODEL OVERRIDES. The blocks above are the DEFAULT group, and
+  ;; they serve EVERY model. Each entry of :groups names the models it serves and lays
+  ;; its own blocks over the default group's, KEY BY KEY: this one says only that
+  ;; sonnet-4.5 edits with str-replace and never gives up on a silent vendor -- the
+  ;; default group's :compaction, :approval and :skills still stand. A session is served
+  ;; by the groups whose :models match the model it resolved to (a later matching group
+  ;; wins a key an earlier also named), and by the default group underneath them all.
+  ;;
+  ;; A group is {:name .. :models [..] ..any of the six blocks above..}. :name is a
+  ;; non-empty, unique string; :models is a non-empty list of {:provider :x :model ".."},
+  ;; where :provider may be left out to say 'this id, from whoever serves it'. :subagents
+  ;; is NOT a group key -- a subagent is a fact about this home, not about a model -- so
+  ;; it keeps its own settings page; a group that names it fails by name.
+  :groups
+  [{:name   "str-replace-editing"
+    :models [{:provider :openrouter :model "anthropic/claude-sonnet-4.5"}]
+    :editing {:mode :str-replace}
+    :llm     {:idle-timeout-ms 0}}]}
 
  :mcp  {:servers {}}
 
