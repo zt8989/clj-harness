@@ -19,11 +19,12 @@
   stays a pure reader and never learns where the process keeps its home. The route
   locates the stem and hands it a file.
 
-  NOTHING HERE IS A SECOND COPY OF A FACT. Turn boundaries, call ordering, the
-  durations and every sum are DERIVED from the lines; none of them is written into
-  the record, because a fact kept twice drifts (see docs/architecture/edge.md on
-  the jsonl table). What the vendor reported is taken VERBATIM -- this is the one
-  place that decides what a vendor key MEANS, and it does not rename it."
+  NOTHING HERE IS A SECOND COPY OF A FACT. A turn is one `turn/start` ROW (ADR 0017),
+  a call is the `model/start` / `model/end` pair, and every sum comes off the lines --
+  none of them is invented here, because a fact kept twice drifts (see
+  docs/architecture/edge.md on the jsonl table). What the vendor reported is taken
+  VERBATIM -- this is the one place that decides what a vendor key MEANS, and it does
+  not rename it."
   (:require [clojure.data.json :as json]
             [harness.kernel.frames :as frames]
             [harness.edge.ag-ui :as ag]
@@ -41,40 +42,6 @@
   again, so the two readers cannot answer differently about the same file."
   [f]
   (replay/read-records f))
-
-;; ---------------------------------------------------------------------- turns
-
-(defn user-ids
-  "The ids of the user message ONE RECORD brings, in order -- for a `message` row, the one
-  message it carries. Ids, not content: two identical user messages are two turns, and the
-  system message changes between runs, so content comparison would be wrong at both ends.
-
-  WHAT A ROW BRINGS IS ITSELF, and the row's `source` says whether it was the person's
-  (`.scratch/jsonl-two-kinds` 票 02: every message the model was handed is its own row, and
-  the envelope says who put it in the array). ONLY `client` COUNTS HERE, because a turn is
-  something a PERSON said: the conversation's birth entries (the session's context and its
-  opening blocks) ride as ordinary user messages too -- `source` = `injection` / `opening`,
-  which `ag/injected?` names -- and counting them would make a session's first run one turn
-  plus one per instruction file. The `input` row this used to read is gone; so is the
-  question 'was this the whole conversation or just what it added', which is what made an
-  old log count differently from a new one.
-
-  PUBLIC, like `incomplete?`, because BOTH READERS need exactly this answer: this
-  namespace counts the turns, harness.edge.trajectory groups the items by them. 'What
-  counts as a user message a run brought' is one rule, and a second copy of it is a second
-  chance to disagree about where one turn ends."
-  [record]
-  (let [message (replay/payload record)]
-    (when (and (= "client" (:source record))
-               (= "user" (:role message)))
-      ;; THE ID IS THE ENVELOPE'S when the record has one -- the payload is the verbatim
-      ;; provider message, and a provider message has no such field (`ag/inbound` strips it
-      ;; on the way in, `.scratch/jsonl-two-kinds` 票 02 puts it back on the way out).
-      ;; `keep :id` WOULD ANSWER NIL HERE: the envelope's id IS the id, so there is no
-      ;; second lookup to make -- the shape `keep` is for.
-      (let [id (or (:id record) (:id message))]
-        (when (some? id) [id])))))
-
 
 ;; --------------------------------------------------------------- model calls
 
@@ -108,8 +75,7 @@
   and only for a call that reported BOTH halves. Half a sum is not a total, and
   presenting one as a total is the same mistake as calling an absent count zero.
 
-  PUBLIC, like `incomplete?` and `user-ids`, because harness.edge.trajectory shows a
-  per-call total on the trajectory's rows and must not spell 'what counts as this
+  PUBLIC, like `incomplete?`, because harness.edge.trajectory shows a
   call's tokens' a second way."
   [usage]
   (or (number-at usage [:total_tokens])
@@ -218,7 +184,7 @@
   "The numbers fold's opening state. PUBLIC, like `stats-step` and `stats-answer`, because a
   SESSION registers this fold (`install!`): the same three functions drive the birth walk,
   every later written row, and the cold read."
-  {:calls [] :pending nil :seen #{} :turns 0 :last-frame nil})
+  {:calls [] :pending nil :turns 0 :last-frame nil})
 
 (defn stats-step
   "One record of the fold: [LINE-INDEX ROW] -> the fold's next state. The line index is
@@ -236,8 +202,8 @@
       whose payload is empty is a call that reported NOTHING (it died mid-stream) -- a
       call, with a duration and no tokens -- and a start with no end at all is still a
       call: it started, and nothing has been reported about it yet.
-    - A TURN IS ONE USER MESSAGE and the output it caused (CONTEXT.md), counted per user
-      message NOT seen before; a resume brings none and opens none.
+    - A TURN IS ONE `turn/start` ROW (ADR 0017) and everything the record writes between
+      it and the next one; a run that brings no new words of a person's opens none.
     - `:last-frame` is the last EVENT row's payload, which is what `:incomplete` is read
       from -- the file's last frame, found in the same walk rather than a second one."
   ;; A NIL ACCUMULATOR STAYS NIL, and that is a statement rather than a guard: it means THIS
@@ -250,12 +216,9 @@
   ([acc _ctx [_ row]]
   (when (some? acc)
   (let [k   (replay/kind row)
-        ids (set (user-ids row))
-        acc (-> acc
-                (update :seen into ids)
-                (update :turns + (count (remove (:seen acc) ids))))
         acc (if (= "event" k) (assoc acc :last-frame (replay/payload row)) acc)]
     (case k
+      "turn/start"  (update acc :turns inc)
       "model/start" (-> acc
                         (cond-> (:pending acc) (update :calls conj {:usage nil :ms nil}))
                         (assoc :pending row))

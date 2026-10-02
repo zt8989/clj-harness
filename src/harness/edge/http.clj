@@ -112,6 +112,7 @@
             [harness.edge.stats :as stats]
             [harness.edge.turn :as turn]
             [harness.edge.trajectory :as trajectory]
+            [harness.edge.turns :as turns]
             ;; The built page, when this process has one: `ui/dist`, served at the
             ;; root. See harness.edge.ui for why the server carries it at all.
             [harness.edge.ui :as ui]
@@ -1794,21 +1795,23 @@
               ;; a resume brings none and opens none, and the conversation's birth rides as user
               ;; messages nobody typed (`speaks-for-a-person?`).
               ;;
-              ;; ITS OPENING LINE IS THE NEXT ONE THE RECORD WILL TAKE: this sits before the rows
-              ;; below, and the write is synchronous (ADR 0007), so `flushed-seq` is that line's
-              ;; number rather than a prediction about a queue. The counts start from zero here
-              ;; and the write stream takes them from there.
-              (when-some [from (when (some speaks-for-a-person? added)
-                                 (stream/flushed-seq thread-id))]
-                (sessions/set-fold-value! thread-id :turn (turn/state-init))
-                (swap! state assoc :turn/from from)
-                (family-send! thread-id {:type "turn/start" :seq from}))
+              ;; AND THE OPENING IS WRITTEN DOWN (ADR 0017): a `turn/start` row of its own, landed
+              ;; BEFORE the question it opens -- the boundary stands in front of what it bounds.
+              ;; ONE ROW PER PERSON'S MESSAGE, because one of those is what opens a turn and a run
+              ;; can carry more than one. Its offset comes back from the write itself (ADR 0007),
+              ;; so the fact carries THE RECORD'S line number like every other fact. The counts
+              ;; start from zero here and the write stream takes them from there.
               (doseq [[i m] (map-indexed vector added)
                       :let [shown (first (ag/provider-messages (sessions/model-view [m])))]]
                 (when (= i updates-at)
                   (doseq [u updates]
                     (request-log! thread-id run-id "message" {:role "developer" :content u} nil
                           {:source "instruction-update"})))
+                (when (speaks-for-a-person? m)
+                  (sessions/set-fold-value! thread-id :turn (turn/state-init))
+                  (let [offset (log! thread-id run-id "turn/start" {})]
+                    (swap! state assoc :turn/from offset)
+                    (family-send! thread-id {:type "turn/start" :seq offset})))
                 (when (some? shown)
                   (request-log! thread-id run-id "message" shown
                         (fn [offset] (sessions/land-at! thread-id run-id (or (:id m) i) offset))
@@ -2034,14 +2037,19 @@
                       (when (:turn/closes? @state)
                         (let [counts (turn/answer (sessions/fold-value thread-id :turn))
                               from   (:turn/from @state)
-                              to     (:turn/to @state)]
+                              to     (:turn/to @state)
+                              ;; THE TURN'S NAME IS DERIVED, NOT MINTED: the record line it opened on.
+                              ;; Nothing has to be kept for it to be stable, the same reason a call's
+                              ;; id is `<run>-m<n>`. It rides the ROW and the fact -- deriving it twice
+                              ;; would be the second spelling this rule exists to avoid.
+                              turnId (when (some? from) (str thread-id "-t" from))
+                              row    (log! thread-id run-id "turn/end"
+                                           (cond-> (merge {:seqFrom from :seqTo to} counts)
+                                             (some? turnId) (assoc :turnId turnId)))]
                           (family-send! thread-id
-                                        (cond-> {:type "turn/end" :seq to
+                                        (cond-> {:type "turn/end" :seq row
                                                  :numbers (merge {:seqFrom from :seqTo to} counts)}
-                                          ;; THE TURN'S NAME IS DERIVED, NOT MINTED: the record line
-                                          ;; it opened on. Nothing has to be kept for it to be
-                                          ;; stable, the same reason a call's id is `<run>-m<n>`.
-                                          (some? from) (assoc :turnId (str thread-id "-t" from)))))
+                                          (some? turnId) (assoc :turnId turnId))))
                         ;; THE NEXT TURN COUNTS FROM ZERO: 'this turn', not 'since this session
                         ;; began'. `set-fold-value!` is the door an on-demand consumer comes
                         ;; through, and the write stream takes it from here.
@@ -4968,12 +4976,19 @@
   THE RECORD'S HEALTH RIDES ALONG, absent when there is nothing to say -- ADR 0002
   decision 6 asks that a write failure reach whoever is looking, and a window is now one
   of the reads somebody looks through (`harness.edge.http/record-health`, the same fact
-  `rebuild` and `sofar` carry)."
-  [thread-id type state {:keys [entries baseSeq hasMore]}]
+  `rebuild` and `sofar` carry).
+
+  AND THE TURNS THE RECORD HAS (ADR 0017): `:turns` is what `harness.edge.turns` folded for this
+  conversation -- or what the record's own rows fold to, when this process does not hold it --
+  each named by the line it opened on. `[]` is the honest answer for a record with no
+  `turn/start` rows, and it is what every record written before that decision answers."
+  [thread-id type state {:keys [entries baseSeq hasMore turns]}]
   (let [entries (vec entries)
         health  (record-health thread-id)]
     (cond-> {:type       type
              :entries    entries
+             :turns      (mapv #(assoc % :turnId (turns/turn-id thread-id (:from %)))
+                               (or turns []))
              :baseSeq    baseSeq
              :hasMore    (boolean hasMore)
              :cursor     (or (:seq (peek entries)) baseSeq)
@@ -5004,6 +5019,10 @@
                            (replay/read-records (:ok located))
                            (vec (replay/lines->records (replay/read-lines (:ok located)))))]
              {:ok    (vec (replay/entries records))
+              ;; THE TURNS THE RECORD HAS (ADR 0017), folded from its own rows: a reader of a
+              ;; conversation this process does NOT hold gets them the same way it gets the entries
+              ;; -- out of the file.
+              :turns (turns/records->turns records)
               :state (name (:state (replay/record-state records)))})
            (catch Throwable t {:error (ex-message t) :status 400})))))
 
@@ -5046,10 +5065,13 @@
                 ;; table fed by a caller rather than by a run): memory is all there is, and it
                 ;; is the fuller one. A session that HAS a record and is running always reads
                 ;; the record -- that is the point of this branch.
-                (= 404 (:status r)) {:ok (:entries e) :live true :state (live-state stem)}
+                (= 404 (:status r)) {:ok (:entries e) :live true :state (live-state stem)
+                                     :turns (sessions/fold-value stem :turns)}
                 (some? (:error r))   {:error (:error r) :status (or (:status r) 400)}
-                :else                {:ok (:ok r) :live true :state (live-state stem)}))
-            {:ok (:entries e) :live true :state (live-state stem)})))
+                :else                {:ok (:ok r) :live true :state (live-state stem)
+                                      :turns (:turns r)}))
+            {:ok (:entries e) :live true :state (live-state stem)
+             :turns (sessions/fold-value stem :turns)})))
     (record-entries stem false)))
 
 (defn- reconcile-numbers!
@@ -5192,7 +5214,11 @@
     ;; that just stopped comes from. A session this process does not hold answers nil from
     ;; `sessions/tail`, and a nil window has nothing to repair.
     (if-some [es (:entries page)]
-      (assoc page :entries (sessions/revive-parks! stem es))
+      (assoc page
+             :entries (sessions/revive-parks! stem es)
+             ;; AND THE TURNS THE SESSION'S OWN FOLD HAS (ADR 0017): a window hands the reader the
+             ;; turns their rows write down, live or historical, on one road.
+             :turns   (sessions/fold-value stem :turns))
       page))))
 
 (defn- number-param
@@ -5236,7 +5262,7 @@
             (api-response 200 (assoc (window-frame stem
                                                    (if (:ok before) "page" "tail")
                                                    (:state read)
-                                                   page)
+                                                   (assoc page :turns (:turns read)))
                                      :live (boolean (:live read))))))))))
 
 
@@ -7688,9 +7714,14 @@
     (jobs/set-change-hook! task-send!)
     (subagents/set-change-hook! task-send!)
     (pressure/install!)
-    ;; AND THE CURRENT TURN'S TWO COUNTS (`harness.edge.turn`), which is what `turn/end` carries
-    ;; (ADR 0006 decision 1). Read at the turn's end, reset at the start of the next one.
+    ;; AND THE WRITER'S OWN COUNT OF THE TURN IT IS IN (`harness.edge.turn`), which is what the
+    ;; `turn/end` row carries (ADR 0006 decision 1). Read at the turn's end, reset at the start of
+    ;; the next one. IT IS NOT A READER: the turns a RECORD has are `harness.edge.turns` below.
     (turn/install!)
+    ;; AND THE TURNS THE RECORD ITSELF HAS WRITTEN DOWN (`harness.edge.turns`, ADR 0017): a window
+    ;; hands its reader the turns the rows say rather than a boundary folded on the way out. Same
+    ;; two seams, same reason -- one rule for the birth walk, the write stream and a cold read.
+    (turns/install!)
     ;; AND THE TWO FOLDS THE COMPOSER'S STRIP READS (ticket 01 of `.scratch/turn-and-model-events`):
     ;; the numbers (`stats`) and the context ring (`context`), each registered on both of a
     ;; session's seams. With them on the session, `stats-get` answers a conversation this process

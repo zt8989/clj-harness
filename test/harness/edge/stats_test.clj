@@ -50,6 +50,13 @@
   [row]
   (json/write-str row))
 
+(defn- turns
+  "THE TURN BOUNDARIES the record writes in front of a person's own words (ADR 0017): one
+  `turn/start` row per message a person sent. A fixture that wants rows with NO turn behind
+  them -- a resume, a conversation's birth -- writes those rows without this."
+  [ts n]
+  (vec (repeat n (record ts "turn/start" {}))))
+
 (defn- input
   "ONE ACTION'S WORDS, as the rows the writer now leaves: a `message` row per message, with
   the entry's own name on the envelope (`:id`) and the row's `source` saying who put it in
@@ -96,7 +103,7 @@
   that closes the run."
   [ts user-id usage-map]
   (let [t (+ ts 1000)]
-    (into (input ts (user user-id (str "ask " user-id)))
+    (into (into (turns ts 1) (input ts (user user-id (str "ask " user-id))))
           [(start t)
            (end (+ t 100) usage-map)
            (frame (+ t 200) "RUN_FINISHED" {:threadId "t" :runId "r1"})])))
@@ -143,13 +150,13 @@
       (is (= 2 (:steps s)) "but it IS a second model call")))
 
   (testing "an input that brings two new user messages brings two turns"
-    (let [s (stats-of (into (input 0 (user "u1" "a") (user "u2" "b"))
+    (let [s (stats-of (into (into (turns 0 2) (input 0 (user "u1" "a") (user "u2" "b")))
                             [(start 100) (end 200 (usage 10 1)) finished]))]
       (is (= 2 (:turns s))))))
 
 (deftest absences-are-not-zeroes
   (testing "a call that reported nothing is a step, and contributes NO tokens"
-    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+    (let [s (stats-of (into (into (turns 0 1) (input 0 (user "u1" "hi")))
                             [(start 100) (end 200 nil) finished]))]
       (is (= 1 (:steps s)))
       (is (= 0 (:stepsWithUsage s)))
@@ -158,7 +165,7 @@
       (is (not (contains? s :outputTokensPerSecond)) "no output count, no rate")))
 
   (testing "a key no call reported is missing from usage; the ones they did are summed"
-    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+    (let [s (stats-of (into (into (turns 0 1) (input 0 (user "u1" "hi")))
                             [(start 100) (end 200 {:prompt_tokens 50 :completion_tokens 5})
                              finished]))]
       (is (= {:totalTokens 55 :promptTokens 50 :completionTokens 5} (:usage s))
@@ -169,7 +176,7 @@
   (testing "a log from before the model lines: turns yes, everything else ABSENT"
     ;; The distinction the strip depends on: no model/start line means 'this record
     ;; cannot tell', NOT 'no call ever happened'.
-    (let [s (stats-of (into (input 0 (user "u1" "hi")) [finished]))]
+    (let [s (stats-of (into (into (turns 0 1) (input 0 (user "u1" "hi"))) [finished]))]
       (is (= 1 (:turns s)))
       (is (not (contains? s :steps)))
       (is (not (contains? s :stepsWithUsage)))
@@ -183,7 +190,7 @@
 
 (deftest the-denominators-are-the-calls-that-reported
   (testing "the cache rate and the speed leave out the calls that could not feed them"
-    (let [s (stats-of (into (input 0 (user "u1" "hi"))
+    (let [s (stats-of (into (into (turns 0 1) (input 0 (user "u1" "hi")))
                             [;; a call with a full report: 80/100 cached, 20 tokens in 100ms
                              (start 100) (end 200 (usage 100 20 80))
                              ;; a call that reported nothing at all: it is a step, and it is
@@ -206,7 +213,7 @@
     ;; The session is being read WHILE it runs: the run has started, one call has
     ;; come back, and the next one is still streaming.
     (let [s (stats-of (into [(frame 0 "RUN_STARTED" {:threadId "t" :runId "r1"})]
-                            (concat (input 0 (user "u1" "hi"))
+                            (concat (turns 0 1) (input 0 (user "u1" "hi"))
                                     [(start 100) (end 200 (usage 100 20 80))
                                      (start 300)])))]  ;; still streaming
       (is (= 2 (:steps s)))
@@ -219,7 +226,7 @@
   ;; mid-flush. replay would refuse the whole file; a statistic is not a rebuild.
   (let [f (java.io.File/createTempFile "stats-lines" ".jsonl")]
     (try
-      (spit f (str (str/join "\n" (map row-json (input 0 (user "u1" "hi")))) "\n"
+      (spit f (str (str/join "\n" (map row-json (into (turns 0 1) (input 0 (user "u1" "hi"))))) "\n"
                    (row-json (start 100)) "\n"
                    "{\"ts\":200,\"runId\":\"r1\",\"type\":\"event\",\"payload\":{\"type\":\"CUSTOM\",\"name\":\"model/e")
             :encoding "UTF-8")
@@ -232,7 +239,7 @@
     (let [f (java.io.File/createTempFile "stats-lines" ".jsonl")]
       (try
         (spit f (str "not json at all\n"
-                     (str/join "\n" (map row-json (input 0 (user "u1" "hi")))) "\n")
+                     (str/join "\n" (map row-json (into (turns 0 1) (input 0 (user "u1" "hi"))))) "\n")
               :encoding "UTF-8")
         (is (thrown-with-msg? Exception #"not valid JSON" (stats/log-stats f))
             "a corrupt line before the last one names itself")

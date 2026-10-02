@@ -95,13 +95,32 @@
   (assoc (record ts "message" {:role "system" :content text})
          :source "system-prompt" :hash "h"))
 
+(defn- turn-start
+  "THE TURN'S OPENING ROW (ADR 0017): a person said something, and the record writes the
+  boundary down BEFORE the words. The row carries nothing of its own -- the turn's name is
+  derived from this line's number."
+  [ts]
+  (record ts "turn/start" {}))
+
 (defn- client
-  "A `message` row for one message the CLIENT sent: the verbatim provider message (id
-  stripped) as the payload, and the envelope carrying the id the session dedupes by plus
-  the `source` that says a person put these bytes in the array."
+  "A `message` row for one message the CLIENT sent -- AND THE `turn/start` ROW IT OPENS
+  (ADR 0017): the person's own words are what opens a turn, so the boundary row comes with
+  them. A fixture that wants a client message with NO turn behind it writes the row itself
+  (`record`).
+
+  The payload is the verbatim provider message (id stripped) and the envelope carries the id
+  the session dedupes by plus the `source` that says a person put these bytes in the array."
   [ts m]
-  (cond-> (record ts "message" (dissoc m :id))
-    (:id m) (assoc :id (:id m) :source "client")))
+  [(turn-start ts)
+   (cond-> (record ts "message" (dissoc m :id))
+     (:id m) (assoc :id (:id m) :source "client"))])
+
+(defn- client-again
+  "A `message` row for a client message that does NOT open a turn: the record writes no
+  `turn/start` row for words it has already seen (ADR 0017 -- the boundary follows the person's
+  OWN new message). A retry, a resume, a restated history."
+  [ts m]
+  (second (client ts m)))
 
 (defn- opening
   "One of the conversation's OPENING blocks as its birth writes it: a `message` row whose id
@@ -477,7 +496,7 @@
                 ;; session holds that entry once (`sessions/append!`), and the fold here must
                 ;; not turn the repeat into this turn's material either
                 (system-prompt 110 "S")
-                (client 100 (user "u1" "first"))
+                (client-again 100 (user "u1" "first"))
                 (client 100 (user "u2" "second"))
                 finished
                 (message 120 (assistant "two"))])]
@@ -841,7 +860,7 @@
                   finished
                   (system-prompt 110 "S")
                   ;; the retry says what it already said: same id, so it is not new material
-                  (client 100 (user "u1" "hi"))
+                  (client-again 100 (user "u1" "hi"))
                   (record 115 "model/start" {:model "m"})
                   (record 116 "model/end" {})
                   finished])]
@@ -982,7 +1001,7 @@
 (deftest a-half-written-last-line-is-dropped-and-the-rest-still-reads
   (let [f (java.io.File/createTempFile "trajectory-lines" ".jsonl")]
     (try
-      (spit f (str (row-json (client 0 (user "u1" "hi"))) "\n"
+      (spit f (str (str/join "\n" (map row-json (client 0 (user "u1" "hi")))) "\n"
                    (row-json (system-prompt 10 "S")) "\n"
                    "{\"ts\":20,\"runId\":\"r1\",\"kind\":\"mess")
             :encoding "UTF-8")
