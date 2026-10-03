@@ -79,13 +79,14 @@ import {
   registryFor,
   removeProvider,
   type DefaultKnobs,
+  type KnownProvider,
   type ModelRow,
   type ModelSuggestion,
   type Origin,
   type ProviderRow,
   type Registry,
 } from "@/lib/providers";
-import { hasKey, splitByKey } from "@/lib/provider-key";
+import { drawnInSettings, hasKey } from "@/lib/provider-key";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
 import { getSettings, type Settings } from "@/lib/settings";
@@ -674,10 +675,16 @@ const blankDraft = (protocols: readonly string[]): Draft => ({
 const ProviderForm: FC<{
   draft: Draft;
   protocols: readonly string[];
+  /// The vendors a person may pick instead of typing an address (the server's
+  /// `:known-providers`): models.dev's reachable vendors plus this harness's own.
+  known: readonly KnownProvider[];
+  /// The provider ids THIS HOME already has, so the picker can say which picks are
+  /// already configured. Names only -- an entry is identified by its id.
+  existing: readonly string[];
   onCancel: () => void;
   onSaved: () => void;
   onRemoved: () => void;
-}> = ({ draft: initial, protocols, onCancel, onSaved, onRemoved }) => {
+}> = ({ draft: initial, protocols, known, existing, onCancel, onSaved, onRemoved }) => {
   const { t } = useTranslation("settings");
   const { t: tErrors } = useTranslation("errors");
   const [draft, setDraft] = useState<Draft>(initial);
@@ -685,6 +692,35 @@ const ProviderForm: FC<{
   const [failure, setFailure] = useState<string | null>(null);
   const [offered, setOffered] = useState<ModelSuggestion[] | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
+  
+  /// WHICH HALF OF THIS FORM A PERSON IS IN: picking a vendor somebody already
+  /// described (with the address that vendor publishes), or describing one by hand.
+  /// 
+  /// A NEW PROVIDER STARTS ON 'known' WHEN THERE IS A LIST TO PICK FROM -- that is the
+  /// shorter path, and the custom half is one click away. An EDIT never shows the
+  /// switch: the entry already exists, so there is nothing to pick.
+  const [mode, setMode] = useState<"known" | "custom">(
+    initial.editing || known.length === 0 ? "custom" : "known",
+  );
+  const taken = new Set(existing);
+  const openAiCompatible = protocols.includes("openai-completions")
+    ? "openai-completions"
+    : (protocols[0] ?? "");
+
+  /// A PICK FILLS THE ENTRY AND CLEARS THE MODELS. The models of a vendor straight
+  /// from models.dev are answered by that same document (`harness.cap.model-data`),
+  /// so rows typed for a previous pick would be a second, staler answer.
+  const pickKnown = (id: string) => {
+    const row = known.find((k) => k.id === id);
+    if (row === undefined) return;
+    set({
+      id: row.id,
+      displayName: row.name ?? "",
+      baseUrl: row["base-url"],
+      protocol: openAiCompatible,
+      models: [],
+    });
+  };
 
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
 
@@ -750,6 +786,56 @@ const ProviderForm: FC<{
 
   return (
     <div data-slot="settings-provider-form" className="flex flex-col gap-3">
+      {/* BUILT-IN OR YOUR OWN, and the choice is only offered when there is something
+          to choose: a new provider, with a vendlist to pick from. It is not a mode
+          that changes what the fields MEAN -- a picked vendor's address stays
+          editable, because a vendor's published URL may carry a placeholder a person
+          must fill in (models.dev spells Cloudflare's as
+          `…/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1`). */}
+      {!draft.editing && known.length > 0 && (
+        <Field
+          label={t("form.source")}
+          slot="settings-provider-source"
+          hint={t("form.sourceHint")}
+        >
+          <div className="flex gap-1">
+            {(["known", "custom"] as const).map((which) => (
+              <Button
+                key={which}
+                variant={mode === which ? "default" : "outline"}
+                size="sm"
+                data-slot={`settings-provider-source-${which}`}
+                onClick={() => setMode(which)}
+              >
+                {which === "known" ? t("form.sourceKnown") : t("form.sourceCustom")}
+              </Button>
+            ))}
+          </div>
+        </Field>
+      )}
+      {mode === "known" && known.length > 0 && (
+        <Field
+          label={t("form.knownVendor")}
+          slot="settings-provider-known"
+          hint={t("form.knownVendorHint")}
+        >
+          <select
+            aria-label={t("form.knownVendor")}
+            data-slot="settings-provider-known-select"
+            className={inputClass}
+            value={known.some((k) => k.id === draft.id) ? draft.id : ""}
+            onChange={(e) => pickKnown(e.target.value)}
+          >
+            <option value="">{t("form.knownVendorPick")}</option>
+            {known.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.name ?? k.id} · {k.id} · {t("form.knownVendorModels", { count: k["model-count"] })}
+                {taken.has(k.id) ? ` · ${t("form.knownVendorTaken")}` : ""}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
       <Field
         label={t("form.providerId")}
         slot="settings-provider-id"
@@ -1062,6 +1148,8 @@ const ModelsPage: FC<{
           key={`${draft.id}-${draft.editing}`}
           draft={draft}
           protocols={registry.protocols}
+          known={registry["known-providers"]}
+          existing={registry.providers.map((p) => p.name)}
           onCancel={() => setDraft(null)}
           onSaved={() => {
             setDraft(null);
@@ -1076,9 +1164,10 @@ const ModelsPage: FC<{
     );
   }
 
-  // ONE RULE, TWO SECTIONS (see `lib/provider-key.ts`): what this home holds a key for
-  // is the list, and what it does not is behind a sentence.
-  const { keyed, unkeyed } = splitByKey(registry.providers);
+  // WHAT THIS PAGE DRAWS (see `lib/provider-key.ts`): the providers this home holds a
+  // key for, plus every entry a person wrote. The rest of the built-in table is not
+  // drawn -- the add form is where a vendor nobody configured is offered.
+  const drawn = registry.providers.filter(drawnInSettings);
   const open = (p: ProviderRow) => setDraft(draftOf(p));
 
   return (
@@ -1094,39 +1183,29 @@ const ModelsPage: FC<{
           <PlusIcon /> {t("models.add")}
         </Button>
       </div>
-      {/* THE PROVIDERS THIS HOME HOLDS A KEY FOR. One that will certainly refuse is
-          not put in front of a person by default -- `lib/provider-key.ts` is the rule,
-          and the composer's model picker reads the same one. */}
+      {/* THE PROVIDERS THIS PAGE IS ABOUT: the ones this home holds a key for, plus the
+          entries a person wrote. NOT the whole built-in table -- Ollama sits in it,
+          needs no key, and has nothing to do with this home (owner, 2026-10-03: 'if
+          there is no API key, do not show it').
+          
+          THE RULE LIVES IN `lib/provider-key.ts` (`drawnInSettings`), because a
+          provider the composer's picker would refuse and a provider this page should
+          draw are two different questions that were one function until now.
+          
+          AND A BUILT-IN NOBODY CONFIGURED IS NOT GONE -- it is offered where it
+          belongs, which is the add form: pick a known vendor, get its address, paste
+          a key. That is the same list models.dev answers for every vendor it knows
+          (`:known-providers`), so nothing this harness ships with became unreachable
+          by hiding the keyless rows. */}
       <div data-slot="settings-providers" className="flex flex-col divide-y">
-        {keyed.map((p) => (
+        {drawn.map((p) => (
           <ProviderListRow key={p.name} provider={p} onOpen={open} />
         ))}
       </div>
-
-      {/* AND THE REST: not offered, but not gone either. One sentence says how many
-          there are and how to bring them back, and opening it gives today's row --
-          clickable, able to take a key, able to save it.
-
-          IT IS A `<details>` AND NOT STATE OF OURS, which is what makes opening and
-          closing it a LAYOUT act rather than a fetch: the rows are already in the DOM,
-          no request goes out to see them, and no state this panel holds -- including a
-          draft mid-edit -- is touched by a disclosure triangle.
-
-          Hiding them outright would take the built-in table's ids off the page, and
-          'add a provider to give openrouter a key' is an action a person takes by
-          reading one. */}
-      {unkeyed.length > 0 && (
-        <details data-slot="settings-providers-unkeyed" className="rounded-md border p-2">
-          <summary className="cursor-pointer text-xs">
-            {t("models.withoutKeys", { count: unkeyed.length })}
-          </summary>
-          <p className="text-muted-foreground mt-1 text-[10px]">{t("models.withoutKeysHint")}</p>
-          <div data-slot="settings-providers-without-keys" className="mt-1 flex flex-col divide-y">
-            {unkeyed.map((p) => (
-              <ProviderListRow key={p.name} provider={p} onOpen={open} />
-            ))}
-          </div>
-        </details>
+      {drawn.length === 0 && (
+        <p data-slot="settings-providers-empty" className="text-muted-foreground text-xs">
+          {t("models.noneYet")}
+        </p>
       )}
     </div>
   );

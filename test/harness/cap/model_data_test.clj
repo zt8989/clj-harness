@@ -60,10 +60,27 @@
                                            "name" "Mystery"
                                            "limit" {"context" 0 "output" 0}}}}})
 
-(defn- write-db! [fetched-at index]
-  (spit (home/modelsdev-cache-file)
-        (json/write-str {:fetched-at fetched-at :models (vec index)})
-        :encoding "UTF-8"))
+(defn- write-db!
+  "A cache file as harness.cap.model-data reads it: the model index -- and, when given,
+  the provider table -- both as PAIRS, because an object's keys come back through
+  `:key-fn keyword` and a model id is not a keyword."
+  ([index] (write-db! (System/currentTimeMillis) index))
+  ([fetched-at index] (write-db! fetched-at index nil))
+  ([fetched-at index providers]
+   (spit (home/modelsdev-cache-file)
+         (json/write-str (cond-> {:fetched-at fetched-at :models (vec index)}
+                           (some? providers) (assoc :providers (vec providers))))
+         :encoding "UTF-8")))
+
+(def ^:private provider-document
+  "A parsed api.json as far as VENDORS go: one reachable with this protocol, one that
+  spells itself with another SDK, and one compatible vendor with no endpoint published."
+  {"zai"      {"name" "Z.AI" "npm" "@ai-sdk/openai-compatible"
+               "api" "https://api.z.ai/api/paas/v4"
+               "models" {"glm-5.3-flash" {"id" "glm-5.3-flash"}}}
+   "anthropic" {"name" "Anthropic" "npm" "@ai-sdk/anthropic"
+                "api" "https://api.anthropic.com/v1" "models" {}}
+   "no-endpoint" {"name" "Nowhere" "npm" "@ai-sdk/openai-compatible" "models" {}}})
 
 ;; ------------------------------------------------------------------ the index
 
@@ -202,3 +219,43 @@
     (is (= ["new"] (md/listing "beta" (fn [] ["new"]))))
   (let [stored (json/read-str (slurp (home/provider-models-cache-file)) :key-fn keyword)]
     (is (some? (get-in stored [:providers :beta]))))))
+
+;; ---------------------------------------------------------- the vendor list
+
+(deftest only-a-vendor-this-harness-can-reach-is-offered
+  (let [idx (md/provider-index provider-document)]
+    (is (= #{"zai"} (set (keys idx)))
+        "one vendor speaks this protocol AND publishes an endpoint; the others do not")
+    (is (= {:name "Z.AI" :base-url "https://api.z.ai/api/paas/v4" :model-count 1}
+           (get idx "zai")))
+    (testing "a vendor reached with another SDK is not this harness's to offer"
+      (is (nil? (get idx "anthropic"))
+          "its endpoint is a different wire, and a run there could not be sent"))
+    (testing "and neither is one with no endpoint published"
+      (is (nil? (get idx "no-endpoint"))
+          "there would be no address to send anything to"))))
+
+(deftest the-vendor-list-comes-out-sorted-and-carries-its-own-id
+  (write-db! (System/currentTimeMillis)
+             {"glm-5.3-flash" {:context-window 1000}}
+             {"zai"      {:name "Z.AI" :base-url "https://api.z.ai/v4" :model-count 18}
+              "abliteration-ai" {:name "abliteration.ai" :base-url "https://x/v1" :model-count 3}})
+  (let [rows (md/known-providers)]
+    (is (= ["abliteration-ai" "zai"] (mapv :id rows)) "sorted by the name a person reads")
+    (is (= "Z.AI" (:name (second rows))))
+    (is (= 18 (:model-count (second rows))))))
+
+(deftest a-cache-without-the-vendor-table-asks-for-a-refresh-rather-than-waiting
+  ;; A FILE WRITTEN BEFORE THIS NAMESPACE KEPT PROVIDERS IS NOT STALE -- it is fresh by
+  ;; its timestamp and simply cannot answer this question. 'Come back in seven days' is
+  ;; not an answer a feature may give.
+  (write-db! (System/currentTimeMillis) {"glm-5.3-flash" {:context-window 1000}})
+  (let [fetches (atom 0)]
+    (alter-var-root #'md/*http-get*
+                    (constantly (fn [_ _] (swap! fetches inc) "{}")))
+    (try
+      (is (= [] (md/known-providers)) "nothing is known from that file")
+      (wait-until #(pos? @fetches))
+      (is (pos? @fetches) "and the refresh went out anyway")
+      (finally (alter-var-root #'md/*http-get*
+                               (constantly (fn [_ _] (throw (ex-info "no network" {})))))))))

@@ -133,18 +133,26 @@
   a keyword (`:cn:glm-5.3-flash`) -- and an id is a STRING this harness compares
   against what a vendor publishes. A pair keeps it one.
   
-  THE MODALITY VECTORS come back as strings and are put back here; everything else
-  is already numbers, strings and maps."
+  THE MODALITY VECTORS come back as strings and are put back here. THE PROVIDER TABLE
+  is stored as pairs for the same reason the model index is, and needs nothing else:
+  its facts are strings and numbers.
+  
+  A KEY THE PAYLOAD DOES NOT CARRY (a cache written before providers were in this file)
+  COMES BACK ABSENT rather than nil: 'not in this file' reads as 'not known yet', and the
+  next refresh fills it."
   [payload]
-  (update payload :models
-          (fn [stored]
-            (when (sequential? stored)
-              (into {}
-                    (map (fn [[id facts]]
-                           [id (cond-> facts
-                                 (sequential? (:input facts))  (update :input #(mapv keyword %))
-                                 (sequential? (:output facts)) (update :output #(mapv keyword %)))])
-                         stored))))))
+  (-> payload
+      (update :models
+              (fn [stored]
+                (when (sequential? stored)
+                  (into {}
+                        (map (fn [[id facts]]
+                               [id (cond-> facts
+                                     (sequential? (:input facts))  (update :input #(mapv keyword %))
+                                     (sequential? (:output facts)) (update :output #(mapv keyword %)))])
+                             stored)))))
+      (update :providers
+              (fn [stored] (when (sequential? stored) (into {} stored))))))
 
 ;; ------------------------------------------------------------ the database
 
@@ -303,6 +311,39 @@
                      (group-by (comp bare-id :mid) rows))]
     (merge full fam)))
 
+(def ^:private openai-compatible-npm
+  "The ONE npm marker that says a vendor publishes an OpenAI-compatible endpoint."
+  ;; models.dev names the SDK a vendor is reached with; 185 of its 226 providers say
+  ;; `@ai-sdk/openai-compatible` (measured 2026-10-03), which is the one protocol this
+  ;; harness implements. The rest (anthropic, google, azure, bedrock …) are reachable
+  ;; through a DIFFERENT wire, and offering one here would be offering a run that
+  ;; cannot be sent -- the same reason `builtin-raw` ships only OpenAI-compatible
+  ;; vendors.
+  "@ai-sdk/openai-compatible")
+
+(defn provider-index
+  "A parsed api.json -> {id FACTS} for the vendors this harness can actually reach:
+  the OpenAI-compatible ones that also PUBLISH AN ENDPOINT. `:api` is the vendor's
+  own base URL, which is what makes 'pick a vendor, get its address' possible at all;
+  a provider without one is a row nothing could be sent to.
+  
+  IT IS THE SAME DOCUMENT AS THE MODEL INDEX and a different question asked of it:
+  'which vendors are reachable' rather than 'what is this model'. `name` is what a
+  person reads in the picker, and `model-count` is there so an offer of a vendor tells
+  whether it serves anything before a session depends on it."
+  [parsed]
+  (into {}
+        (keep (fn [[id entry]]
+                (let [api (get entry "api")
+                      nm  (get entry "name")]
+                  (when (and (= openai-compatible-npm (get entry "npm"))
+                             (string? api)
+                             (not (str/blank? api)))
+                    [id (cond-> {:base-url    api
+                                 :model-count (count (get entry "models"))}
+                          (and (string? nm) (not (str/blank? nm))) (assoc :name nm))]))))
+              parsed))
+
 ;; ---------------------------------------------------------- the database io
 
 (defonce ^:private db-state (atom nil))        ;; {:mtime ms :payload {..}}
@@ -328,22 +369,32 @@
   ;; THE DOCUMENT KEEPS ITS STRING KEYS -- the parse a `listed-models` body gets. Its
   ;; ids are DATA: forcing them through `keyword` would intern thousands of keywords
   ;; and hand back a spelling the vendor never published (`(str :a/b)` has a colon).
-  (let [index   (index-of (json/read-str (*http-get* modelsdev-url modelsdev-timeout-seconds)))
-        payload {:fetched-at (now) :models index}
+  (let [doc     (json/read-str (*http-get* modelsdev-url modelsdev-timeout-seconds))
+        index   (index-of doc)
+        payload {:fetched-at (now)
+                 :models    index
+                 :providers (provider-index doc)}
         f       (home/modelsdev-cache-file)]
-    ;; THE INDEX IS WRITTEN AS PAIRS (see hydrate-payload): a JSON object's keys come
-    ;; back through `:key-fn keyword`, and a model id is not a keyword.
-    (write-json-file! f (update payload :models vec))
+    ;; BOTH TABLES ARE WRITTEN AS PAIRS (see hydrate-payload): a JSON object's keys come
+    ;; back through `:key-fn keyword`, and neither a model id nor a provider id is a
+    ;; keyword.
+    (write-json-file! f (-> payload (update :models vec) (update :providers vec)))
     (reset! db-state {:mtime (.lastModified f) :payload payload})
     index))
 
 (defn- kick-db-refresh!
-  "Start a refresh behind the caller, if the cache is absent or aged out and no
-  attempt is in flight or cooling down. NEVER BLOCKS."
-  [payload]
+  "Start a refresh behind the caller, if the cache is absent, AGED OUT, or MISSING THE
+  PIECE the caller wants -- and no attempt is in flight or cooling down. NEVER BLOCKS.
+  
+  MISSING? IS NOT THE SAME AS STALE: a cache written before this namespace kept a
+  provider table is fresh by its timestamp and still cannot answer 'which vendors are
+  reachable'. Waiting seven days for that answer would be a feature that arrives next
+  week, so a caller that needs a table the payload does not carry asks for the refresh
+  itself."
+  [payload missing?]
   (let [at (get payload :fetched-at 0)
         t  (now)]
-    (when (and (or (zero? at) (< (+ at stale-after-ms) t))
+    (when (and (or missing? (zero? at) (< (+ at stale-after-ms) t))
                (< (+ @db-last-attempt retry-after-ms) t)
                (compare-and-set! db-in-flight? false true))
       (reset! db-last-attempt t)
@@ -373,15 +424,35 @@
   and a person opening a session should not have to wait for a `describe` to happen
   before the download the whole feature depends on is even started."
   []
-  (kick-db-refresh! (current-db))
+  (kick-db-refresh! (current-db) false)
   nil)
+
+(defn known-providers
+  "The vendors models.dev knows how to reach WITH THIS HARNESS'S PROTOCOL, as rows the
+  settings form can offer: [{:id :name :base-url :model-count} …], sorted by the name a
+  person reads (then by id, so the order is total).  [] when nothing is cached yet.
+  
+  NEVER BLOCKS, like `describe`: the answer is the cached table, and a cache that is
+  absent or aged out starts a refresh behind the call. `:id` is the vendor's id in the
+  document, which is ALSO the provider id a config.edn entry would use -- the same
+  spelling, so a person who picks 'zai' gets an entry named `zai`.
+  
+  `:name` IS ABSENT for a vendor the document does not name, exactly as it is for a
+  model: the caller falls back to the id rather than being handed a made-up label."
+  []
+  (let [payload (current-db)]
+    (kick-db-refresh! payload (nil? (:providers payload)))
+    (->> (:providers payload)
+         (map (fn [[id facts]] (assoc facts :id id)))
+         (sort-by (fn [p] [(str/lower-case (str (:name p))) (:id p)]))
+         vec)))
 (defn describe
   "MODEL-ID -> what the database says about it, or {} when it says nothing. This
   NEVER BLOCKS: the answer is whatever is cached, and a cache that is absent or
   aged out starts a refresh behind the call."
   [id]
   (let [payload (current-db)]
-    (kick-db-refresh! payload)
+    (kick-db-refresh! payload (nil? (:models payload)))
     (if (str/blank? (str id))
       {}
       (let [index (or (:models payload) {})]

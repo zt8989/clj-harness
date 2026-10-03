@@ -77,8 +77,9 @@ lib/
                     目录里开一场）、`addProject` / `removeProject` / `pickFolder` / `setArchived`
   settings.ts       GET /api/settings 的类型化薄封装
   providers.ts      GET /api/providers + 三条写入 + 厂商探询的类型化薄封装
-  provider-key.ts   「厂商被展示 ⟺ 这个家有一把钥匙指向它」这条规则的唯一一份：`hasKey`
-                    与 `splitByKey`，外加服务端那个密钥事实（`ProviderKey`）的类型。
+  provider-key.ts   **两个问题，两份判据**：`hasKey`「这个家有一把钥匙指向它吗」（选择器据此过滤，
+                    `model-rows.ts` 读它），与 `drawnInSettings`「设置列表该画它吗」（有钥匙，**或者**这条
+                    是人自己写的）。外加服务端那个密钥事实（`ProviderKey`）的类型。
                     **零 import**，所以设置页、选择器与 UI 套件用的是同一个判据
   stats.ts          GET /api/threads/<stem>/stats 的类型化薄封装（`404` 也是普通答案）
   format.ts         给**人看**的数字：字节、时间、状态条那五格的字符串（`statsCells`），
@@ -968,8 +969,19 @@ id 就是**这次压缩自己的 id**（`perform!` 里那个 UUID：唯一、确
 
 - **两页都会写**：General 的 Save 写 `config.edn` 的 `:default`，Models 的表单写 `:providers`
   （以及，填了密钥时，`.env` 的一行）。
-- **这一页的下拉仍是原生 `<select>`**，与 composer 那四个不一样：这里是一张表单，选项是四五条，
-  一眼读完，而 composer 那边面对的是三十个项目 / 一年的分支 / 一整个厂商目录（见上）。
+- **列表画的是「有钥匙的，加上人自己写的」**（`.scratch/known-providers`）：`drawnInSettings`，而
+  **不是**选择器那条 `hasKey`。内置表是一份顺手目录——Ollama 在里面、不要钥匙、跟这个家没关系，
+  所以它不占这一页的一行（主人 2026-10-03：「如果 API key 不存在，你就不要显示，比如 Ollama」）；
+  而**自己写进 `config.edn` 的条目一律画**，哪怕还没有钥匙——本机网关可能根本不要钥匙，把人的条目
+  藏起来才是真的丢东西。没配置过的内置厂商不是消失了，它出现在**该出现的地方**：加号表单里。
+- **加一家供应商分两半：内置 / 自定义**（同一票）。内置那一半是一份下拉，选项来自服务端的
+  `:known-providers`（models.dev 里 OpenAI 兼容、且公布了端点的厂商 ∪ 自带表，实测 188 项），
+  选中就把 id、显示名、地址与协议填好，**地址照样可改**——厂商公布的 URL 可能带占位符（Cloudflare 的
+  账号 id），该填的还得自己填。它不改字段的含义，只是替你少打字；自定义那一半就是原来那张空表单。
+- **这一页的下拉仍是原生 `<select>`**，与 composer 那四个不一样：这里是一张表单，其余选项都是四五条，
+  一眼读完。**厂商那份清单是个例外**（188 条），但我们仍然用原生的：浏览器自带输入跳转
+  （敲字就跳到那一项），而换成一个自绘的搜索框会把「表单里全是原生控件」这条一致性打破，只为一格。
+  值得换的那天再换——现在它排在名字序，敲两下就到了。
 - **曾经还有两页**（「API key」与「Config home」），主人看过后删掉了：它们报的东西——密钥有没有、
   从哪来、是哪一行、家目录在哪、哪几份文件在——Models 的每一行（`ACME_GATEWAY_API_KEY` 与 `key ✓`）
   与 composer 那边已经在眼前，**一页只装已经看得见的东西就是一步多余的路**。

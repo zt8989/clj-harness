@@ -102,9 +102,23 @@ export type ProviderRow = {
   key: ProviderKey;
 };
 
+/// One vendor a person may pick when adding a provider, as the server answers it.
+/// `name` is ABSENT for a vendor the document does not name -- the form falls back to the
+/// id rather than being handed a made-up label, the same rule `providerLabel` keeps.
+export type KnownProvider = {
+  readonly id: string;
+  readonly name?: string;
+  readonly "base-url": string;
+  readonly "model-count": number;
+};
+
 /// What `GET /api/providers` answers, and what every write answers with too.
 export type Registry = {
   providers: readonly ProviderRow[];
+  /// The vendors a person may PICK when adding one: models.dev's OpenAI-compatible
+  /// vendors (each with the address it publishes) union this harness's own table. NOT
+  /// about this home -- see the server's `known-providers` for why it rides here.
+  "known-providers": readonly KnownProvider[];
   /// The protocols this harness implements, read off the server's own dispatch.
   protocols: readonly string[];
   /// The reasoning efforts the picker may offer -- a closed, offered list, not a

@@ -2324,6 +2324,34 @@
       (some? (:max-output-tokens m))       (assoc :max-output-tokens (:max-output-tokens m))
       (some? (:instruction-updates m))     (assoc :instruction-updates (:instruction-updates m)))))
 
+(defn- known-providers
+  "The vendors a person may PICK when adding one, as rows a form can offer:
+  `[{:id zai :name Z.AI :base-url https://api.z.ai/api/paas/v4 :model-count 18} …]`.
+  
+  TWO SOURCES, ONE LIST. The bulk is models.dev's OpenAI-compatible vendors
+  (harness.cap.model-data/known-providers) -- the user's ask was 'pick a built-in vendor
+  and take its address from there'. The harness's OWN built-in table joins them, because
+  a vendor it ships with must stay reachable: `openrouter` is OpenAI-compatible in fact
+  but is marked with OpenRouter's own SDK in that document, so it would otherwise vanish
+  from the offer exactly as it stops being drawn in the provider list (a built-in with no
+  key is hidden there -- see the Models page).
+  
+  MODELS.DEV WINS A COLLISION, being the fresher address, and a vendor whose row it
+  carries is not added twice. Sorted the way the form shows it: by name, then by id, so
+  the order is total and stable."
+  []
+  (let [from-md  (model-data/known-providers)
+        claimed  (set (map :id from-md))
+        from-own (->> builtin
+                      (remove (fn [[n _]] (claimed (name n))))
+                      (map (fn [[n e]] (cond-> {:id          (name n)
+                                                :base-url    (:base-url e)
+                                                :model-count (count (:models e))}
+                                          (some? (:display-name e))
+                                          (assoc :name (:display-name e))))))]
+    (->> (concat from-md from-own)
+         (sort-by (fn [p] [(str/lower-case (str (or (:name p) (:id p)))) (:id p)]))
+         vec)))
 (defn registry-report
   "The catalog as the settings page needs it:
 
@@ -2350,6 +2378,12 @@
   `:origin` is what lets the page say 'yours', 'built-in', or 'your patch of a
   built-in' rather than showing three different things identically.
 
+  `:known-providers` IS NOT ABOUT THIS HOME AT ALL: it is the list of vendors a person
+  may PICK FROM when adding one (`known-providers` below) -- the settings form's
+  'built-in vendor' half. It rides along here rather than in a route of its own because
+  the page that draws the form is the page that reads this one, and a second request
+  would be a second failure to show beside the first.
+
   READ-ONLY: no file is written, nothing is registered, and no key value is read."
   []
   (let [raw  (config)
@@ -2371,6 +2405,7 @@
                      vec)
      :protocols (protocol-names)
      :reasoning-efforts reasoning-efforts
+     :known-providers (known-providers)
      :default   (wire (:default raw))}))
 
 ;; ------------------------------------------------------------------ the writer
