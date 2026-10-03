@@ -24,6 +24,7 @@
             [harness.test-support :as support]
             [harness.infra.db :as db]
             [harness.infra.home :as home]
+            [harness.cap.reminder :as reminder]
             [harness.cap.todos :as todos]
             [harness.kernel.tools :as tools]))
 
@@ -40,6 +41,9 @@
   (fn [f]
     (wipe!)
     (tools/forget-turn!)
+    ;; THE PROCESS MEMORY THE REMINDER KEEPS (the switch, a due reminder, the fuse) is not in
+    ;; the store `wipe!` clears, so a test that armed a session would leave it armed.
+    (todos/reset-auto!)
     (f)
     (wipe!)
     (tools/forget-turn!)))
@@ -354,3 +358,130 @@
       (is (not (str/includes? answer "[ ]"))))
     (testing "while the list itself is stored exactly as it was sent"
       (is (= items (todos/items-for tid))))))
+
+;; ------------------------------------------------------------------ the reminder
+
+(deftest the-reminder-says-what-is-left-and-wears-the-label
+  (let [items [{:content "read the code" :status "pending"}
+               {:content "write the test" :status "in_progress"}
+               {:content "run it" :status "completed"}]
+        text  (todos/reminder-text items)]
+    (testing "it is the one frame every injection wears, and its first line names it"
+      (is (str/starts-with? text "<system-reminder>"))
+      (is (str/ends-with? text "</system-reminder>"))
+      (is (str/starts-with? (second (str/split-lines text)) "Task list reminder:")))
+    (testing "it counts what is NOT done, and carries the whole list so the model can pick up"
+      (is (str/includes? text "2 items not done yet (1 in progress, 1 completed)"))
+      (doseq [item items]
+        (is (str/includes? text (:content item)) (str "the block left out " (:content item)))))
+    (testing "and it asks for the work, in one sentence both hands share"
+      (is (str/includes? text todos/reminder-sentence)))
+    (testing "the label is the one harness.cap.reminder knows, so the card is an injection"
+      (is (= "injection" (reminder/kind-of text))))))
+
+(deftest a-list-with-nothing-left-has-no-reminder
+  (is (nil? (todos/reminder-text [])) "an empty list")
+  (is (nil? (todos/reminder-text [{:content "x" :status "completed"}]))
+      "and one whose every item is done")
+  (is (str/includes? (todos/reminder-text [{:content "x" :status "pending"}]) "not done yet")
+      "while a single pending item is work left"))
+
+(deftest the-fingerprint-follows-content-and-statuses
+  (let [base [{:content "a" :status "pending"} {:content "b" :status "completed"}]]
+    (is (= (todos/fingerprint base) (todos/fingerprint base)))
+    (is (not= (todos/fingerprint base)
+              (todos/fingerprint [{:content "a" :status "in_progress"}
+                                  {:content "b" :status "completed"}]))
+        "a status moving")
+    (is (not= (todos/fingerprint base)
+              (todos/fingerprint [{:content "a, reworded" :status "pending"}
+                                  {:content "b" :status "completed"}]))
+        "and the words moving")))
+
+(deftest a-persons-reminder-is-injected-once-and-only-once
+  (todos/write! tid [{:content "half done" :status "in_progress"}])
+  (let [history [{:role "user" :content "hello"}]]
+    (testing "nothing is due until somebody asks"
+      (is (= history (todos/before-llm history tid))))
+    (testing "a press is taken at the NEXT call and only that one"
+      (todos/note-manual! tid)
+      (let [once (todos/before-llm history tid)]
+        (is (= 2 (count once)))
+        (is (= "user" (:role (last once))))
+        (is (str/includes? (:content (last once)) "Task list reminder"))
+        (is (= history (todos/before-llm history tid)) "and the second call gets nothing")))
+    (testing "both hands word it the same way: the round turn is the same block"
+      (let [turn (todos/reminder-turn (todos/items-for tid))]
+        (todos/note-manual! tid)
+        (is (= (:content turn) (:content (last (todos/before-llm history tid)))))))))
+
+(deftest a-press-with-nothing-left-is-spent-rather-than-repeated
+  (todos/write! tid [{:content "done" :status "completed"}])
+  (todos/note-manual! tid)
+  (let [history [{:role "user" :content "hello"}]]
+    (is (= history (todos/before-llm history tid)) "there was nothing to say")
+    (is (false? (todos/take-manual! tid)) "and the request is gone, not waiting")))
+
+(deftest the-auto-switch-is-process-memory
+  (is (false? (todos/auto? tid)) "off for a session nobody turned it on for")
+  (is (true? (todos/arm! tid)))
+  (is (true? (todos/auto? tid)))
+  (testing "the press clears the fuse, so a count from an earlier stretch cannot blow it"
+    (todos/note-a-round! tid "prints")
+    (is (= 1 (:rounds (todos/fuse-for tid))))
+    (todos/arm! tid)
+    (is (= 0 (:rounds (todos/fuse-for tid))))
+    (is (nil? (:prints (todos/fuse-for tid)))))
+  (todos/note-a-round! tid "prints")
+  (todos/disarm! tid)
+  (is (false? (todos/auto? tid)))
+  (is (= 0 (:rounds (todos/fuse-for tid))) "and disarming forgets the count too"))
+
+(deftest writing-a-finished-list-turns-the-auto-reminder-off
+  (todos/write! tid [{:content "one" :status "pending"}])
+  (todos/arm! tid)
+  (todos/write! tid [{:content "one" :status "completed"}])
+  (is (false? (todos/auto? tid)) "the work the switch was for is over")
+  (testing "while writing a list with work left leaves the switch alone"
+    (todos/arm! tid)
+    (todos/write! tid [{:content "two" :status "pending"}])
+    (is (true? (todos/auto? tid)))))
+
+(deftest a-forgotten-session-takes-its-reminder-memory-with-it
+  (todos/write! tid [{:content "one" :status "pending"}])
+  (todos/arm! tid)
+  (todos/note-manual! tid)
+  (todos/note-a-round! tid "prints")
+  (todos/forget! tid)
+  (is (false? (todos/auto? tid)))
+  (is (false? (todos/take-manual! tid)))
+  (is (= 0 (:rounds (todos/fuse-for tid)))))
+
+(defn- with-todo-session!
+  "Run F with config.edn's :session section replaced by M, and put the file back after -- the
+  sections are shared by the whole run (`harness.test-support/write-session!`), so a test that
+  leaves its own behind changes every later test's home."
+  [m f]
+  (let [file   (home/config-file)
+        before (when (.exists file) (slurp file :encoding "UTF-8"))]
+    (support/write-session! m)
+    (try (f)
+         (finally
+           (if before
+             (spit file before :encoding "UTF-8")
+             (.delete file))))))
+
+(deftest the-fuse-is-a-configedn-knob-and-bad-ones-are-refused-by-name
+  (testing "the default is written here, and it is a fuse rather than a target"
+    (is (= todos/default-max-rounds (:max-rounds (todos/config tid)))))
+  (testing "a home that writes :session :todo is read, not refused as an unknown key"
+    (with-todo-session! {:todo {:max-rounds 7}}
+      (fn [] (is (= 7 (:max-rounds (todos/config tid)))))))
+  (testing "and a block that names something nothing reads is refused by name"
+    (with-todo-session! {:todo {:max-round 7}}
+      (fn [] (is (= :unknown-todo-key
+                   (:reason (try (todos/config tid) (catch Exception e (ex-data e)))))))))
+  (testing "as is a knob that is not a whole positive number"
+    (with-todo-session! {:todo {:max-rounds 0}}
+      (fn [] (is (= :bad-todo-knob
+                   (:reason (try (todos/config tid) (catch Exception e (ex-data e))))))))))

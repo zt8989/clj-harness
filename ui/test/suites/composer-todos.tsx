@@ -74,6 +74,17 @@ function detail(todos: readonly TodoItem[], language: Language): string {
   );
 }
 
+/// The strip WITH ITS TWO HANDS WIRED (`.scratch/todo-reminder`): the reminder half, which a
+/// bare `todos` render (`strip` above) deliberately leaves out -- the view's hand props are
+/// optional, and a hand nobody wired is a hand not drawn.
+function hands(todos: readonly TodoItem[] | null, auto: boolean, language: Language): string {
+  return renderToStaticMarkup(
+    <I18nextProvider i18n={renderI18n(language)}>
+      <ComposerTodosView todos={todos} auto={auto} onRemind={() => {}} onToggleAuto={() => {}} />
+    </I18nextProvider>,
+  );
+}
+
 /// The five-item list the reference screenshot reads: three done, one in progress, one
 /// pending.
 const MIXED: readonly TodoItem[] = [
@@ -226,6 +237,60 @@ const cases: readonly Case[] = [
       expect(stripAt).toBeGreaterThan(-1);
       expect(inputAt).toBeGreaterThan(-1);
       expect(stripAt).toBeLessThan(inputAt);
+    },
+  },
+  {
+    name: "the-two-hands-are-a-nudge-and-a-switch",
+    run: async () => {
+      // THE REMINDER HALF (`harness.cap.todos`): one button that pushes the reminder now, and
+      // one switch the round driver obeys. BOTH SAY WHAT THEY ARE -- and the switch carries its
+      // state three times over (the icon, the on/off word, `aria-pressed`) because it is
+      // PROCESS memory the page must not infer from the list.
+      const off = hands(MIXED, false, "en");
+      expect(textOf(off, "composer-todos-remind")).toContain("Nudge");
+      expect(textOf(off, "composer-todos-auto")).toContain("Auto-remind · off");
+      expect(attrOf(off, "composer-todos-auto", "data-on")).toBe("false");
+      expect(attrOf(off, "composer-todos-auto", "aria-pressed")).toBe("false");
+      expect(off).toContain("lucide-bell-off");
+
+      const on = hands(MIXED, true, "zh");
+      expect(textOf(on, "composer-todos-auto")).toContain("自动提醒 · 开");
+      expect(attrOf(on, "composer-todos-auto", "data-on")).toBe("true");
+      expect(attrOf(on, "composer-todos-auto", "aria-pressed")).toBe("true");
+      expect(on).toContain("lucide-bell");
+    },
+  },
+  {
+    name: "the-nudge-is-disabled-on-a-list-with-nothing-left",
+    run: async () => {
+      // THE SERVER'S RULE, SAID BEFORE THE PRESS: a list every item of which is done has
+      // nothing to remind about (`:nothing-to-remind`), so the button is disabled and its
+      // `title` says why.
+      const done: readonly TodoItem[] = [{ content: "everything", status: "completed" }];
+      const html = hands(done, false, "zh");
+      expect(attrOf(html, "composer-todos-remind", "title")).toBe("没有没做完的事可提醒");
+      expect(attrOf(html, "composer-todos-remind", "disabled")).toBe("");
+      // AND IT IS LIVE WHILE THERE IS WORK -- the same rule, the other way round.
+      const live = /<button[^>]*data-slot="composer-todos-remind"[^>]*>/.exec(hands(MIXED, false, "en"))?.[0] ?? "";
+      expect(live).not.toContain('disabled=""');
+    },
+  },
+  {
+    name: "the-press-is-a-command-and-the-switch-state-comes-from-the-route",
+    run: async () => {
+      // A WRITE IS A COMMAND, NEVER A ROUTE OF ITS OWN (`lib/goal.ts`'s rule): both hands ride
+      // `applyTodo`, which posts a run request carrying the command. The switch's state is READ
+      // (`setAuto(next.auto)`) and never inferred -- and no timer is involved, which is
+      // `docs/rules/panel-data.md` stated as an assertion.
+      expect(composerTodosSource).toContain("applyTodo");
+      expect(composerTodosSource).toContain('press("remind")');
+      expect(composerTodosSource).toContain('press("auto"');
+      expect(composerTodosSource).toContain("setAuto(next.auto)");
+      expect(composerTodosSource).not.toContain("setInterval");
+      // AND THE SWITCH IS PUSHED TOO: a `todos` frame moves it (someone else's press), and a
+      // reconnect re-reads because that frame carries no cursor.
+      expect(composerTodosSource).toContain("subscribeTodos");
+      expect(composerTodosSource).toContain("onDownlinkOpen");
     },
   },
 ];

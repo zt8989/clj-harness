@@ -1364,7 +1364,8 @@
 ;; below), while the route that answers a command-only request is up here with the other
 ;; decisions about a run -- so the route names them first.
 (declare drain-commands! execute-command! goal-send! before-llm-with-commands
-         note-tool-event changed-a-file? ended-normally? drive-next-round! start-run)
+         note-tool-event changed-a-file? ended-normally? drive-next-round!
+         drive-next-reminder-round! drive-after-run! run-todo-command! start-run)
 (defn- run-agent!
   "Drive ONE run: log its entries, set the conversation up, and stream what comes back.
 
@@ -2068,9 +2069,10 @@
                       ;; answers nil).
                       (when-some [snap (numbers-snapshot thread-id)]
                         (project/remember-numbers! thread-id snap))
-                      ;; AND THE GOAL'S TWO END-OF-RUN JOBS, in one guarded block: push what the
-                      ;; model may have changed inside this run, and open the next round if the goal
-                      ;; says so (`.scratch/goal` decisions 3 and 9).
+                      ;; AND THE END-OF-RUN JOBS, in one guarded block: push what the model may have
+                      ;; changed inside this run, then let the two round drivers decide who opens the
+                      ;; next one (`harness.cap.goal`'s, and the task list's reminder in
+                      ;; `harness.cap.todos`; `.scratch/goal` decisions 3 and 9).
                       ;;
                       ;; THE PUSH COMES FIRST because it is about THIS run -- a `create_goal` /
                       ;; `update_goal` call inside it wrote the record and the row, and a strip
@@ -2079,11 +2081,13 @@
                       ;; goal, and nothing for one that has none: the payload is the whole answer, so
                       ;; a repeat costs a client nothing but a redraw it already owed.
                       ;;
-                      ;; AND THE DRIVER RUNS LAST, after that frame: it may OPEN A RUN, and one
+                      ;; AND THE DRIVERS RUN LAST, after that frame: either may OPEN A RUN, and one
                       ;; started before this run has finished talking to its clients would be a second
                       ;; run of one conversation (`refuse-second-run!` exists for exactly that). The
                       ;; terminal frame has already cleared the registry, which is what makes this
-                      ;; moment the right one.
+                      ;; moment the right one -- and GOAL FIRST: one finished run opens AT MOST ONE
+                      ;; next run, and the task list's reminder takes the round only when the goal's
+                      ;; driver opened nothing.
                       ;;
                       ;; NOTHING HERE MAY TAKE A RUN'S ENDING DOWN WITH IT: this is the last thing the
                       ;; run does, and a store that will not answer would otherwise leave a session
@@ -2093,9 +2097,9 @@
                         (when (goal/goal-for thread-id)
                           (goal-send! thread-id))
                         (when (ended-normally? @state)
-                          (drive-next-round! thread-id run-id (changed-a-file? @state) start-run))
+                          (drive-after-run! thread-id run-id (changed-a-file? @state) start-run))
                         (catch Throwable t
-                          (log/error! :goal/run-end-failed t {:thread-id thread-id :run-id run-id})))
+                          (log/error! :run/end-jobs-failed t {:thread-id thread-id :run-id run-id})))
                       ;; A REPLAYED ANSWER THAT HAD NOWHERE TO GO gets a line of its own:
                       ;; the message went to the end of the history instead of behind
                       ;; its call, which is the shape the vendor refuses on the next
@@ -4272,6 +4276,16 @@
       :else
       (api-response 200 {:threadId stem :delegations (:ok folded)}))))
 
+(defn- todos-wire
+  "THE TASK LIST'S WIRE SHAPE, in ONE function: `{:threadId .. :todos [..] :auto? ..}`.
+  Every reader of the list goes through it -- the route and (through `items-for`) the model's
+  own `todo_read` -- so the field names are stated once."
+  [thread-id]
+  (let [tid (str thread-id)]
+    {:threadId tid
+     :todos    (todos/items-for tid)
+     :auto?    (todos/auto? tid)}))
+
 (defn- todos-get
   "GET /api/threads/<stem>/todos -- the task list a model last wrote for one session, as
   the store's row holds it: one map of `content` and `status` per item, in the order it
@@ -4289,9 +4303,16 @@
 
   READ-ONLY, so no audit line: asking again is the ordinary use (the composer's strip
   re-asks on every model call), and a route that wrote a line per ask would fill the
-  logs with 'somebody looked'."
+  logs with 'somebody looked'.
+
+  THE ANSWER CARRIES `auto?` BESIDE THE LIST -- whether THIS PROCESS is auto-reminding the
+  session (`harness.cap.todos/auto?`). It is not part of the list for the reason the goal's
+  `armed?` is not part of a goal: 'may I keep pushing this by itself' is a fact about the
+  process, and a client that merged the two would draw a switch as off after a restart nobody
+  touched. THIS ROUTE IS THE SWITCH'S ONLY READ -- there is no frame family for it (the
+  switch is process memory with one writer, the very page that just pressed it)."
   [stem]
-  (api-response 200 {:threadId stem :todos (todos/items-for stem)}))
+  (api-response 200 (todos-wire stem)))
 
 (defn- goal-wire
   "THE GOAL'S WIRE SHAPE, in ONE function: `{:threadId .. :goal <snapshot|null> :armed? ..}`.
@@ -5468,6 +5489,32 @@
           (mux-send! ch (mux-frame thread-id payload)))))
     nil))
 
+(defn- todos-send!
+  "PUSH the task list and its auto-reminder switch to every connection watching THREAD-ID --
+  one frame per change, the whole payload each time.
+
+  THE SIXTH KIND OF FRAME ON THE SESSION'S SOCKET (`{:type todos ..}`), and it exists for the
+  reason `goal-send!` does: the switch is process memory with no line to number and nothing to
+  replay, so a reader that missed one asks again (the strip's own snapshot read) and the last
+  payload wins. A CLIENT MUST RECOGNISE THE NAME (`ui/src/lib/mux.ts`'s `familyOf`): a frame no
+  family claims falls through to the run family and is refused by the AG-UI client's schema,
+  which takes the whole run down with it.
+
+  THE LIST RIDES ALONG -- the same `todos-wire` the route answers with, which is the goal's own
+  whole-payload rule: a `todo_write` inside a run already reaches the strip through the two
+  facts it re-reads on, so this frame's own reason to exist is the SWITCH, and one payload for
+  both is one thing to keep in step.
+
+  A NO-OP WHEN NOBODY IS WATCHING, which is the ordinary case for a change made from a script
+  or a test: `mux/channels-for` answers nothing and no payload is built."
+  [thread-id]
+  (let [channels (mux/channels-for thread-id)]
+    (when (seq channels)
+      (let [payload (assoc (todos-wire thread-id) :type "todos")]
+        (doseq [ch channels]
+          (mux-send! ch (mux-frame thread-id payload)))))
+    nil))
+
 ;; ------------------------------------------------------- the commands a session is sent
 ;;
 ;; ONE EXECUTOR FOR EVERY COMMAND THIS BUILD KNOWS (`.scratch/run-commands`), reached from the
@@ -5496,6 +5543,48 @@
                            " clear -- it is " (pr-str action) ".")
                       {:reason :unknown-goal-action :action action})))))
 
+(defn- run-todo-command!
+  "One `{:type \"todo\" ..}` command -> the verb it names, as a PERSON.
+
+  TWO ACTIONS, the whole of the task list's surface for a person:
+
+    remind  push the task-list reminder at the model NOW. WITH A RUN IN FLIGHT the reminder is
+            left for that run's next pre-LLM step (`harness.cap.todos/note-manual!`, taken by
+            the step's `todos/before-llm`) -- NO second run, because two runs of one
+            conversation is the thing `refuse-second-run!` exists to stop. With NOTHING
+            running it opens the round the reminder needs, carrying `reminder-turn` as the
+            run's appended message. A list with nothing outstanding is refused BY NAME: a
+            reminder about finished work tells the model nothing it does not already see.
+
+    auto    the SWITCH the driver obeys (`:on` true/false), in PROCESS MEMORY
+            (`harness.cap.todos/arm!` / `disarm!`). Process memory on purpose: a restart, an
+            eviction and a fork all drop it, and nothing but a person pressing the switch puts
+            it back."
+  [thread-id {:keys [action on]}]
+  (case (str action)
+    "remind"
+    (let [items (todos/items-for thread-id)]
+      (when-not (todos/outstanding? items)
+        (throw (ex-info (str "the task list has nothing left to be reminded about: every item is"
+                             " \"completed\", or there is no list at all.")
+                        {:reason :nothing-to-remind})))
+      (if (running? thread-id)
+        (todos/note-manual! thread-id)
+        (start-run {:threadId (str thread-id) :append [(todos/reminder-turn items)]}
+                   (str (java.util.UUID/randomUUID)))))
+
+    "auto"
+    (if (boolean? on)
+      (do (if on (todos/arm! thread-id) (todos/disarm! thread-id)) nil)
+      (throw (ex-info (str "a todo command's action \"auto\" carries `on`: true to turn the"
+                           " automatic reminder on, false to turn it off -- this one is "
+                           (pr-str on) ".")
+                      {:reason :missing-on :value on})))
+
+    (throw (ex-info (str "a todo command's action must be one of remind, auto -- it is "
+                         (pr-str action) ".")
+                    {:reason :unknown-todo-action :action action}))))
+
 (defn- execute-command!
   "One command -> nil when it was done, or `{:reason .. :error ..}` saying why not. Every
   refusal is the capability's OWN sentence: this function adds no rule of its own, which is
@@ -5508,6 +5597,12 @@
       ;; somebody just cleared.
       "goal" (do (run-goal-command! thread-id command)
                  (goal-send! thread-id))
+      ;; THE VERB FIRST, THE FRAME AFTER, like the goal's: the switch is THIS PROCESS's memory,
+      ;; and a strip in ANOTHER page would otherwise go on drawing the state it read last. (The
+      ;; LIST itself changes inside runs, where the two facts the strip re-reads on cover it --
+      ;; see `todos-send!`.)
+      "todo" (do (run-todo-command! thread-id command)
+                 (todos-send! thread-id))
       (throw (ex-info (str "no executor for a " (pr-str (:type command)) " command")
                       {:reason :unknown-command :type (:type command)})))
     nil
@@ -5599,15 +5694,23 @@
               642M-token accident is why (`.scratch/goal` decision 9).
   
   THE COUNT LANDS IN THE RECORD BEFORE THE RUN STARTS (`note-round!`), so a process that dies
-  mid-round folds back the round it opened rather than losing it."
+  mid-round folds back the round it opened rather than losing it.
+
+  IT ANSWERS WHETHER A ROUND WAS OPENED. The task list's reminder driver runs after this one
+  and may open a round of its own -- but only when this one did NOT, because two `open!` calls
+  in a row are two runs of one conversation."
   [thread-id run-id progress? open!]
   (let [g (goal/goal-for thread-id)]
-    (when (and g (= "active" (:phase g)) (goal/armed? thread-id))
+    (if-not (and g (= "active" (:phase g)) (goal/armed? thread-id))
+      ;; NOTHING IS BEING PUSHED: a paused, blocked or completed goal is one somebody stopped,
+      ;; and a disarmed one is this process having forgotten its permission. FALSE either way,
+      ;; which is what lets the task list's reminder take this round instead.
+      false
       (cond
         (>= (long (:rounds g)) (long (:max-rounds g)))
         (do (log/info! :goal/rounds-exhausted
                        {:thread-id thread-id :goal (:id g) :rounds (:rounds g)})
-            nil)
+            false)
 
         (not progress?)
         (do (goal/block! thread-id {:id (:id g) :revision (:revision g)}
@@ -5615,7 +5718,7 @@
                           :reason    "the round that just finished changed no file"
                           :immediate? true})
             (log/warn! :goal/no-progress {:thread-id thread-id :run-id run-id :goal (:id g)})
-            nil)
+            false)
 
         :else
         (let [g    (goal/note-round! thread-id {:id (:id g) :revision (:revision g)})
@@ -5623,8 +5726,69 @@
           (log/info! :goal/round-opened {:thread-id thread-id :run-id run-id
                                          :goal (:id g) :round (:rounds g)})
           (open! {:threadId (str thread-id) :append [turn]}
-                 (str (java.util.UUID/randomUUID))))))))
+                 (str (java.util.UUID/randomUUID)))
+          true)))))
 
+(defn- drive-next-reminder-round!
+  "THREAD-ID's run RUN-ID has finished normally: decide whether the TASK LIST's auto reminder
+  opens the next round, and open it. OPEN! is the door that starts a run -- the caller passes
+  `start-run` -- which is what lets a test watch the decision without a provider.
+
+  THE FOUR GATES, each of which SILENTLY STOPS (nothing written, nothing started):
+
+    switch     a person turned the auto reminder on for this session, IN THIS PROCESS
+               (`harness.cap.todos/auto?`). A restart, a rebuild and a fork all drop it, and
+               nothing but the person's press puts it back.
+    work left  the list has at least one item that is not \"completed\" -- a list that is
+               done, or was cleared, has nothing to remind about (`write!` also disarms on
+               that, so this is belt to that brace).
+    moved      THE BRAKE, and the only one: the list's fingerprint differs from the one the
+               LAST auto reminder was about (`harness.cap.todos/fingerprint`). A model that was
+               reminded once and changed nothing is spinning, and reminding it again would be
+               the same sentence twice while the money keeps going.
+    fuse       `fuse-for`'s rounds < `config`'s :max-rounds. The cap is a FUSE rather than a
+               target, and reaching it writes nothing -- the list has no phase to block.
+
+  IT IS THE SECOND DRIVER, so the caller runs it only when the GOAL's did not open a round:
+  one finished run opens AT MOST ONE next run."
+  [thread-id run-id open!]
+  (when (todos/auto? thread-id)
+    (let [items (todos/items-for thread-id)]
+      (when (todos/outstanding? items)
+        (let [hands  (todos/fuse-for thread-id)
+              prints (todos/fingerprint items)
+              {:keys [max-rounds]} (todos/config thread-id)]
+          (cond
+            (= prints (:prints hands))
+            (do (log/info! :todo/reminder-unchanged
+                           {:thread-id thread-id :run-id run-id :prints prints})
+                nil)
+
+            (>= (long (:rounds hands)) (long max-rounds))
+            (do (log/info! :todo/reminder-rounds-exhausted
+                           {:thread-id thread-id :run-id run-id :rounds (:rounds hands)})
+                nil)
+
+            :else
+            (let [n    (todos/note-a-round! thread-id prints)
+                  turn (assoc (todos/reminder-turn items)
+                              :id (str run-id "-todo-reminder-" n))]
+              (log/info! :todo/reminder-round-opened
+                         {:thread-id thread-id :run-id run-id :round n})
+              (open! {:threadId (str thread-id) :append [turn]}
+                     (str (java.util.UUID/randomUUID))))))))))
+
+(defn- drive-after-run!
+  "One finished run -> AT MOST ONE next run: the goal's driver first, the task list's reminder
+  only when the goal's opened nothing.
+
+  THE COMPOSITION IS HERE rather than at the call site because 'one run at a time' is the whole
+  of what it is for: two `open!` calls in a row would be two runs of one conversation, which is
+  the thing `refuse-second-run!` exists to stop. A test drives this with a recording opener to
+  see the rule without a provider (`.scratch/todo-reminder/spec.md` decision 4)."
+  [thread-id run-id progress? open!]
+  (or (drive-next-round! thread-id run-id progress? open!)
+      (drive-next-reminder-round! thread-id run-id open!)))
 (defn- family-send!
   "Send ONE fact of the turn / model-call families down the session's downlink (ADR 0006).
 

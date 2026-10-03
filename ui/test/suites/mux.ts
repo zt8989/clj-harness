@@ -8,7 +8,7 @@
 import { expect, vi } from "vitest";
 
 import { type Case, type Suite } from "../e2e";
-import { declaredSet, familyOf, subscribeTasks, TASK_FRAME_TYPE } from "../../src/lib/mux";
+import { declaredSet, familyOf, subscribeTasks, TASK_FRAME_TYPE, TODOS_FRAME_TYPE } from "../../src/lib/mux";
 import { downlinkUrl } from "../../src/lib/threads";
 
 /// A STAND-IN FOR THE BROWSER'S `WebSocket`, for the length of the cases below -- the one that is a
@@ -178,6 +178,10 @@ const cases: Case[] = [
       // (`TaskFrame`), and handing it to `@ag-ui/client` would be the same mistake the fact
       // case above exists to stop -- it would be validated as a run and refused.
       expect(familyOf(TASK_FRAME_TYPE)).toBe("task");
+      // AND THE SIXTH: a `{:type todos ..}` payload is a task list and this process's reminder
+      // switch (`.scratch/todo-reminder`), a whole payload with no cursor -- the same mistake
+      // the two cases above exist to stop.
+      expect(familyOf(TODOS_FRAME_TYPE)).toBe("todos");
     },
   },
   {

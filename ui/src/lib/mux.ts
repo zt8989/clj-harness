@@ -21,6 +21,9 @@ import type { WindowFrame } from "./feed";
 /// THE GOAL FAMILY'S PAYLOAD (see `GoalFrame` below): a TYPE-only import, so nothing about the
 /// strip is in this module's runtime graph.
 import type { Goal } from "./goal";
+/// THE TASK LIST'S PAYLOAD (see `TodosFrame` below): the list and the switch, both as the route
+/// answers them. A TYPE-only import for the same reason the goal's is.
+import type { TodoItem } from "./todos";
 // `apiBase` RATHER THAN `API_BASE`: a suite points the harness origin at a server it learned
 // at runtime, and this module is loaded before that (`threads.ts` says why).
 import { apiBase, downlinkUrl } from "./threads";
@@ -136,13 +139,39 @@ export type GoalFrame = {
 /// names the contract instead of re-writing the spelling.
 export const GOAL_FRAME_TYPE = "goal";
 
+/// THE SIXTH FAMILY: A SESSION'S TASK LIST AND ITS REMINDER SWITCH, pushed
+/// (`.scratch/todo-reminder`, `harness.edge.http/todos-send!`).
+///
+/// WHY IT IS NOT A `FactFrame`: the two reasons every whole-payload family above gives. The
+/// switch is THIS PROCESS's memory with no line to number and nothing to replay, so the frame IS
+/// the answer, the last one wins, and a reader that missed one asks again (`GET …/todos`, the
+/// strip's own snapshot read).
+///
+/// THE LIST RIDES ALONG, and its own changes do NOT come through here: a `todo_write` inside a
+/// run is followed by the two facts the strip already re-reads on (`model/start`, `turn/end`).
+/// What this frame is FOR is the switch -- a change made by a press, which no run may be there to
+/// bracket.
+export type TodosFrame = {
+  threadId: string;
+  type: "todos";
+  /// THE LIST AS `GET …/todos` answers it.
+  todos: TodoItem[];
+  /// WHETHER THIS PROCESS IS AUTO-REMINDING THE SESSION, beside the list and never inside it
+  /// (the question mark is the server's own spelling, `harness.edge.http/todos-wire`).
+  "auto?": boolean;
+};
+
+/// The todo frame's one type name, exported for the same reason as `TASK_FRAME_TYPE`: a suite
+/// names the contract instead of re-writing the spelling.
+export const TODOS_FRAME_TYPE = "todos";
+
 /// WHICH FAMILY A FRAME BELONGS TO, as a value -- so the routing rule can be READ and TESTED
 /// without a socket (`test/suites/mux.ts`, `test/suites/goal.tsx`), and so `onmessage` states it
 /// once. The `default` is deliberate: anything that is not one of the named families is a RUN
 /// frame, which is AG-UI's own (upper-case) vocabulary. THE NAMED ONES ARE BRANCHES OF THEIR OWN
 /// -- a family that fell through to that default would be validated against AG-UI's schema and
 /// take the run down with it, which is exactly what the fact and task branches say above.
-export function familyOf(type: string): "window" | "fact" | "task" | "goal" | "run" {
+export function familyOf(type: string): "window" | "fact" | "task" | "goal" | "todos" | "run" {
   if (WINDOW_TYPES.has(type)) return "window";
   if (FACT_TYPES.has(type)) return "fact";
   if (type === TASK_FRAME_TYPE) return "task";
@@ -150,6 +179,10 @@ export function familyOf(type: string): "window" | "fact" | "task" | "goal" | "r
   // handed to `@ag-ui/client` as a run event would be refused by its schema, and the run the
   // page is watching would die with a frame that was never meant for it.
   if (type === GOAL_FRAME_TYPE) return "goal";
+  // AND THE TASK LIST'S REMINDER IS THE SIXTH, named for the same reason: a `todos` frame handed
+  // to `@ag-ui/client` as a run event would be refused by its schema, and the run this page is
+  // watching would die with a frame that was never meant for it.
+  if (type === TODOS_FRAME_TYPE) return "todos";
   return "run";
 }
 
@@ -301,6 +334,11 @@ const taskSubscriptions = new Map<string, Set<(task: TaskFrame) => void>>();
 /// nobody is showing the goal of reaches nobody.
 const goalSubscriptions = new Map<string, Set<(goal: GoalFrame) => void>>();
 
+/// THE TASK STRIP'S SUBSCRIBERS, by conversation -- the sixth family's table (see `TodosFrame`).
+/// A separate map for the same reason every other family has one: a frame for a conversation
+/// nobody is drawing the task list of reaches nobody.
+const todoSubscriptions = new Map<string, Set<(todos: TodosFrame) => void>>();
+
 
 /// WHO HAS TO BE TOLD WHEN THE SOCKET IS BACK -- and why anybody has to be.
 ///
@@ -344,7 +382,7 @@ const factCursors = new Map<string, number>();
 
 /// THE ROUTING, in one place, because the batch below hands frames over in groups.
 ///
-/// ONE SOCKET, THREE KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
+/// ONE SOCKET, MANY KINDS OF FRAME, AND THE ROUTING IS EXPLICIT. A window frame is about
 /// the conversation's copy; a FACT is about the conversation (a turn's or a call's two
 /// ends); everything else is a RUN event -- AG-UI's own vocabulary, which goes to whoever
 /// is driving that run.
@@ -373,6 +411,15 @@ function deliver(frame: MuxFrame & RunFrame): void {
     // strip's own snapshot read, on the fact family and after a reconnect).
     for (const onGoal of goalSubscriptions.get(frame.threadId) ?? []) {
       onGoal(frame as unknown as GoalFrame);
+    }
+    return;
+  }
+  if (family === "todos") {
+    // NO CURSOR AND NO REMEMBERING, the same two sentences the two branches above say: the frame
+    // IS the whole payload, so the last one wins, and a reader that missed one asks again (the
+    // strip's own snapshot read, on the fact family and after a reconnect).
+    for (const onTodos of todoSubscriptions.get(frame.threadId) ?? []) {
+      onTodos(frame as unknown as TodosFrame);
     }
     return;
   }
@@ -432,9 +479,9 @@ let wanted = false;
 let everOpen = false;
 
 /// EVERY CONVERSATION THIS CONNECTION MUST BE TOLD ABOUT -- a window it follows, a run it
-/// drives, OR ONE WHOSE FACTS IT WANTS, OR ONE A PANE IS DRAWING, OR ONE WHOSE GOAL A STRIP IS
-/// SHOWING. The server filters EVERY family by this set, so a thread has to be in it however this
-/// page came to hold it.
+/// drives, OR ONE WHOSE FACTS IT WANTS, OR ONE A PANE IS DRAWING, OR ONE A STRIP IS DRAWING THE
+/// GOAL OR THE TASK LIST OF. The server filters EVERY family by this set, so a thread has to be
+/// in it however this page came to hold it.
 ///
 /// THE FACTS BELONG HERE, and their absence used to be a hole with a real edge: a page whose
 /// only claim on a conversation was the run it had just driven stopped being told about that
@@ -457,15 +504,15 @@ function wantedThreads(): string[] {
       ...factSubscriptions.keys(),
       ...taskSubscriptions.keys(),
       ...goalSubscriptions.keys(),
+      ...todoSubscriptions.keys(),
     ]),
   ];
 }
 
 /// IS ANYBODY STILL CLAIMING THIS CONVERSATION? -- the question every door's close has to ask
-/// before it tells the server to stop sending. Window, run, facts, the goal strip AND THE TASK
-/// PANE are FIVE SEPARATE CLAIMS on one conversation, and a door that drops only its own must
-/// not take the others' with it.
-/// others' with it.
+/// before it tells the server to stop sending. Window, run, facts, the task pane, the goal strip
+/// AND THE TASK STRIP are SIX SEPARATE CLAIMS on one conversation, and a door that drops only its
+/// own must not take the others' with it.
 ///
 /// THE RUN'S OWN DOOR IS THE ONE THAT MADE THIS NECESSARY: the agent lets go of a run the moment
 /// its stream ends, and `turn/end` is pushed ONE KERNEL EVENT LATER -- so a page whose only other
@@ -482,7 +529,8 @@ function stillWanted(threadId: string): boolean {
     runSubscriptions.has(threadId) ||
     factSubscriptions.has(threadId) ||
     taskSubscriptions.has(threadId) ||
-    goalSubscriptions.has(threadId)
+    goalSubscriptions.has(threadId) ||
+    todoSubscriptions.has(threadId)
   );
 }
 
@@ -764,6 +812,36 @@ export function subscribeGoals(
       const current = goalSubscriptions.get(threadId);
       if (current === undefined || !current.delete(onGoal)) return;
       if (current.size === 0) goalSubscriptions.delete(threadId);
+      // AND THE SAME QUESTION THE OTHER DOORS ASK: the last claim out turns off the light.
+      if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
+    },
+  };
+}
+
+/// FOLLOW A CONVERSATION'S TASK LIST AND REMINDER SWITCH for THREAD-ID: every pushed payload is
+/// handed to ON_TODOS, and the way to stop comes back. The opening snapshot is the caller's to
+/// ask for (`lib/todos.ts`'s `todosFor`) -- a subscription with no snapshot would be a strip that
+/// is empty until something happens.
+///
+/// IT TAKES NO `onOpen`, like `subscribeGoals` above and for the same reason: a `todos` frame
+/// carries no cursor either, so the strip's own `onDownlinkOpen` is what re-reads after a
+/// reconnect.
+export function subscribeTodos(
+  threadId: string,
+  onTodos: (todos: TodosFrame) => void,
+): { unsubscribe: () => void } {
+  const set = todoSubscriptions.get(threadId) ?? new Set<(todos: TodosFrame) => void>();
+  set.add(onTodos);
+  todoSubscriptions.set(threadId, set);
+  // The same two lines every family's door has: the socket is opened, and the server is told that
+  // this connection wants this conversation (`wantedThreads` says why that matters).
+  ensure();
+  void declareThread(threadId);
+  return {
+    unsubscribe: () => {
+      const current = todoSubscriptions.get(threadId);
+      if (current === undefined || !current.delete(onTodos)) return;
+      if (current.size === 0) todoSubscriptions.delete(threadId);
       // AND THE SAME QUESTION THE OTHER DOORS ASK: the last claim out turns off the light.
       if (!stillWanted(threadId)) void declare({ unsubscribe: [threadId] });
     },

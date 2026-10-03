@@ -39,6 +39,15 @@
     "stop": "Stop answering"
   },
   "todos": {
+    "remind": {
+      "now": "Nudge",
+      "none": "nothing left to remind about — every item is done"
+    },
+    "auto": {
+      "label": "Auto-remind",
+      "on": "on",
+      "off": "off"
+    },
     "done_one": "{{count}} done",
     "done_other": "{{count}} done",
     "inProgress_one": "{{count}} in progress",

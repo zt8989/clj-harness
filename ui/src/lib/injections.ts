@@ -64,6 +64,9 @@ const LABEL_PREFIXES = [
   "Skill ",
   "Background job ",
   "Session context",
+  // The task list's reminder (`harness.cap.todos/reminder-text`): the harness saying that work
+  // a session planned for itself is not finished. An injection like the row above.
+  "Task list reminder:",
 ];
 
 /// The line inside a block that says what it is.

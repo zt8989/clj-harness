@@ -37,8 +37,10 @@
   has to decide what to do when no run is in flight.
 
     :priority  lower goes first. THE ORDER IS WRITTEN HERE rather than left to arrival
-               time, and it is the design's own: `interrupt > steer > compact > goal >
-               queue`. `interrupt` is not merely first in this list -- it also rings the
+               time, and it is the design's own: `interrupt > steer > compact > goal = todo >
+               queue`. `goal` and `todo` share a rank -- both are session-management writes
+               that need no model call, and nothing orders one before the other. `interrupt` is
+               not merely first in this list -- it also rings the
                run's stop switch the moment it arrives (see `harness.edge.http`), because
                a queue entry can wait and a person pressing stop cannot.
     :no-run    what the route does with it when NO run of that session is in flight:
@@ -59,6 +61,11 @@
    "steer"     {:priority 1 :no-run :refuse :unimplemented true}
    "compact"   {:priority 2 :no-run :execute :unimplemented true}
    "goal"      {:priority 3 :no-run :execute}
+   ;; THE TASK LIST'S REMINDER (`harness.cap.todos`): `remind` injects a reminder into the run
+   ;; in flight, or opens one when nothing is running; `auto` is the switch the driver obeys.
+   ;; Executed in-process like `goal`, and for the same reason -- no model call is needed to
+   ;; flip a switch or to start the round that carries the reminder.
+   "todo"      {:priority 3 :no-run :execute}
    "queue"     {:priority 4 :no-run :wait  :unimplemented true}})
 
 (def ^:private unknown-priority 99)

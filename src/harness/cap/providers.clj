@@ -442,6 +442,8 @@
                 parks on them; the built-in list is always in force on top of these
     :session    how a session runs -- the DEFAULT group, which serves every model:
                 :editing / :compaction / :llm / :approval / :skills / :instructions /
+                :subagents / :goal / :todo (what harness.edn held, plus the caps the goal's
+                rounds and the task list's reminder run under), plus :groups -- named per-model
                 :subagents (what harness.edn held), plus :groups -- named per-model
                 overrides of those blocks, each naming the models it serves
     :mcp        the outside programs whose tools join this session: {:servers {..}}
@@ -477,12 +479,14 @@
 
 (def ^:private session-keys
   "The keys config.edn's :session section may carry -- the seven harness.edn used to hold,
-  unchanged, because that move was a change of address rather than of meaning, PLUS :goal
-  (`.scratch/goal`), the knob that bounds a goal's rounds and how long a blocker has to be
-  reported before it stands. A NAMED SET for the reason the other sections' are: a typo in a
+  unchanged, because that move was a change of address rather than of meaning, PLUS the two caps
+  a session's own machinery reads: :goal (`.scratch/goal`), which bounds a goal's rounds and
+  how long a blocker has to be reported before it stands, and :todo (`.scratch/todo-reminder`),
+  which bounds the rounds a task list's automatic reminder may open. A NAMED SET for the reason
+  the other sections' are: a typo in a
   key that decides how a session runs must fail by name rather than leave the session
   behaving as if nothing had been written."
-  #{:editing :compaction :llm :approval :skills :instructions :subagents :goal})
+  #{:editing :compaction :llm :approval :skills :instructions :subagents :goal :todo})
 
 (def ^:private mcp-keys
   "The keys config.edn's :mcp section may carry. One: :servers, the {name declaration}

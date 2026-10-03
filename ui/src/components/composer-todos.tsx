@@ -32,6 +32,9 @@ import { useEffect, useState } from "react";
 import type { FC } from "react";
 import type { TFunction } from "i18next";
 import {
+  BellIcon,
+  BellOffIcon,
+  BellRingIcon,
   ChevronUpIcon,
   CircleCheckIcon,
   CircleIcon,
@@ -40,13 +43,16 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+// THE TWO HANDS ON THE LIST ARE `Button`s, like the goal strip's -- one `remind` (push a
+// reminder now) and one switch (`auto`, the harness pushing it by itself).
+import { Button } from "@/components/ui/button";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { subscribeFacts } from "@/lib/mux";
-import { todosFor, type TodoItem } from "@/lib/todos";
+import { onDownlinkOpen, subscribeFacts, subscribeTodos } from "@/lib/mux";
+import { applyTodo, todosFor, type TodoItem } from "@/lib/todos";
 
 type Status = TodoItem["status"];
 
@@ -136,13 +142,34 @@ export const TodoRows: FC<{ todos: readonly TodoItem[] }> = ({ todos }) => {
 ///
 /// `null` (no answer yet) and an empty list draw NOTHING, the same absence: a folded line
 /// that says "0 pending" is furniture for something that is not there.
-export const ComposerTodosView: FC<{ todos: readonly TodoItem[] | null }> = ({ todos }) => {
+/// THE TWO HANDS A PERSON HAS ON THE LIST (`harness.cap.todos`), drawn on the card:
+///
+///   * `remind` -- push a reminder at the model NOW. It is DISABLED when every item is done,
+///     because the server refuses that press by name (`:nothing-to-remind`) and a button that
+///     can only fail should say so before it is pressed.
+///   * `auto` -- the switch the round driver obeys: on, a finished round that left work opens
+///     the next one carrying the reminder; off, nothing happens until somebody presses
+///     `remind`. The state is drawn from the server and never inferred -- it is THIS PROCESS's
+///     memory, and a restart turns it off without telling anybody.
+///
+/// OPTIONAL ON PURPOSE: this view's own suite renders it with nothing but a list, and a hand
+/// that was never wired is a hand that is not drawn.
+export const ComposerTodosView: FC<{
+  todos: readonly TodoItem[] | null;
+  auto?: boolean;
+  failure?: string | null;
+  onRemind?: () => void;
+  onToggleAuto?: () => void;
+}> = ({ todos, auto = false, failure = null, onRemind, onToggleAuto }) => {
   const { t } = useTranslation("composer");
   // FOLDED IS THE DEFAULT and is not remembered: refresh brings it back folded, the same
   // "transient layout preference" rule the right pane's toggle follows.
   const [open, setOpen] = useState(false);
 
   if (todos === null || todos.length === 0) return null;
+  /// IS THERE ANYTHING LEFT FOR A REMINDER TO BE ABOUT? The nudge's disabled state -- the same
+  /// question the server asks before it refuses the press (`:nothing-to-remind`).
+  const unfinished = todos.some((todo) => todo.status !== "completed");
 
   return (
     <Collapsible
@@ -180,6 +207,48 @@ export const ComposerTodosView: FC<{ todos: readonly TodoItem[] | null }> = ({ t
       <CollapsibleContent data-slot="composer-todos-list" className="max-h-40 overflow-y-auto py-0.5">
         <TodoRows todos={todos} />
       </CollapsibleContent>
+      {/* THE TWO HANDS ARE ALWAYS DRAWN -- the fold hides the LIST, not the controls: asking
+          the harness to push a reminder is not a detail of what the list says. `px-2` lines
+          them up with the rows above, `justify-end` keeps them off the trigger's text.
+          THE NUDGE'S DISABLED STATE IS THE SERVER'S RULE, said before the press: a list every
+          item of which is done has nothing to be reminded about (`:nothing-to-remind`). */}
+      <div className="flex items-center justify-end gap-1 px-2 pb-1.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          data-slot="composer-todos-remind"
+          title={unfinished ? undefined : t("todos.remind.none")}
+          disabled={!unfinished}
+          onClick={onRemind}
+        >
+          <BellRingIcon aria-hidden className="size-3.5" />
+          {t("todos.remind.now")}
+        </Button>
+        {/* THE SWITCH SAYS ITS OWN STATE: the icon, the on/off word and `aria-pressed` are
+            three readings of one boolean, and none of them is inferred from the list. */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          data-slot="composer-todos-auto"
+          data-on={auto ? "true" : "false"}
+          aria-pressed={auto}
+          onClick={onToggleAuto}
+        >
+          {auto ? (
+            <BellIcon aria-hidden className="size-3.5" />
+          ) : (
+            <BellOffIcon aria-hidden className="size-3.5" />
+          )}
+          {t("todos.auto.label")} · {auto ? t("todos.auto.on") : t("todos.auto.off")}
+        </Button>
+      </div>
+      {failure !== null && (
+        <p role="alert" data-slot="composer-todos-error" className="text-destructive px-2 pb-1.5 text-xs">
+          {failure}
+        </p>
+      )}
     </Collapsible>
   );
 };
@@ -192,17 +261,24 @@ export const ComposerTodosView: FC<{ todos: readonly TodoItem[] | null }> = ({ t
 /// stale DRAW -- the two halves of the mistake `composer-numbers.tsx` names with its own
 /// flag.
 export const ComposerTodos: FC<{ threadId: string }> = ({ threadId }) => {
+  const { t: tErrors } = useTranslation("errors");
   const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  const [auto, setAuto] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     setTodos(null);
+    setAuto(false);
+    setFailure(null);
   }, [threadId]);
 
   useEffect(() => {
     let live = true;
     void todosFor(threadId).then((next) => {
-      if (live) setTodos(next);
+      if (!live) return;
+      setTodos(next.todos);
+      setAuto(next.auto);
     });
     return () => {
       live = false;
@@ -217,6 +293,39 @@ export const ComposerTodos: FC<{ threadId: string }> = ({ threadId }) => {
     return unsubscribe;
   }, [threadId]);
 
-  return <ComposerTodosView todos={todos} />;
+  // AND THE PUSHED FRAME (`harness.edge.http/todos-send!`): a press in ANOTHER page moving this
+  // process's switch is the one change no run brackets, so it arrives here or nowhere.
+  useEffect(() => {
+    const { unsubscribe } = subscribeTodos(threadId, (frame) => {
+      setTodos(frame.todos);
+      setAuto(frame["auto?"]);
+    });
+    return unsubscribe;
+  }, [threadId]);
+
+  // AND A RECONNECT RE-READS: a `todos` frame carries no cursor, so a change that happened while
+  // the socket was down is in no frame this page will be handed (`docs/rules/panel-data.md`).
+  useEffect(() => onDownlinkOpen(() => setNonce((n) => n + 1)), []);
+
+  /// ONE PRESS, TWO HANDS: both ride a `todo` command on a run request (`lib/todos.ts`), and
+  /// a refusal is the SERVER's own sentence -- drawn in the card rather than swallowed, because
+  /// a press that failed in silence is the one thing a button must never do.
+  const press = (action: "remind" | "auto", on?: boolean) => {
+    setFailure(null);
+    void applyTodo(threadId, action, on === undefined ? {} : { on }, tErrors)
+      // A SUCCESSFUL PRESS RE-READS THE ROUTE: `auto` moved this process's switch, and the
+      // next fact would take a whole model call to say so.
+      .then(() => setNonce((n) => n + 1))
+      .catch((error: unknown) => setFailure(error instanceof Error ? error.message : String(error)));
+  };
+  return (
+    <ComposerTodosView
+      todos={todos}
+      auto={auto}
+      failure={failure}
+      onRemind={() => press("remind")}
+      onToggleAuto={() => press("auto", !auto)}
+    />
+  );
 };
 

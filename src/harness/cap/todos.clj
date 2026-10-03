@@ -20,7 +20,17 @@
   line because of it."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [harness.cap.reminder :as reminder]
+            ;; The config.edn discipline, for the auto reminder's fuse (`:session :todo`): read
+            ;; fresh on every call, and nothing here reads back through `providers`, so the two
+            ;; namespaces do not form a ring.
+            [harness.cap.providers :as providers]
             [harness.infra.db :as db]))
+
+;; THE REMINDER SECTION AT THE FOOT OF THIS FILE defines these; `write!` and `forget!` reach
+;; for them from above, because a list with nothing outstanding turns the auto reminder off and
+;; a session taken back takes its reminder memory with it.
+(declare outstanding? disarm! forget-reminder!)
 
 (def statuses
   "The three states an item may be in, and the WHOLE vocabulary. Data rather than
@@ -125,6 +135,10 @@
   the session, so a list written without one would be readable by nobody --
   including the caller, on its next call.
 
+  WRITING A LIST WITH NOTHING OUTSTANDING TURNS THE AUTO REMINDER OFF (`disarm!` below):
+  the switch exists so unfinished work keeps being pushed at the model, and 'every item is
+  completed' is that work being over. The person turns it back on for whatever comes next.
+
   Throws a named failure for every payload `check!` refuses."
   [thread-id items]
   (when (nil? thread-id) (no-session! "todo_write"))
@@ -138,6 +152,8 @@
                           items = excluded.items,
                           updated_at = excluded.updated_at"
                     thread-id (json/write-str stored) (System/currentTimeMillis))))
+    ;; SEE THE DOCSTRING: a list with nothing left to do turns the auto reminder off.
+    (when-not (outstanding? stored) (disarm! thread-id))
     stored))
 
 (defn forget!
@@ -149,7 +165,10 @@
   reader to be told about."
   [thread-id]
   (db/with-transaction
-    (fn [c] (db/execute! c "DELETE FROM todos WHERE thread_id = ?" (str thread-id)))))
+    (fn [c] (db/execute! c "DELETE FROM todos WHERE thread_id = ?" (str thread-id))))
+  ;; AND WHAT THIS PROCESS REMEMBERED ABOUT ITS REMINDERS GOES WITH IT -- see the reminder
+  ;; section below: a forgotten session has no next round to open and no list to remind about.
+  (forget-reminder! thread-id))
 
 ;; ----------------------------------------------------------------- one vocabulary
 ;;
@@ -244,3 +263,241 @@
              (item-count (count items))
              (when (seq counts) (str " (" counts ")"))
              ".")))))
+
+;; ----------------------------------------------------------------- the reminder
+;;
+;; THE SECOND ROAD INTO THE CONVERSATION. Everything above is the LIST -- what `todo_write`
+;; stores and what a reader hands back. This section is what happens when the list is NOT
+;; finished: a `<system-reminder>` saying so, carried into the conversation as a message of the
+;; harness's own.
+;;
+;; TWO HANDS, ONE SHAPE. A person presses (`remind`), or a finished round finds work left while
+;; the person's switch is on (`auto`) -- and both become the SAME message, built by
+;; `reminder-turn` below. That is deliberate: a model reading the reminder must not be able to
+;; tell (or need to tell) which hand pressed it, and one writer means the two can never word it
+;; differently.
+;;
+;; WHY IT IS NOT A DERIVED INJECTION like the goal's. `harness.cap.goal/before-llm` re-derives a
+;; block before EVERY call and is idempotent by content, because a goal is a STANCE that holds
+;; for as long as it is active. A reminder is an EVENT -- 'this round is over and the work is
+;; not' -- which is worth saying once. So it is a real user message, and the two moments one is
+;; made are a person's press and a finished round.
+;;
+;; AND WHY THE SWITCH IS PROCESS MEMORY, like the goal's `armed` and the command queue: 'keep
+;; pushing THIS conversation's list' is a fact about the process serving it right now. A
+;; restart, an eviction and a fork all drop it -- and UNLIKE the goal's `armed`, nothing puts
+;; it back but the person pressing the switch again (`arm!`'s one door,
+;; `harness.edge.http/run-todo-command!`). A goal's arm answers 'I spoke, carry on'; this is a
+;; SWITCH, and a switch a stray message turns on is a switch that starts spending money on its
+;; own.
+
+(def default-max-rounds
+  "How many auto-reminder rounds one session may open before the fuse blows, when config.edn
+  says nothing. The same small number, and the same reasoning, as
+  `harness.cap.goal/default-max-rounds`: a round is a whole run and the money is per token, so
+  the cap is a FUSE rather than a target."
+  25)
+
+(def ^:private known-config-keys #{:max-rounds})
+
+(defn- todo-block
+  "config.edn's `:session :todo` block for THREAD-ID, as written -- nothing merged with the
+  defaults, and every key checked by name, exactly as the goal's own block is: a typo fails
+  here rather than leaving the reminder bounded by whatever the default happened to be."
+  [thread-id]
+  (let [b (:todo (providers/session-config thread-id))]
+    (when-not (or (nil? b) (map? b))
+      (throw (ex-info (str "config.edn's :session :todo must be a map of knobs (:max-rounds),"
+                           " but it is " (pr-str b))
+                      {:reason :bad-todo-config :value b})))
+    (let [unknown (remove known-config-keys (keys b))]
+      (when (seq unknown)
+        (throw (ex-info (str "config.edn's :session :todo carries " (count unknown)
+                             " key(s) nothing reads: " (str/join ", " (sort (map name unknown)))
+                             " -- known: " (str/join ", " (sort (map name known-config-keys))))
+                        {:reason :unknown-todo-key :keys (vec unknown)}))))
+    (or b {})))
+
+(defn- knob
+  "KEY's value in BLOCK, or FALLBACK -- refusing anything that is not a positive whole number,
+  by name. `harness.cap.goal/knob`'s rule over this block, spelled again here rather than
+  reached for: the two caps are two different promises, and neither namespace owns the
+  other's."
+  [block key fallback]
+  (let [n (get block key fallback)]
+    (when-not (and (integer? n) (pos? n))
+      (throw (ex-info (str "config.edn's :session :todo " (name key) " must be a positive whole"
+                           " number, but it is " (pr-str n))
+                      {:reason :bad-todo-knob :key key :value n})))
+    (long n)))
+
+(defn config
+  "The reminder knobs THIS SESSION runs under: config.edn's `:session :todo` over the default
+  written here. Read fresh on every call (the config.edn discipline), so editing the file
+  moves the answer with no restart."
+  [thread-id]
+  {:max-rounds (knob (todo-block thread-id) :max-rounds default-max-rounds)})
+
+(defn outstanding
+  "ITEMS that are not done yet -- everything whose status is not \"completed\", in the list's
+  own order. THE QUESTION THIS WHOLE SECTION IS ABOUT: a reminder is owed exactly when this is
+  not empty."
+  [items]
+  (vec (remove #(= "completed" (:status %)) items)))
+
+(defn outstanding?
+  "Is there anything left in ITEMS for a reminder to be about?"
+  [items]
+  (boolean (seq (outstanding items))))
+
+(defn fingerprint
+  "ITEMS -> a string that changes whenever the list's CONTENT or one of its STATUSES does, and
+  not otherwise. THE BRAKE'S WHOLE EVIDENCE (the driver in `harness.edge.http`): two auto
+  reminders about the same fingerprint would be the same sentence twice, so the second is the
+  one not sent."
+  [items]
+  (let [md (java.security.MessageDigest/getInstance "SHA-1")
+        bs (.digest md (.getBytes (str/join "\u0000"
+                                            (map (fn [item]
+                                                   (str (:status item) "\u0001" (:content item)))
+                                                 items))
+                                    "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bs))))
+
+(def reminder-sentence
+  "What every reminder block asks the model to do -- ONE sentence, and the only place this
+  request is spelled."
+  (str "接着把任务清单做完：做完一项就把它的状态改成 \"completed\"；"
+       "清单有变化时用 `todo_write` 重新提交整份清单。"))
+
+(defn reminder-text
+  "ITEMS -> the `<system-reminder>` block one reminder carries, or nil when there is nothing
+  to remind about: no list, an empty one, or one whose every item is \"completed\".
+
+  THE FIRST LINE IS THE LABEL (`Task list reminder:` -- `harness.cap.reminder/labels` names it),
+  which is what files the block as an INJECTION in the record and titles its card on screen.
+  The whole list is in the block rather than only the unfinished items: where an item stands
+  is half of what the model needs to pick up the work."
+  [items]
+  (when (outstanding? items)
+    (let [left (outstanding items)]
+      (reminder/wrap
+       (concat [(str "Task list reminder: " (item-count (count left)) " not done yet"
+                     (when-some [d (distribution items)] (str " (" d ")"))
+                     " -- " (item-count (count items)) " in all.")]
+               (map (fn [item] (str "- " (get status-markers (:status item) "[ ]") " " (:content item)))
+                    items)
+               [reminder-sentence])))))
+
+(defn reminder-turn
+  "ITEMS -> the message a reminder puts into the conversation: role user, the block above as
+  its content. ONE function, so a person's press, the driver's round and any test cannot word
+  the same reminder three ways."
+  [items]
+  {:role "user" :content (reminder-text items)})
+
+;; -------------------------------------------------------- what this process remembers
+
+(defonce ^:private auto
+  ;; thread-id -> true, for the sessions THIS PROCESS is auto-reminding. Process memory on
+  ;; purpose -- see the section header; `arm!` is the only thing that puts a session in here.
+  (atom #{}))
+
+(defonce ^:private due
+  ;; thread-id -> true, for a PERSON'S reminder owed at the session's next model call. Set
+  ;; where `remind` is executed with a run in flight (`note-manual!`), taken by `take-manual!`
+  ;; in the pre-LLM step. Process memory for the same reason `auto` is.
+  (atom #{}))
+
+(defonce ^:private fuse
+  ;; thread-id -> {:rounds n :prints <fingerprint>}: how many auto rounds this process opened
+  ;; for the session, and the list the last of them was about. The second half is the brake
+  ;; (`fingerprint` above), the first is the fuse (`config`'s :max-rounds).
+  (atom {}))
+
+(defn auto?
+  "Is THIS PROCESS auto-reminding THREAD-ID? False for a session nobody turned it on for, and
+  for every id this process has never heard of."
+  [thread-id]
+  (contains? @auto (str thread-id)))
+
+(defn arm!
+  "Turn THREAD-ID's auto reminder ON in this process -- the switch's ONLY door. Answers true.
+
+  ARMING ALSO CLEARS THE FUSE: a person pressing the switch is a fresh grant, and a count left
+  over from an earlier stretch would blow a fuse they never spent."
+  [thread-id]
+  (let [tid (str thread-id)]
+    (swap! auto conj tid)
+    (swap! fuse dissoc tid)
+    true))
+
+(defn disarm!
+  "Turn THREAD-ID's auto reminder OFF in this process. Called by the switch, by a list every
+  item of which is done (`write!` above), and when the session is REBUILT -- a conversation
+  this process had to fold back into memory is one nobody has pressed the switch for yet."
+  [thread-id]
+  (let [tid (str thread-id)]
+    (swap! auto disj tid)
+    (swap! due disj tid)
+    (swap! fuse dissoc tid))
+  nil)
+
+(defn forget-reminder!
+  "Everything this process remembered about THREAD-ID's reminders, dropped -- what a session
+  taken back leaves behind (`forget!` above is its row)."
+  [thread-id]
+  (disarm! thread-id))
+
+(defn reset-auto!
+  "The process's whole reminder memory, emptied -- a test fixture's door, like the goal's
+  `reset-armed!`."
+  []
+  (reset! auto #{})
+  (reset! due #{})
+  (reset! fuse {}))
+
+(defn note-manual!
+  "A PERSON'S reminder is owed at THREAD-ID's next model call. Called where the `remind`
+  command is executed with a run in flight, and taken by `take-manual!` at that run's next
+  pre-LLM step."
+  [thread-id]
+  (swap! due conj (str thread-id))
+  true)
+
+(defn take-manual!
+  "Is a person's reminder owed here? TAKE IT -- the answer is true only for the call that
+  consumed the request, because a reminder is an event and not a standing injection."
+  [thread-id]
+  (let [tid (str thread-id)]
+    (contains? (first (swap-vals! due disj tid)) tid)))
+
+(defn fuse-for
+  "THREAD-ID's fuse as `{:rounds n :prints <fingerprint-or-nil>}` -- the zero value for a
+  session this process has not opened an auto round for."
+  [thread-id]
+  (get @fuse (str thread-id) {:rounds 0 :prints nil}))
+
+(defn note-a-round!
+  "One more AUTO round has been opened for THREAD-ID, about the list PRINTS fingerprints.
+  Answers the new count."
+  [thread-id prints]
+  (let [tid (str thread-id)
+        n   (inc (long (:rounds (fuse-for tid))))]
+    (swap! fuse assoc tid {:rounds n :prints prints})
+    n))
+
+(defn before-llm
+  "HISTORY with a person's reminder for THREAD-ID appended, when one is owed -- the todo half
+  of the pre-LLM step, composed by `harness.cap.project/before-llm` beside the goal's.
+
+  ONLY WHAT A PERSON ASKED FOR AND HAS NOT BEEN GIVEN comes through this door: the auto
+  reminder does not pass here at all (it is a ROUND, opened by the edge's driver), and a list
+  that finished between the press and this call has nothing to say -- the request is spent
+  and the history unchanged."
+  [history thread-id]
+  (if (take-manual! thread-id)
+    (if-some [text (reminder-text (items-for thread-id))]
+      (conj (vec history) {:role "user" :content text})
+      history)
+    history))

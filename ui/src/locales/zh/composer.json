@@ -38,6 +38,15 @@
     "stop": "停止这一场"
   },
   "todos": {
+    "remind": {
+      "now": "提醒一下",
+      "none": "没有没做完的事可提醒"
+    },
+    "auto": {
+      "label": "自动提醒",
+      "on": "开",
+      "off": "关"
+    },
     "done_other": "{{count}} 已完成",
     "inProgress_other": "{{count}} 进行中",
     "pending_other": "{{count}} 待处理",

@@ -40,6 +40,9 @@
             ;; goal round by itself. It has to be dropped on both doors out of the session table
             ;; (see the two seams below); the goal itself lives in the record.
             [harness.cap.goal :as goal]
+            ;; The task list's reminder switch, for the same one-fact-one-lifetime reason as the
+            ;; goal's permission: it is process memory and this is the moment a session leaves.
+            [harness.cap.todos :as todos]
             [harness.cap.project :as project]
             [harness.edge.host :as host]
             [harness.infra.stream :as stream]
@@ -139,6 +142,11 @@
     ;; The GOAL itself is untouched: it is in the record, and a person speaking to the session
     ;; puts the permission back (`harness.cap.goal/arm-if-active!`).
     (goal/disarm! thread-id)
+    ;; AND THE TASK LIST'S AUTO REMINDER SWITCH GOES OFF WITH IT, for the goal's reason and one
+    ;; more (`harness.cap.todos`): it is process memory too, and a switch a rebuild restored
+    ;; would have this process opening rounds for somebody who never pressed it here. The LIST
+    ;; is untouched -- it is a row -- and the person turns the switch back on.
+    (todos/disarm! thread-id)
     (if-some [f (replay/find-log (home/projects-dir) thread-id)]
       (let [{:keys [entries context state compactions prunes]
              folds :folds} (replay/fold-sofar f registered)]
@@ -196,6 +204,9 @@
                 ;; that fact down would be a second lifetime for something whose whole point is
                 ;; that it does not survive.
                 (goal/disarm! thread-id)
+                ;; AND THE TASK LIST'S REMINDER WITH IT, the same fact about the same lifetime
+                ;; (`harness.cap.todos/disarm!` drops the switch, a due reminder and the fuse).
+                (todos/disarm! thread-id)
                 (stream/fsync! thread-id)
                 (stream/forget-kept! thread-id)
                 nil)})

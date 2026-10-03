@@ -83,7 +83,11 @@
    ["Available skills"  "opening"]
    ["Skill "            "skill"]
    ["Background job "   "job"]
-   ["Session context"   "injection"]])
+   ["Session context"   "injection"]
+   ;; The task list's reminder (`harness.cap.todos/reminder-text`): the harness saying that
+   ;; work a session planned for itself is not finished. An injection like the last row --
+   ;; it says nothing about where the session is going, only about what it is doing.
+   ["Task list reminder:" "injection"]])
 
 (defn- block-lines
   "The lines of TEXT, without the frame: a leading `<system-reminder>` is dropped, and a
