@@ -1,6 +1,6 @@
 # bash 超时的硬上限（bash-timeout-cap）
 
-**状态**：已实现（改动在本票的 worktree 里）。
+**状态**：已实现，已合进 `main`（合并提交 `7adc525`）。
 
 ## 要解决什么
 
@@ -101,3 +101,13 @@ that long」是有意写的），但**没有天花板的等待**意味着一次�
   上限由调用时那句拒绝说清楚。
 - **只有 `bash` 这一格。** `job_output` 的 `:wait` 超时、`job` 的无时限都是另一回事，本票不动（决定 5）。
 - **`ui/dist` 是构建产物**：走查前 `npm run build`（`--scripted` 会自己再构建一次）。
+
+## 验收（2026-10-03）
+
+- 后端：`clojure -M:test -m harness.test-runner` 整轮 1467 用例 / 14805 断言，**4 条红，逐条在 `main` 上复现过，与本票无关**：
+  - `harness.cap.hashline.store-test` 两条（表清单里少了 `model_calls`，`main` 上同样红）；
+  - `harness.edge.delegation-test/a-subagent-can-be-read-back-by-its-own-id`（`main` 上同样红）；
+  - `harness.edge.http-test` 一条（settings 只读那条断言）：单跑在 worktree 上绿、在 `main` 上绿、worktree 再跑一次又绿，而红的那条每次还不一样——判为这台机器上的 flaky，不是本票引入。
+  - 本票动的三个命名空间（`harness.kernel.tools-test` / `harness.cap.providers-test` / `harness.layers-test`）单跑与整轮都全绿。
+- 前端：`npm run typecheck` / `npm test`（230 条）/ `npm run build` 全绿。
+- 走查：`node scripts/dev.mjs --scripted`（隔离家、OS 分配端口、后端自己发 `ui/dist`）——设置 →「会话行为」，默认组与分组表单里都出现「工具 / Bash 最长等待（毫秒）」；改成 30000 保存后，隔离家的 `config.edn` 里写进`:tools {:bash-max-timeout-ms 30000}`，表单读回来也是 30000。
