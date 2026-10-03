@@ -252,6 +252,17 @@ const cases: readonly Case[] = [
       expect(attrOf(off, "composer-todos-auto", "data-on")).toBe("false");
       expect(attrOf(off, "composer-todos-auto", "aria-pressed")).toBe("false");
       expect(off).toContain("lucide-bell-off");
+      // ICON ONLY ON A PHONE (`.scratch/todo-strip-mobile`): two labelled buttons are wide enough
+      // to push the counts into a second row on a narrow screen, so the word is hidden there --
+      // and it STAYS IN THE MARKUP, which is what keeps it the button's name for a screen
+      // reader. The `sm:not-sr-only` is the other half: on a wide screen the word is back.
+      expect(attrOf(off, "composer-todos-remind-word", "class")).toContain("sr-only");
+      expect(attrOf(off, "composer-todos-remind-word", "class")).toContain("sm:not-sr-only");
+      expect(attrOf(off, "composer-todos-auto-word", "class")).toContain("sr-only");
+      expect(attrOf(off, "composer-todos-auto-word", "class")).toContain("sm:not-sr-only");
+      // AND THE STATE IS STILL READABLE WITH THE WORD HIDDEN: the icon changes with the
+      // boolean, and `aria-pressed` (above) says it to a reader.
+      expect(off).toContain("lucide-bell-off");
 
       const on = hands(MIXED, true, "zh");
       expect(textOf(on, "composer-todos-auto")).toContain("自动提醒 · 开");

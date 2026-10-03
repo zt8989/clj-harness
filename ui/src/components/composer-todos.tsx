@@ -223,7 +223,14 @@ export const ComposerTodosView: FC<{
           onClick={onRemind}
         >
           <BellRingIcon aria-hidden className="size-3.5" />
-          {t("todos.remind.now")}
+          {/* ICON ONLY ON A PHONE (`.scratch/todo-strip-mobile`): two labelled buttons are wide
+              enough to push the counts into a second row on a narrow screen, so the word is
+              hidden there and comes back from `sm` up. `sr-only` KEEPS IT AS THE BUTTON'S
+              NAME -- a screen reader still hears `提醒一下` -- and the `title` above is the
+              tooltip a pointer gets. */}
+          <span data-slot="composer-todos-remind-word" className="sr-only sm:not-sr-only">
+            {t("todos.remind.now")}
+          </span>
         </Button>
         {/* THE SWITCH SAYS ITS OWN STATE: the icon, the on/off word and `aria-pressed` are
             three readings of one boolean, and none of them is inferred from the list. */}
@@ -241,7 +248,12 @@ export const ComposerTodosView: FC<{
           ) : (
             <BellOffIcon aria-hidden className="size-3.5" />
           )}
-          {t("todos.auto.label")} · {auto ? t("todos.auto.on") : t("todos.auto.off")}
+          {/* ICON ONLY ON A PHONE, the nudge's rule again -- and here the icon is what says
+              the state (a bell against a bell with a slash), with the word, the `title` and
+              `aria-pressed` all saying it too wherever there is room. */}
+          <span data-slot="composer-todos-auto-word" className="sr-only sm:not-sr-only">
+            {t("todos.auto.label")} · {auto ? t("todos.auto.on") : t("todos.auto.off")}
+          </span>
         </Button>
       </div>
       {failure !== null && (
