@@ -57,6 +57,16 @@ export type ModelRow = {
   /// The database's name for this id, OFFERED rather than applied -- a placeholder
   /// the form shows when the row has no name of its own (`harness.cap.model-data`).
   "name-suggested"?: string;
+  /// THE SAME IDEA FOR THE FACTS THE FOLD ANSWERS (owner, 2026-10-03): what models.dev
+  /// says about this id, OFFERED as a placeholder or a summary rather than applied --
+  /// a save that leaves the field empty still writes nothing, which is what keeps 'the
+  /// file is silent' a state a person can leave a row in. A miss carries no key.
+  "input-suggested"?: readonly string[];
+  "output-suggested"?: readonly string[];
+  "context-window-suggested"?: number;
+  "max-output-tokens-suggested"?: number;
+  /// WHAT THE FILE ITSELF SAID, still: the two counts a person may override. Both
+  /// optional -- 'the file is silent' is the state the suggested keys describe.
   "context-window"?: number;
   "max-output-tokens"?: number;
   /// WHERE A MOVED INSTRUCTION GOES, IF THIS MODEL's line says. ABSENT is not

@@ -2576,7 +2576,8 @@
   ;; what the file says -- an empty modality pair when it said nothing -- and the
   ;; database's name rides beside it as a SUGGESTION, the same way the probe's
   ;; :instruction-updates does. Filling the row in would rewrite lines nobody touched.
-  (write-db! {"gpt-x" {:context-window 128000 :max-output-tokens 16384 :name "GPT-X"}})
+  (write-db! {"gpt-x" {:context-window 128000 :max-output-tokens 16384 :name "GPT-X"
+                       :input [:image :text :video] :output [:text]}})
   (with-home (cfg :alpha)
              (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
                               :model "gpt-x"
@@ -2595,6 +2596,15 @@
             "and no count the file never wrote")
         (is (= "GPT-X" (get-in rows ["gpt-x" :name-suggested]))
             "the database's name is offered beside it")
+        ;; THE FOLD'S FACTS, offered the same way: the modalities NARROWED to what this
+        ;; harness can carry (the database says this model takes video too -- a checkbox
+        ;; row has nowhere to put that), and the two counts as numbers. The suggestion is
+        ;; what a form SHOWS; what a run gets is the resolution's own answer.
+        (is (= ["image" "text"] (get-in rows ["gpt-x" :input-suggested]))
+            "the database's input, narrowed and as wire strings")
+        (is (= ["text"] (get-in rows ["gpt-x" :output-suggested])))
+        (is (= 128000 (get-in rows ["gpt-x" :context-window-suggested])))
+        (is (= 16384 (get-in rows ["gpt-x" :max-output-tokens-suggested])))
         (is (= "Written" (get-in rows ["bare" :name]))
             "a name the file DID write is carried as its own")
         (is (not (contains? (get-in rows ["bare"]) :name-suggested))

@@ -498,6 +498,48 @@ const emptyModel = (id: string): ModelRow => ({
   input: [],
   output: [],
 });
+/// WHAT THE FOLD'S SUMMARY READS WHEN IT IS SHUT: the model's facts as a run would get
+/// them -- the file's own word where the file spoke, models.dev's where it did not.
+/// `TFunction` is loose here because the summary is the only caller and the strings it
+/// reaches for all live on this page's face.
+type ModelFacts = {
+  input: readonly string[];
+  output: readonly string[];
+  "context-window"?: number;
+  "max-output-tokens"?: number;
+};
+
+const modelFactsOf = (row: ModelRow): ModelFacts => ({
+  input: row.input.length > 0 ? row.input : (row["input-suggested"] ?? []),
+  output: row.output.length > 0 ? row.output : (row["output-suggested"] ?? []),
+  "context-window": row["context-window"] ?? row["context-window-suggested"],
+  "max-output-tokens": row["max-output-tokens"] ?? row["max-output-tokens-suggested"],
+});
+
+/// THE COMPACT FACTS LINE for a shut fold: `text · text · 1M · 128K`. Numbers are
+/// humanized because that is how models.dev's own UI shows them; a count nobody knows
+/// (the file silent, the database too) keeps its place as `—` rather than vanishing,
+/// because two items and four items are different shapes to glance at.
+const shortCount = (n: number | undefined): string => {
+  if (n === undefined) return "—";
+  if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1))}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+};
+
+const modelFactsSummary = (row: ModelRow, t: Translate): string => {
+  const f = modelFactsOf(row);
+  const modality = (dirs: readonly string[]): string => {
+    const known = dirs.filter((d) => d === "text" || d === "image");
+    return known.length > 0 ? known.join("+") : t("form.factsUnknown");
+  };
+  return [
+    modality(f.input),
+    modality(f.output),
+    shortCount(f["context-window"]),
+    shortCount(f["max-output-tokens"]),
+  ].join(" · ");
+};
 
 /// One model row: what it is called, what it accepts, and whether it is the
 /// vendor's default. Output is TEXT and only text -- the catalog's vocabulary has
@@ -509,6 +551,14 @@ const ModelRowEditor: FC<{
   onRemove: () => void;
 }> = ({ row, canRemove, onChange, onRemove }) => {
   const { t } = useTranslation("settings");
+  // WHAT THE DATABASE SAYS, as the fold's summary and the two placeholders read it.
+  // Computed once here rather than inside the summary helper so the placeholders and
+  // the summary cannot disagree about which row they are describing.
+  const factHint = row["name-suggested"] ?? "";
+  const countFacts: Record<"context-window" | "max-output-tokens", number | undefined> = {
+    "context-window": row["context-window-suggested"],
+    "max-output-tokens": row["max-output-tokens-suggested"],
+  };
   return (
     <div
       data-slot="settings-provider-model"
@@ -550,59 +600,78 @@ const ModelRowEditor: FC<{
           <TrashIcon />
         </Button>
       </div>
-      <div className="flex items-center gap-3">
-        {(["text", "image"] as const).map((modality) => (
-          <label key={modality} className="flex items-center gap-1 text-xs">
-            <input
-              type="checkbox"
-              // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
-              // vocabulary ("text" / "image") and is printed as-is below, while the
-              // accessible name is a sentence, so each branch names its own key.
-              aria-label={
-                modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
-              }
-              checked={row.input.includes(modality)}
-              onChange={(e) => {
-                const next = e.target.checked
-                  ? [...row.input, modality]
-                  : row.input.filter((m) => m !== modality);
-                onChange({ ...row, input: next });
-              }}
-            />
-            {modality}
-          </label>
-        ))}
-        <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
-        {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
-            as one whose line says `replace`: the first is silence the server fills
-            with the conservative default, the second is something a person wrote. So
-            the empty option DELETES the key rather than writing `replace`, and a save
-            that never touched this control leaves every other model's line alone. */}
-        <label className="flex items-center gap-1 text-xs">
-          {t("form.instructionUpdates")}
-          <select
-            data-slot="settings-provider-model-instruction-updates"
-            aria-label={t("form.instructionUpdatesLabel")}
-            className={inputClass}
-            value={row["instruction-updates"] ?? ""}
-            onChange={(e) => {
-              const next = { ...row };
-              const value = e.target.value;
-              if (value === "") delete next["instruction-updates"];
-              else next["instruction-updates"] = value as "in-place" | "replace";
-              onChange(next);
-            }}
-          >
-            <option value="">{t("form.instructionUpdatesUndeclared")}</option>
-            <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
-            <option value="replace">{t("form.instructionUpdatesReplace")}</option>
-          </select>
-        </label>
-        <details data-slot="settings-provider-model-limits" className="ml-auto">
-          <summary className="text-muted-foreground cursor-pointer text-xs">
-            {t("form.limits")}
-          </summary>
-          <div className="mt-1 flex items-center gap-2">
+      {/* ONE FOLD FOR EVERYTHING THE DATABASE ANSWERS (owner, 2026-10-03: 'set the id,
+          make the name optional, fold the limits up together with input/output -- the
+          facts come from models.dev'). What stays OUT of the fold is what only this
+          person can say: the id and the name. Everything inside is a fact about the
+          model that models.dev already answers -- the modalities, the two counts --
+          plus the one thing it does NOT (the delivery capability), which is why the
+          fold's summary says 'from models.dev' and the delivery control does not
+          pretend otherwise.
+          
+          THE SUMMARY CARRIES THE ANSWER WHEN THE FOLD IS SHUT: what the file says,
+          followed by what models.dev would fill in where it is silent. A row that
+          declares nothing reads 'text · text · 1M · 128K' -- the RESOLVED answer,
+          not an empty pair -- because that is what a run on this model would do.
+          Which of the two halves said it stays visible once the fold is open. */}
+      <details data-slot="settings-provider-model-facts" className="rounded-md border border-dashed px-2 py-1">
+        <summary
+          data-slot="settings-provider-model-facts-summary"
+          className="text-muted-foreground cursor-pointer text-xs select-none"
+        >
+          {modelFactsSummary(row, t)}
+        </summary>
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            {(["text", "image"] as const).map((modality) => (
+              <label key={modality} className="flex items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
+                  // vocabulary ("text" / "image") and is printed as-is, while the
+                  // accessible name is a sentence, so each branch names its own key.
+                  aria-label={
+                    modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
+                  }
+                  checked={row.input.includes(modality)}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...row.input, modality]
+                      : row.input.filter((m) => m !== modality);
+                    onChange({ ...row, input: next });
+                  }}
+                />
+                {modality}
+              </label>
+            ))}
+            <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
+            {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
+                as one whose line says `replace`: the first is silence the server fills
+                with the conservative default, the second is something a person wrote. So
+                the empty option DELETES the key rather than writing `replace`, and a save
+                that never touched this control leaves every other model's line alone. */}
+            <label className="flex items-center gap-1 text-xs">
+              {t("form.instructionUpdates")}
+              <select
+                data-slot="settings-provider-model-instruction-updates"
+                aria-label={t("form.instructionUpdatesLabel")}
+                className={inputClass}
+                value={row["instruction-updates"] ?? ""}
+                onChange={(e) => {
+                  const next = { ...row };
+                  const value = e.target.value;
+                  if (value === "") delete next["instruction-updates"];
+                  else next["instruction-updates"] = value as "in-place" | "replace";
+                  onChange(next);
+                }}
+              >
+                <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+                <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
+                <option value="replace">{t("form.instructionUpdatesReplace")}</option>
+              </select>
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
             {(["context-window", "max-output-tokens"] as const).map((count) => (
               <label key={count} className="flex items-center gap-1 text-xs">
                 {count === "context-window" ? t("form.context") : t("form.maxOut")}
@@ -617,6 +686,7 @@ const ModelRowEditor: FC<{
                   }
                   className="h-6 w-20 text-xs"
                   inputMode="numeric"
+                  placeholder={countFacts[count] === undefined ? "" : String(countFacts[count])}
                   value={row[count] ?? ""}
                   onChange={(e) => {
                     const raw = e.target.value.trim();
@@ -628,10 +698,21 @@ const ModelRowEditor: FC<{
                 />
               </label>
             ))}
+            {/* THE MODALITY CHECKBOXES carry the same suggestion in their PLACEHOLDER
+                state (the `title`, since a checkbox has none): what models.dev says this
+                model takes, so an unticked pair reads as 'the file is silent' rather than
+                'it takes nothing'. The resolution's own answer is what the summary
+                already shows. */}
+            <span
+              className="text-muted-foreground text-xs"
+              title={factHint}
+            >
+              {t("form.factsHint")}
+            </span>
           </div>
-          <p className="text-muted-foreground mt-1 text-[10px]">{t("form.limitsNote")}</p>
-        </details>
-      </div>
+          <p className="text-muted-foreground text-[10px]">{t("form.limitsNote")}</p>
+        </div>
+      </details>
     </div>
   );
 };
