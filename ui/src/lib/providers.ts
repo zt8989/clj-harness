@@ -120,6 +120,13 @@ export type KnownProvider = {
   readonly name?: string;
   readonly "base-url": string;
   readonly "model-count": number;
+  /// Whether THIS ENVIRONMENT already holds the key this vendor reads -- checked with
+  /// the same lookup a run does (the document's own variable name first, then this
+  /// harness's derived name, then the global), so 'pick and use' is true exactly when a
+  /// run would pass. The `key` fact beside it carries WHICH name won; a VALUE never
+  /// rides along, in a pick list any more than anywhere else.
+  readonly "key-ready": boolean;
+  readonly key: ProviderKey;
 };
 
 /// What `GET /api/providers` answers, and what every write answers with too.

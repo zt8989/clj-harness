@@ -650,26 +650,26 @@ const ModelRowEditor: FC<{
                 with the conservative default, the second is something a person wrote. So
                 the empty option DELETES the key rather than writing `replace`, and a save
                 that never touched this control leaves every other model's line alone. */}
-            <label className="flex items-center gap-1 text-xs">
-              {t("form.instructionUpdates")}
-              <select
-                data-slot="settings-provider-model-instruction-updates"
-                aria-label={t("form.instructionUpdatesLabel")}
-                className={inputClass}
-                value={row["instruction-updates"] ?? ""}
-                onChange={(e) => {
-                  const next = { ...row };
-                  const value = e.target.value;
-                  if (value === "") delete next["instruction-updates"];
-                  else next["instruction-updates"] = value as "in-place" | "replace";
-                  onChange(next);
-                }}
-              >
-                <option value="">{t("form.instructionUpdatesUndeclared")}</option>
-                <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
-                <option value="replace">{t("form.instructionUpdatesReplace")}</option>
-              </select>
-            </label>
+            {/* ONE LINE, NOT TWO (owner, 2026-10-03: 'instruction-updates must not wrap onto a
+                second line'): the LABEL TEXT moves into the select's accessible name, so
+                what stays in the flow is the control alone -- no wrapping label beside it. */}
+            <select
+              data-slot="settings-provider-model-instruction-updates"
+              aria-label={t("form.instructionUpdatesLabel")}
+              className={`${inputClass} w-auto`}
+              value={row["instruction-updates"] ?? ""}
+              onChange={(e) => {
+                const next = { ...row };
+                const value = e.target.value;
+                if (value === "") delete next["instruction-updates"];
+                else next["instruction-updates"] = value as "in-place" | "replace";
+                onChange(next);
+              }}
+            >
+              <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+              <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
+              <option value="replace">{t("form.instructionUpdatesReplace")}</option>
+            </select>
           </div>
           <div className="flex items-center gap-2">
             {(["context-window", "max-output-tokens"] as const).map((count) => (
@@ -911,7 +911,15 @@ const ProviderForm: FC<{
             {known.map((k) => (
               <option key={k.id} value={k.id}>
                 {k.name ?? k.id} · {k.id} · {t("form.knownVendorModels", { count: k["model-count"] })}
-                {taken.has(k.id) ? ` · ${t("form.knownVendorTaken")}` : ""}
+                {/* READY FIRST, at no cost to a person: this environment already holds the
+                    key this vendor reads (checked with the SAME lookup a run does --
+                    models.dev's own variable name, this harness's derived name, the
+                    global). '已配置' stays for an entry THIS HOME already has. */}
+                {k["key-ready"]
+                  ? ` · ${t("form.knownVendorReady")}`
+                  : taken.has(k.id)
+                    ? ` · ${t("form.knownVendorTaken")}`
+                    : ""}
               </option>
             ))}
           </select>

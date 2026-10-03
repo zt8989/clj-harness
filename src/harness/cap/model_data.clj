@@ -330,18 +330,25 @@
   IT IS THE SAME DOCUMENT AS THE MODEL INDEX and a different question asked of it:
   'which vendors are reachable' rather than 'what is this model'. `name` is what a
   person reads in the picker, and `model-count` is there so an offer of a vendor tells
-  whether it serves anything before a session depends on it."
+  whether it serves anything before a session depends on it. `:env` is the VARIABLE(S)
+  the document says this vendor's key lives in -- carried as DATA for the settings
+  form to check the environment against, which is how a vendor whose key is already
+  exported can be offered as ready-to-use. Rows with more than one name
+  (`CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_API_KEY`) carry them all; a form treats the LAST
+  as the key proper and the rest as extra setup it cannot fill in."
   [parsed]
   (into {}
         (keep (fn [[id entry]]
                 (let [api (get entry "api")
-                      nm  (get entry "name")]
+                      nm  (get entry "name")
+                      env (get entry "env")]
                   (when (and (= openai-compatible-npm (get entry "npm"))
                              (string? api)
                              (not (str/blank? api)))
                     [id (cond-> {:base-url    api
                                  :model-count (count (get entry "models"))}
-                          (and (string? nm) (not (str/blank? nm))) (assoc :name nm))]))))
+                          (and (string? nm) (not (str/blank? nm))) (assoc :name nm)
+                          (sequential? env) (assoc :env (vec (filter string? env))))]))))
               parsed))
 
 ;; ---------------------------------------------------------- the database io
