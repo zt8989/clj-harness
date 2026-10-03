@@ -63,9 +63,7 @@
     "keyMissing": "no key",
     "count_one": "{{count}} model · {{credential}}",
     "count_other": "{{count}} models · {{credential}}",
-    "withoutKeys_one": "{{count}} provider has no key — open to add one",
-    "withoutKeys_other": "{{count}} providers have no key — open to add one",
-    "withoutKeysHint": "A provider with no key cannot serve a run, so it is not offered above. Add its key and it moves back into the list."
+    "noneYet": "No providers here yet. Add one, or pick a vendor from the built-in list — models.dev knows their addresses."
   },
   "origin": {
     "builtin": "built-in",
@@ -86,6 +84,16 @@
     "apiKeyEditingHint": "Leave empty to keep the line in .env as it is. A value replaces it.",
     "apiKeyHint": "Written to the home's .env as its own line, named after the id. Never sent back to this page.",
     "catalogTitle": "Model catalog",
+    "source": "Where it comes from",
+    "sourceHint": "Built-in = pick a vendor models.dev knows (185 OpenAI-compatible ones, each with the address it publishes) and take its name and address from there; Custom = type them. Both fill the same form, and a picked address stays editable.",
+    "sourceKnown": "Built-in vendor",
+    "sourceCustom": "Custom vendor",
+    "knownVendor": "Pick a vendor",
+    "knownVendorHint": "Sorted by the vendor's own name. An address may carry a placeholder (Cloudflare's account id, say) that you still have to fill in.",
+    "knownVendorPick": "— pick a vendor —",
+    "knownVendorModels_one": "{{count}} model",
+    "knownVendorModels_other": "{{count}} models",
+    "knownVendorTaken": "already configured",
     "firstLead": "The ",
     "firstWord": "first",
     "firstTail": " model is this vendor's own default — what a run lands on when no tier names one. Which model a session actually starts on is set in General, not here.",

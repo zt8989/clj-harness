@@ -2600,3 +2600,32 @@
         (is (not (contains? (get-in rows ["bare"]) :name-suggested))
             "and nothing is suggested over it")))))
 )
+
+(deftest the-report-offers-the-vendors-a-person-may-pick-from
+  ;; THE FORM'S 'built-in vendor' HALF. models.dev's reachable vendors (see
+  ;; harness.cap.model-data/provider-index) plus the table this harness ships with --
+  ;; the second because a vendor it ships with must stay addable: `openrouter` is
+  ;; OpenAI-compatible in fact but is filed under its own SDK in that document, and a
+  ;; built-in with no key is not drawn in the provider list any more.
+  (spit (home/modelsdev-cache-file)
+        (json/write-str {:fetched-at (System/currentTimeMillis)
+                         :models []
+                         :providers [["zai" {:name "Z.AI"
+                                             :base-url "https://api.z.ai/api/paas/v4"
+                                             :model-count 18}]]})
+        :encoding "UTF-8")
+  (with-home nil nil
+    (fn []
+      (let [rows (:known-providers (providers/registry-report))
+            by-id (into {} (map (juxt :id identity)) rows)]
+        (is (some? (get by-id "zai")) "a models.dev vendor is offered")
+        (is (= "https://api.z.ai/api/paas/v4" (:base-url (get by-id "zai"))))
+        (is (= 18 (:model-count (get by-id "zai"))))
+        (testing "and the harness's own table is in the same list"
+          (is (some? (get by-id "openrouter"))
+              "a built-in stays addable even though that document files it elsewhere")
+          (is (= "https://openrouter.ai/api/v1" (:base-url (get by-id "openrouter")))))
+        (testing "one row per vendor, and sorted the way the form draws it"
+          (is (= (count rows) (count (distinct (map :id rows)))))
+          (is (= (map :id rows) (sort (map :id rows)))
+              "ids arrive in the same order as the names they are sorted by here"))))))

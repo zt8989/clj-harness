@@ -48,22 +48,18 @@ export type KeyFact = { readonly key: ProviderKey };
 /// from the real environment, which is one answer and not two.
 export const hasKey = (provider: KeyFact): boolean => provider.key["present?"];
 
-/// PROVIDERS split into the ones this home holds a key for and the ones it does not,
-/// each keeping the order it was given: the caller's order is the reader's order, and
-/// the server already sorted them by name.
+/// WHAT THE SETTINGS LIST DRAWS. A SECOND RULE ON PURPOSE, and not the one above: the
+/// picker offers what a run could be served by, while the settings list shows what THIS
+/// HOME IS ABOUT.
 ///
-/// BOTH HALVES ARE RETURNED because both are DRAWN: the keyed ones as the list, and
-/// the rest behind a sentence that says how many there are and how to bring them back.
-/// Dropping the second half would hide the built-in table's ids, and "add a provider
-/// to give openrouter a key" is an action a person takes by reading one.
-export function splitByKey<T extends KeyFact>(
-  providers: readonly T[],
-): { keyed: T[]; unkeyed: T[] } {
-  const keyed: T[] = [];
-  const unkeyed: T[] = [];
-  for (const provider of providers) {
-    if (hasKey(provider)) keyed.push(provider);
-    else unkeyed.push(provider);
-  }
-  return { keyed, unkeyed };
-}
+/// THE RULE IS 'a key, OR an entry that is the person's own'. The built-in table is a
+/// convenience catalog -- Ollama is in it, needs no key, and has no business holding a
+/// row on a page about this home's providers. An entry somebody WROTE is a different
+/// thing: it is in config.edn because a person put it there, so it stays visible whether
+/// or not a key is in place yet (a local gateway may need none at all).
+///
+/// `origin` IS THE SERVER'S ANSWER (`providers/origin-of`) and not a guess made here --
+/// which of the three an entry is decides whether the page offers to delete a built-in.
+export const drawnInSettings = (
+  provider: KeyFact & { readonly origin: string },
+): boolean => hasKey(provider) || provider.origin !== "builtin";

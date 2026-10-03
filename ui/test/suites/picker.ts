@@ -19,7 +19,7 @@ import {
   matchesOption,
   type PickerOption,
 } from "../../src/lib/picker";
-import { hasKey, splitByKey, type KeyFact } from "../../src/lib/provider-key";
+import { drawnInSettings, hasKey, type KeyFact } from "../../src/lib/provider-key";
 import {
   modelMenu,
   modelRowFromKey,
@@ -31,13 +31,17 @@ import { effortsForModel, effortsOffered } from "../../src/lib/efforts";
 /// A row carrying the shared key fact, in the shape BOTH faces hand it around: the
 /// settings row and the picker's choices row are different objects that agree on
 /// `key`, and this is the smallest thing that stands for either.
-type KeyedRow = KeyFact & { name: string; models: string[] };
+type KeyedRow = KeyFact & { name: string; models: string[]; origin: string };
+
+/// A vendor as the PICKER reads it. Deliberately NOT `KeyedRow`: the menu's rows come
+/// from `/api/choices`, which says nothing about where an entry came from -- `origin` is
+/// the settings registry's fact, and the picker never asks for it.
 
 /// A vendor as the model picker's menu reads it: the shared key fact, the ids it declares,
 /// and the label it may carry. `lib/model-rows.ts` names exactly these fields -- and names
 /// them structurally, for the reason above -- so a change to either wire shape stops this
 /// file COMPILING rather than letting the literals drift into agreement with nothing.
-type MenuVendor = KeyedRow & { "display-name"?: string };
+type MenuVendor = KeyFact & { name: string; models: string[]; "display-name"?: string };
 
 /// The little catalog every case below reads: two vendors with two models each,
 /// one model the catalog does not list, and one project whose label is only its
@@ -154,17 +158,20 @@ const cases: Case[] = [
       const keyed: KeyedRow = {
         name: "deepseek",
         models: ["deepseek-flash"],
+        origin: "builtin",
         key: { "present?": true, source: "env-file", name: "DEEPSEEK_API_KEY" },
       };
       const unkeyed: KeyedRow = {
         name: "ollama",
         models: ["qwen3"],
+        origin: "builtin",
         key: { "present?": false, source: null, name: "OLLAMA_API_KEY" },
       };
       const all: KeyedRow[] = [
         keyed,
         unkeyed,
-        { name: "gamma", models: ["g"], key: { "present?": true, source: "environment" } },
+        { name: "zeta", models: ["z"], origin: "user", key: { "present?": false, source: null } },
+        { name: "gamma", models: ["g"], origin: "user", key: { "present?": true, source: "environment" } },
       ];
 
       // PRESENCE IS THE WHOLE FACT, and it is not a source: a key in the home's .env
@@ -175,22 +182,25 @@ const cases: Case[] = [
       expect(hasKey(unkeyed)).toBe(false);
       expect(all.every((row) => typeof hasKey(row) === "boolean")).toBe(true);
 
-      // BOTH FACES READ THE SAME RULE, each in the shape its own drawing wants: the
-      // settings page needs the two halves APART -- the list, and the rest behind a
-      // sentence -- and calls `splitByKey`, while the picker only ever asks "may this
-      // one be offered" and filters with `hasKey`. One predicate underneath, which is
-      // the point; a partition that SORTED would be a second opinion about a provider's
-      // order, so the order given is the order kept.
-      const { keyed: withKeys, unkeyed: without } = splitByKey(all);
+      // TWO PREDICATES, TWO QUESTIONS, and keeping them apart is the point: the picker
+      // asks "may this one be OFFERED" (`hasKey`) while the settings list asks "is this
+      // page ABOUT it" (`drawnInSettings`: a key, or an entry somebody wrote). Neither
+      // is a partition of the other, and a page that read the picker's answer would hide
+      // a person's own keyless entry -- a local gateway needs no key at all.
+      const withKeys = all.filter(hasKey);
       expect(withKeys.map((provider) => provider.name)).toEqual(["deepseek", "gamma"]);
-      expect(without.map((provider) => provider.name)).toEqual(["ollama"]);
-      expect(splitByKey([]).keyed).toEqual([]);
-      expect(splitByKey([]).unkeyed).toEqual([]);
-      // ...and the picker's filter is the same cut: what it keeps is exactly the half
-      // the settings page lists.
-      expect(all.filter(hasKey).map((provider) => provider.name)).toEqual(
-        withKeys.map((provider) => provider.name),
-      );
+
+      // THE SETTINGS LIST, over the same rows: the built-in table's keyless row
+      // (ollama) is NOT drawn -- the owner asked for exactly that -- while the user's
+      // own keyless entry (zeta) is, because it is in config.edn because a person put
+      // it there. The order given is the order kept; a rule that SORTED would be a
+      // second opinion about a provider's order.
+      expect(all.filter(drawnInSettings).map((provider) => provider.name)).toEqual([
+        "deepseek",
+        "zeta",
+        "gamma",
+      ]);
+      expect([].filter(drawnInSettings)).toEqual([]);
 
       // AND THE PICKER'S CONSEQUENCE: only the keyed providers' models reach the menu,
       // in the providers' own order. The session's CURRENT model is not this module's
