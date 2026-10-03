@@ -390,7 +390,14 @@
   provider table is fresh by its timestamp and still cannot answer 'which vendors are
   reachable'. Waiting seven days for that answer would be a feature that arrives next
   week, so a caller that needs a table the payload does not carry asks for the refresh
-  itself."
+  itself.
+  
+  THE COOLDOWN REMEMBERS FAILURES, NOT ATTEMPTS (`db-last-attempt` goes back to 0 the
+  moment one lands): what it is for is a machine that cannot reach the host, and an
+  attempt that SUCCEEDED is no reason to refuse the next question a read has. Measured
+  2026-10-03: a home whose cache was written an hour ago -- successfully, but before
+  this namespace kept a provider table -- would otherwise have shown three vendors
+  until the hour was up."
   [payload missing?]
   (let [at (get payload :fetched-at 0)
         t  (now)]
@@ -401,6 +408,10 @@
       (future
         (try
           (refresh-db!)
+          ;; IT LANDED: the cooldown's memory is cleared, so the next question a read asks
+          ;; is answered from a payload that has everything rather than waiting out an
+          ;; hour it no longer needs to.
+          (reset! db-last-attempt 0)
           (catch Throwable e
             (log/warn! :model-data/modelsdev-refresh-failed
                        {:url modelsdev-url :reason (ex-message e)}))
