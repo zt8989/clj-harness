@@ -378,6 +378,14 @@ const cases: Case[] = [
       expect(effortsForModel("openrouter/deepseek-v4.1-flash").name).toBe("deepseek");
       expect(effortsForModel("z-ai/glm-5").name).toBe("glm");
       expect(effortsForModel("anthropic/claude-sonnet-4.5").name).toBe("anthropic");
+      // ...AND NOT EVERY RELAY PICKS `/` TO DO IT. A gateway's `cn:glm-5.3-flash`
+      // spells the namespace after a colon; the family is still the model, so the
+      // last of EITHER separator is where the family begins. Without it the whole
+      // id is the family, no prefix matches, and a glm model gets OpenAI's ladder.
+      expect(effortsForModel("cn:glm-5.3-flash").name).toBe("glm");
+      expect(effortsForModel("cn:deepseek-v4.1-flash").name).toBe("deepseek");
+      expect(effortsForModel("cn:hy3")).toEqual(effortsForModel("gpt-5"));
+      expect(effortsForModel("gw/cn:glm-5").name).toBe("glm");
       // An id is an address, so its case is not part of it.
       expect(effortsForModel("KIMI-K2").name).toBe("kimi");
 

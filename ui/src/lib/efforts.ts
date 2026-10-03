@@ -71,11 +71,15 @@ const VENDORS: readonly { readonly prefixes: readonly string[]; readonly vendor:
 /// level would refuse a choice a vendor would have taken.
 const FALLBACK: EffortVendor = VENDORS[0]!.vendor;
 
-/// The part of MODEL a person reads as the model: everything after its LAST `/` is
-/// the family (`z-ai/glm-5` -> `glm-5`), and an id with no separator is all family.
+/// The part of MODEL a person reads as the model: a RELAY SPELLS ITSELF INTO THE ID
+/// it serves, and it does not always pick `/` to do it -- OpenRouter's
+/// `z-ai/glm-5` writes the family after a slash, a gateway's `cn:glm-5.3-flash`
+/// writes it after a colon. Everything after the LAST of either is the family, and
+/// an id with no separator is all family. Whichever separator an id uses, the
+/// family is the model; the part in front is the endpoint's own spelling.
 /// Lowercased, because an id is an address and `KIMI-K2` is the same one.
 const bareModel = (model: string): string => {
-  const cut = model.lastIndexOf("/");
+  const cut = Math.max(model.lastIndexOf("/"), model.lastIndexOf(":"));
   return (cut < 0 ? model : model.slice(cut + 1)).toLowerCase();
 };
 
