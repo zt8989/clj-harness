@@ -50,6 +50,7 @@
     "modelHint": "这个提供方自己的模型之一。它自己的默认已预先选好。",
     "reasoning": "默认思考档",
     "noneSent": "— 不发送 —",
+    "followsVendor": "默认（跟随厂商，走 {{level}}）",
     "save": "保存默认档",
     "errorNote": "什么都没写进去——这一档还是原来的样子。"
   },

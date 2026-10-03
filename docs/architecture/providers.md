@@ -118,6 +118,15 @@
 session 保持原样、日志里一行不落。先写后败会把一个每轮都跑不起来的配置
 钉在会话上，而报错要等到**下一次** run 才出现。
 
+**`:reasoning-effort` 是三态的**（会话档与默认档同一条约定，与 `POST /api/defaults` 的缺席/`null` 一致）：
+**缺席** = 别动这个旋钮；**给了值** = 用这个档；**显式 `null`** = 从那一档摘掉这个键，回落到下层——
+对声明了思考梯子的厂商，落点就是**它自己的默认档**。空串**不是**任何一态：它曾经是 composer
+「默认档」行发出去的值，结果被当成一个真实的档写进会话档、原样送上 wire（`reasoning_effort: ""`），
+还把下面几层压得说不上话——如今它在 `selection` 就被**指名拒绝**，路由层面给一句教的报错。
+「默认档」这一行现在发的是显式 `null`，composer 与设置页的空选项都**按当前模型点名**它落在哪里
+（`ui/src/lib/efforts.ts` 的厂商表：anthropic/google/deepseek 走 `high`，glm/kimi 走 `max`；
+OpenAI 的默认按模型定，所以保持中性文案，不编一个档出来）。
+
 ## 会话分组：`:session` 是默认组，`:groups` 按模型覆盖
 
 `:session` 那一节——editing / compaction / llm / approval / skills / instructions / subagents——

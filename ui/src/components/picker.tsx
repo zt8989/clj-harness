@@ -78,7 +78,12 @@ export const Picker: FC<PickerProps> = ({
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const current = options.find((option) => option.value === value) ?? null;
+  // MATCHED AS STRINGS, BOTH WAYS. The picker's value and the options' values are
+  // usually the same type, but the effort picker hands a null-valued 默认档 row a
+  // `value` of "" when nothing is chosen -- and `null === ""` is false. Both sides
+  // go through String() so 'nothing chosen' matches 'the row that means nothing
+  // chosen' without either side having to know the other's spelling.
+  const current = options.find((option) => String(option.value) === String(value)) ?? null;
   const shown = searchable ? filterOptions(options, query) : options;
   const groups = groupOptions(shown);
 
@@ -90,7 +95,7 @@ export const Picker: FC<PickerProps> = ({
     setOpen(next);
     if (!next) return;
     setQuery("");
-    const index = options.findIndex((option) => option.value === value);
+    const index = options.findIndex((option) => String(option.value) === String(value));
     setActive(index < 0 ? 0 : index);
   };
 

@@ -16,6 +16,7 @@
     "label": "Reasoning effort",
     "title": "Reasoning effort — this session only",
     "default": "default",
+    "defaultFollows": "default ({{level}})",
     "vendorDefault": "vendor default"
   },
   "skill": {

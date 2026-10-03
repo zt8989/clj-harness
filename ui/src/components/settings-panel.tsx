@@ -86,7 +86,7 @@ import {
   type Registry,
 } from "@/lib/providers";
 import { hasKey, splitByKey } from "@/lib/provider-key";
-import { effortsOffered } from "@/lib/efforts";
+import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
 import { getSettings, type Settings } from "@/lib/settings";
 import {
@@ -196,6 +196,12 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
   const modelFor = (p: ProviderRow | undefined, want: string): string =>
     p !== undefined && p.models.some((m) => m.id === want) ? want : (p?.model ?? "");
 
+  /// WHAT THE EMPTY OPTION MEANS, NAMED. An effort the tier does not pin puts the
+  /// choice back on the vendor's own default -- so the empty row says so, read
+  /// from the same vendor table the composer's 默认档 row uses (`lib/efforts.ts`).
+  /// A vendor with no stated default (OpenAI: it is per model) keeps the
+  /// vendor-neutral row instead of inventing a level here.
+  const vendorDefaultLabel: string | null = effortsForModel(model).default ?? null;
   // The tier is re-read after every write, so the controls follow the file rather
   // than their own last submission.
   useEffect(() => {
@@ -325,7 +331,17 @@ const Defaults: FC<{ registry: Registry; onChanged: () => void }> = ({
           disabled={busy}
           onChange={(e) => setEffort(e.target.value)}
         >
-          <option value="">{t("defaults.noneSent")}</option>
+          {/* 默认档, NOT 'NONE SENT'. The empty option is the tier saying nothing,
+              which puts the effort back on the vendor's own default -- and that is
+              NAMED HERE, from the same vendor table the composer reads, so the two
+              faces adapt together (OpenAI, whose default is per model, keeps the
+              vendor-neutral row). The server refuses no level; this is a label,
+              not a guard. */}
+          <option value="">
+            {vendorDefaultLabel === null
+              ? t("defaults.noneSent")
+              : t("defaults.followsVendor", { level: vendorDefaultLabel })}
+          </option>
           {effortsOffered(model, effort).map((r) => (
             <option key={r} value={r}>
               {r}

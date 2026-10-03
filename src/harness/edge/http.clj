@@ -6447,8 +6447,15 @@
   THE ONLY WAY A SESSION'S SELECTION MOVES, now that the `session-configure`
   tool is gone: the composer's picker presses this, and nothing else writes the
   session tier. The three knobs are exactly provider, model and reasoning-effort,
-  an unknown key is refused by name, and the change is validated by RESOLVING IT
-  before anything is written -- a change that cannot be served is not a change,
+  an unknown key is refused by name, and REASONING-EFFORT IS THREE-STATE: ABSENT
+  means 'leave that knob alone', a string means 'serve with this level', and an
+  explicit null means 'drop the knob from this session's own tier' -- back on the
+  default tier below it, which for a vendor with a ladder means the vendor's own
+  default level. This is /api/defaults' convention one tier up, and it is what
+  makes the composer's 默认档 row honest: the empty string it used to send was a
+  VALUE, pinned on the wire and smothering the tiers below. A blank string is
+  refused by name before anything resolves. THE CHANGE IS STILL VALIDATED BY
+  RESOLVING IT, before anything is written -- a change that cannot be served is not a change,
   and writing first would leave the session holding a configuration every later
   run fails on.
 
@@ -6505,17 +6512,37 @@
             (api-response 200 (providers/wire (providers/active-provider thread-id))))
 
           :else
-          (let [change (cond-> {}
-                         (some? (:provider ok))         (assoc :provider (:provider ok))
-                         (some? (:model ok))            (assoc :model (:model ok))
-                         (some? (:reasoning-effort ok)) (assoc :reasoning-effort (:reasoning-effort ok)))]
-            (if (empty? change)
+          (let [;; REASONING-EFFORT IS THREE-STATE, and a plain cond-> cannot express
+                ;; it -- threading inserts the accumulated map as the FIRST argument,
+                ;; so a nested (cond …) there mis-folds into (cond {} …). Built by
+                ;; hand instead: a nil value IS the knob's removal (the picker's 默认档),
+                ;; a string is a level, and a blank string is named below, not obeyed.
+                change (cond-> {}
+                   (some? (:provider ok))         (assoc :provider (:provider ok))
+                   (some? (:model ok))            (assoc :model (:model ok)))
+                change (if (contains? ok :reasoning-effort)
+                   (cond
+                     (nil? (:reasoning-effort ok)) (assoc change :reasoning-effort nil)
+                     (str/blank? (str (:reasoning-effort ok))) (assoc change :blank-effort true)
+                     :else (assoc change :reasoning-effort (:reasoning-effort ok)))
+                   change)]
+            (cond
+              ;; A BLANK EFFORT IS NAMED, NOT OBEYED, before anything resolves: the
+              ;; empty string is the value the old picker sent for its 默认档 row,
+              ;; and obeying it would pin "" on the wire and silence the tiers below.
+              ;; The default is the knob's ABSENCE -- an explicit null drops it.
+              (contains? change :blank-effort)
+              (api-response 400 {:error (str ":reasoning-effort is the empty string, which is not a level; "
+                                         "give one the vendor names, or null to follow the vendor's own default")})
+
+              (empty? change)
               (api-response 400 {:error "nothing to change: give at least one of provider, model, reasoning-effort"})
               ;; ONE ATOM OPERATION, and it answers the transition it made. Reading the
               ;; tier here and writing it back would lose a change another press made in
               ;; between -- this route runs on an http-kit thread, so two presses of the
               ;; picker can overlap -- and this line would then record a before->after
               ;; pair that never happened.
+              :else
               (let [answer (try {:ok (providers/swap-override! thread-id change (window-veto thread-id))}
                                 (catch Throwable t {:error (ex-message t)}))]
                 (if-some [error (:error answer)]

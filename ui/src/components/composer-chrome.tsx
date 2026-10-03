@@ -348,7 +348,12 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
                 ? dirs
                 : [{ value: current, label: projectName(current), hint: current }, ...dirs]
             }
-            onPick={(option) => void rebind(option.value)}
+            onPick={(option) => {
+              // The directory picker offers no null-valued row, but the option type
+              // now allows one -- narrowed here rather than loosened at the source.
+              if (option.value === null) return;
+              void rebind(option.value);
+            }}
           />
         )}
         {git.data?.["repo?"] === true && (
@@ -368,7 +373,10 @@ const ComposerContextBar: FC<{ threadId: string }> = ({ threadId }) => {
                 ? [{ value: "", label: t("context.detached") }, ...git.data.branches.map(branchesOf)]
                 : git.data.branches.map(branchesOf)
             }
-            onPick={(option) => void switchTo(option.value)}
+            onPick={(option) => {
+              if (option.value === null) return;
+              void switchTo(option.value);
+            }}
           />
         )}
         {git.data?.["repo?"] === true && git.data.dirty > 0 && (
@@ -429,7 +437,11 @@ const ComposerTools: FC = () => {
     if (model !== undefined) attachmentGuard.noteModel(model);
   }, [model]);
 
-  const change = async (next: { provider?: string; model?: string; "reasoning-effort"?: string }) => {
+  const change = async (next: {
+    provider?: string;
+    model?: string;
+    "reasoning-effort"?: string | null;
+  }) => {
     if (threadId === null || busy) return;
     setBusy(true);
     setError(null);
@@ -510,6 +522,7 @@ const ComposerTools: FC = () => {
           // sent, not whichever vendor the catalog happens to list first for this id.
           // A row with no vendor -- an inline provider has no id -- has none to send, so
           // only the model travels, which is what a change of model alone looks like.
+          if (option.value === null) return;
           const row = modelRowFromKey(option.value);
           void change(
             row.provider === undefined
@@ -522,6 +535,10 @@ const ComposerTools: FC = () => {
       <Picker
         slot="composer-effort"
         label={t("effort.label")}
+        // The trigger shows the session's own level when it has one. WHEN IT HAS
+        // NONE, the 默认档 row is the current one -- the empty string matches its
+        // null-valued option by the same 'no value chosen' convention the picker
+        // already runs on (see `Picker`'s `current`).
         value={data["reasoning-effort"] ?? ""}
         disabled={busy}
         leading={<BrainIcon className="text-muted-foreground size-4 shrink-0" />}
@@ -534,14 +551,26 @@ const ComposerTools: FC = () => {
         // model's: on a phone the icon IS the control.
         iconOnly
         options={[
-          { value: "", label: t("effort.default") },
+          {
+            // 默认档 DROPS THE SESSION'S OWN EFFORT KNOB (an explicit null), so the
+            // levels below it -- config.edn's default, the vendor's own ladder --
+            // answer again. What that lands on is NAMED HERE, read from the same
+            // vendor table as the per-level hints: a vendor with a stated default
+            // level shows it ("默认档（high）"), one without (OpenAI, whose default
+            // is per model) keeps the plain row. The label adapts; the wire sees
+            // only the null.
+            value: null,
+            label: vendor.default
+              ? t("effort.defaultFollows", { level: vendor.default })
+              : t("effort.default"),
+          },
           ...effortsOffered(data.model, data["reasoning-effort"]).map((effort) => ({
             value: effort,
             label: effort,
             hint: effort === vendor.default ? t("effort.vendorDefault") : undefined,
           })),
         ]}
-        onPick={(option) => void change({ "reasoning-effort": option.value })}
+        onPick={(option) => void change({ "reasoning-effort": option.value as string | null })}
       />
       {error !== null && (
         <p role="alert" data-slot="composer-tools-error" className="text-destructive text-xs">

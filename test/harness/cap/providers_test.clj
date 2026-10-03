@@ -1794,6 +1794,41 @@
             "and the session keeps exactly what it had")
         (finally (providers/set-override! "p-bad" nil))))))
 
+(deftest an-explicit-nil-knob-is-a-removal-and-a-blank-effort-is-refused
+  ;; THE NULL THE PICKER SENDS. The composer's 默认档 row answers 'which level?'
+  ;; with an explicit null (POST /api/model's three-state reasoning-effort), which
+  ;; must DROP the knob from the session's own tier -- never store it, and never
+  ;; store the empty string the row used to send, which pinned a blank level on
+  ;; the wire and smothered the tiers below. Selection is the one gate both routes
+  ;; (this fold and config.edn's own tier) go through, so the blank rule lives there.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (try
+        (testing "a nil knob is folded out, and what it removed stays removed"
+          (providers/swap-override! "p-null" {:model "alpha-small" :reasoning-effort "high"})
+          (is (= {:model "alpha-small" :reasoning-effort "high"}
+                 (providers/override-for "p-null")))
+          (let [{:keys [after resolved]} (providers/swap-override! "p-null" {:reasoning-effort nil})]
+            (is (= {:model "alpha-small"} after) "the knob is gone from the stored tier")
+            (is (nil? (:reasoning-effort resolved))
+                "and the resolution answers the ABSENCE, not a stored nil")))
+        (testing "removing the last knob is a clear: the session is back on the tiers below"
+          (let [{:keys [after]} (providers/swap-override! "p-null" {:model nil})]
+            (is (nil? after) "nothing left to remember")
+            (is (nil? (providers/override-for "p-null")))))
+        (testing "a blank string is a named failure at every entrance"
+          (is (thrown-with-msg? Exception #"reasoning-effort"
+                                (providers/swap-override! "p-null" {:reasoning-effort ""})))
+          (is (thrown-with-msg? Exception #"reasoning-effort"
+                                (providers/swap-override! "p-null" {:reasoning-effort "   "})))
+          (is (nil? (providers/override-for "p-null"))
+              "a refused blank writes nothing, either"))
+        (testing "config.edn's own tier is held to the same rule"
+          (with-home (pr-str {:provider :alpha :reasoning-effort ""}) reg
+            (fn []
+              (is (thrown-with-msg? Exception #"reasoning-effort"
+                                    (providers/effective-provider "p-null"))))))))))
+
 (deftest a-callers-veto-refuses-the-change-and-writes-nothing
   ;; THE THIRD ARGUMENT. It is a closure rather than a flag because the QUESTION belongs to the
   ;; caller -- `POST /api/model` asks whether the conversation at hand fits the window of the

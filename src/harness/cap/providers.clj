@@ -1180,7 +1180,20 @@
 
   Canonicalizing the name is not cosmetic. JSON hands over \"beta\" and EDN hands
   over :beta; folding them as two values would mint two providers, and a reader
-  diffing a session's timeline would see a vendor switch where nothing switched."
+  diffing a session's timeline would see a vendor switch where nothing switched.
+
+  A KNOB WHOSE VALUE IS nil IS ABSENT, not chosen-nil: the fold and the reports read
+  absence, so a nil a tier meant as 'remove' IS the removal -- the explicit null
+  /api/model answers with is folded out here, one rule for every tier. A BLANK
+  :reasoning-effort is the one value that fails by name: the empty string is a
+  placeholder for 'follow the vendor's default', a placeholder would silence the
+  tiers below it for nothing, and the vendor reads it as a value. The default is
+  the knob's ABSENCE -- a tier that wants it back removes the key.
+
+  Nothing here VALIDATES an effort beyond that: the value travels to the wire as
+  `reasoning_effort` and each vendor decides what the names mean (see
+  `reasoning-efforts` for why the menu is an offer and not a guard).
+"
   [m]
   (when-not (describing? m)
     (let [bad (sortable (filter catalog-fields (keys m)))]
@@ -1192,7 +1205,18 @@
                    " -- declare them on the model entry in config.edn's :providers"
                    " (or describe the whole provider inline in :default)")
               {:unknown bad :knobs knobs}))))
-  (let [s (select-keys m knobs)]
+  (let [effort  (:reasoning-effort m)
+        blank?  (and (some? effort) (str/blank? (str effort)))
+        s   ;; A NIL KNOB IS ABSENCE: the fold reads absence, so a nil a tier meant
+        ;; as 'remove' IS the removal -- folded out here, one rule for every tier,
+        ;; and before the blank check below can ever see it.
+        (into {} (remove (comp nil? val)) (select-keys m knobs))]
+    (when blank?
+      (fail (str "a tier's :reasoning-effort is " (pr-str effort)
+                 ", which is not a level; the default is the key's ABSENCE -- remove"
+                 " the key (an explicit null on POST /api/model) to follow the vendor's"
+                 " own default, or name a level the vendor accepts")
+          {:knob :reasoning-effort :value effort}))
     (if (contains? s :provider)
       (update s :provider name-of)
       s)))
@@ -1678,15 +1702,25 @@
   what makes a clear always work -- so a caller that wants to police a return to the default
   tier has to ask about it itself.
 
-  CHANGE nil clears the override, and the answer is then {:after nil}. `set-override!` is
-  the same store without the transition, and stays for the callers that only want to set
-  a value."
+  CHANGE nil clears the override, and the answer is then {:after nil}. The same answer
+  comes from a change whose knobs are ALL REMOVED -- an explicit nil per knob is the
+  null a client sends to drop one (the effort picker's 默认档), and a change that
+  removes the last knob the session owned empties the selection, which IS a clear:
+  the session is back on the tiers below, and there is nothing left to remember.
+  `set-override!` is the same store without the transition, and stays for the callers
+  that only want to set a value."
   ([thread-id change] (swap-override! thread-id change nil))
   ([thread-id change veto]
    (loop []
      (let [m       @session-overrides
            before  (get m thread-id)
-           sel     (when change (selection (merge before change)))
+          sel     (when change
+                   (let [s (selection (merge before change))]
+                     ;; A CHANGE THAT REMOVES THE LAST KNOB EMPTIES THE SELECTION,
+                     ;; and an empty selection IS a clear -- nothing left to
+                     ;; remember, the session back on the tiers below. The answer
+                     ;; is the same {:after nil} a plain nil change answers with.
+                     (when (seq s) s)))
            ;; Throws when the change cannot be served -- before anything is written.
            served  (when sel (resolve-override sel))
            ;; AND THE CALLER MAY STILL SAY NO, on the selection this iteration is about to
@@ -2940,9 +2974,17 @@
   (unknown-keys! "the default tier the form submitted" knobs #{:provider :model :reasoning-effort})
   (doseq [k [:provider :model :reasoning-effort]]
     (let [v (get knobs k)]
+      ;; A BLANK STRING IS NOT A NAME, and it is not 'nothing' either: written
+      ;; through, it would sit in config.edn's :default and fail every fresh
+      ;; session at resolve time (selection's blank rule). The form's ""
+      ;; means 'clear the key' and becomes an explicit null upstream of here.
+      (when (and (string? v) (str/blank? v))
+        (fail (str "the default tier's " (pr-str k) " is the empty string, which is "
+                   "not a name; give the key a value, or null to remove it")
+              {k v}))
       (when (and (contains? knobs k) (some? v) (not (string? v)) (not (keyword? v)) (not (symbol? v)))
         (fail (str "the default tier's " (pr-str k) " is " (pr-str v)
-                   ", which is not a name; a knob is a name or nothing at all")
+                  ", which is not a name; a knob is a name or nothing at all")
               {k v}))))
   (let [raw     (config)
         before  (or (:default raw) {})

@@ -4918,7 +4918,37 @@
                                          (json/write-str {:threadId id
                                                           :reasoning-effort "high"})))]
            (is (= "high" (:reasoning-effort body)))
-           (is (= "deepseek-flash" (:model body)))))))))
+           (is (= "deepseek-flash" (:model body)))))
+       ;; THE THREE-STATE KNOB (owner: 默认档 must adapt to the vendor's default).
+       ;; ABSENT leaves it alone, a STRING picks a level, an explicit NULL drops it
+       ;; from the session's own tier -- back on the tiers below. The blank string
+       ;; the old picker sent is refused by name, not obeyed.
+       (testing "an explicit null drops the effort knob; the tier keeps the rest"
+         (let [body (read-json (api-call :post "/api/model"
+                                         (json/write-str {:threadId id
+                                                          :reasoning-effort nil})))]
+           (is (= 200 (.statusCode (api-call :post "/api/model"
+                                             (json/write-str {:threadId id
+                                                              :reasoning-effort nil})))))
+           (is (nil? (:reasoning-effort body)) "the answer carries no effort")
+           (is (= {:provider :deepseek :model "deepseek-flash"}
+                  (providers/override-for id))
+                  "the session's own tier keeps provider and model only")))
+       (testing "and it can be picked again afterwards"
+         (let [body (read-json (api-call :post "/api/model"
+                                         (json/write-str {:threadId id
+                                                          :reasoning-effort "low"})))]
+           (is (= "low" (:reasoning-effort body)))
+           (is (= {:provider :deepseek :model "deepseek-flash" :reasoning-effort "low"}
+                  (providers/override-for id)))))
+       (testing "a blank string is named, not obeyed"
+         (let [resp (api-call :post "/api/model"
+                              (json/write-str {:threadId id :reasoning-effort ""}))]
+           (is (= 400 (.statusCode resp)))
+           (is (str/includes? (:error (read-json resp)) "empty string"))
+           (is (= {:provider :deepseek :model "deepseek-flash" :reasoning-effort "low"}
+                  (providers/override-for id))
+                  "and a refused blank writes nothing")))))))
 
 (deftest the-model-endpoint-refuses-what-it-cannot-serve-and-writes-nothing
   (with-bare-server

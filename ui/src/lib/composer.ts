@@ -87,10 +87,19 @@ export async function modelFor(threadId: string, t: Translate): Promise<ModelAns
 }
 
 /// Change this session's selection. Only the named knobs move; `clear` drops the
-/// session's own tier and puts it back on config.edn.
+/// session's own tier and puts it back on config.edn. REASONING-EFFORT IS
+/// THREE-STATE: absent leaves the knob alone, a string picks a level, and `null`
+/// DROPS THE KNOB -- the 默认档 row -- which puts the effort back on the tiers
+/// below, the vendor's own default for one with a ladder. An empty string is NOT
+/// a state: it used to be sent here and it pinned a blank level on the wire.
 export async function setModel(
   threadId: string,
-  change: { provider?: string; model?: string; "reasoning-effort"?: string; clear?: boolean },
+  change: {
+    provider?: string;
+    model?: string;
+    "reasoning-effort"?: string | null;
+    clear?: boolean;
+  },
   t: Translate,
 ): Promise<void> {
   const res = await fetch(`${API_BASE}model`, {

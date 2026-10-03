@@ -21,7 +21,12 @@
 /// for the model list); `hint` is secondary text -- shown dimmed next to the label
 /// and searched, never the value that gets sent.
 export type PickerOption = {
-  readonly value: string;
+  /// The identity that gets SENT on a pick. A string names what to send; `null`
+  /// names NO THING -- the effort picker's 默认档 row, which sends an explicit
+  /// null so the server drops the session's own knob instead of pinning a value.
+  /// Matched against the picker's `value` as strings, so 'nothing chosen' finds
+  /// this row (see `components/picker.tsx`'s `current`).
+  readonly value: string | null;
   readonly label: string;
   readonly group?: string | undefined;
   readonly hint?: string | undefined;

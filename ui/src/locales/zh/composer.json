@@ -15,6 +15,7 @@
     "label": "思考档",
     "title": "思考档——只改本会话",
     "default": "默认档",
+    "defaultFollows": "默认档（{{level}}）",
     "vendorDefault": "厂商默认"
   },
   "skill": {

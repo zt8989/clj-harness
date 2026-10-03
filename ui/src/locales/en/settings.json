@@ -50,6 +50,7 @@
     "modelHint": "One of this vendor's models. The vendor's own default is preselected.",
     "reasoning": "Default reasoning effort",
     "noneSent": "— none sent —",
+    "followsVendor": "default (follows the vendor: {{level}})",
     "save": "Save default tier",
     "errorNote": "Nothing was written — the tier still holds what it held."
   },
