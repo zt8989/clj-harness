@@ -614,7 +614,7 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the literal `tool` -- a wire tool message carries no name at all -- which the page draws as a
 /// card for a tool that does not exist. The case pins that invention and the new rule side by
 /// side, plus the two shapes the rule must not touch.
-const EXPECTED_CASES = 226;
+const EXPECTED_CASES = 227;
 
 
 let total = 0;

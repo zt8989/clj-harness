@@ -7,12 +7,14 @@
 // summary that now stands where a folded range stood (`lib/compactions.ts`). Neither is a message
 // the model was handed as a turn of its own, and `toAgUiMessages` has no case for a `data` part, so
 // a card is visible in the conversation and is never sent back to the server.
-//
-// WHY THE NAMES LIVE IN ONE PLACE. Three rules are about CARDS rather than about either kind:
+// WHY THE NAMES LIVE IN ONE PLACE. Four rules are about CARDS rather than about either kind:
 //
 //   `isCardPart`     is this part one of ours?
 //   `isCardOnly`     is this message ONLY cards, so the thread must not draw it as a bubble?
 //   `keepCardParts`  put the parts back into a rebuilt conversation, by id.
+//   `cardsUnderHead` the cards a turn's head must carry with it, so a card that
+//                    stands in front of a turn draws UNDER its summary line when
+//                    the turn is open -- not above it (`.scratch/system-reminder`).
 //
 // Each of them, written once per name, would be a rule that can disagree with itself -- and the app
 // draws a card-only message through the ONE renderer the part's name selects, so a name missing
@@ -119,3 +121,65 @@ export function keepCardParts(
     return card === undefined ? message : ({ ...message, content: [card] } as ThreadMessageLike);
   });
 }
+
+/// THE CARDS A TURN'S HEAD CARRIES WITH IT, by the index of the head in `messages`:
+/// the row a card-only message sits at draws the card where the model read it, but the
+/// FOLD's summary line is drawn by the turn's first assistant message -- which sits
+/// BELOW that card. Open the turn and the card comes back ABOVE the line it is grouped
+/// under, and a reader sees `注入卡 → N 步折叠线 → 工具行` -- the order the owner
+/// reported as wrong: the card must sit UNDER the line it belongs to, the way a step
+/// does.
+///
+/// The head's answer is to BORROW the cards of the card-only messages immediately in
+/// front of it: drawing them inside the head, right after the summary line, is what
+/// puts the card under the fold it belongs to, and the original row's own drawing is
+/// suppressed by the same fact (`UserInjectionCard` asks the question back). A run's
+/// OWN injection (a skill body streamed mid-run) never lands here -- the adapter hangs
+/// it INSIDE the assistant message it belongs to, already under the line.
+///
+/// `parts` reads the raw converted shapes -- the runtime's `MessageState` and a test
+/// literal are both that -- so this stays a leaf rule a suite can pin over arrays.
+export const cardsUnderHead = (() => {
+  /// THE CACHE. Keyed by the MESSAGES ARRAY (weakly -- it dies when the thread's next
+  /// update replaces it) and then by the head's index, so EVERY mounted message can ask
+  /// and a re-render that hands the same state back (the ordinary case -- a store update
+  /// somewhere else in the thread) gets the SAME array out. A fresh array per call would
+  /// make a `useAuiState` selector built on this unstable by `Object.is`: React re-checks
+  /// a snapshot within one render pass, a miss there is an infinite re-render, and the
+  /// page dies with error #185 (measured). A PRIMITIVE answer (the booleans the other
+  /// selectors return) needs none of this; an array does.
+  const cache = new WeakMap<object, Map<number, readonly DataPart[]>>();
+  return (messages: readonly unknown[], headIndex: number): readonly DataPart[] => {
+    let byIndex = cache.get(messages);
+    if (byIndex === undefined) {
+      byIndex = new Map();
+      cache.set(messages, byIndex);
+    }
+    const hit = byIndex.get(headIndex);
+    if (hit !== undefined) return hit;
+    const head = messages[headIndex] as { role?: unknown } | null | undefined;
+    let answer = EMPTY_CARDS;
+    if (head !== undefined && head !== null && head.role === "assistant") {
+      // Walk back over the card-only messages directly in front of the head. Every one of
+      // them belongs to no turn (`lib/turns` puts a card-only message in none), so a run of
+      // them is material this turn was handed; the first thing that is NOT one stops the
+      // walk -- a person's message, an assistant step of an earlier turn, anything else.
+      const collected: DataPart[] = [];
+      for (let i = headIndex - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { parts?: readonly unknown[] } | null | undefined;
+        if (message === undefined || message === null) break;
+        const parts = message.parts;
+        if (parts === undefined || parts.length === 0 || !parts.every(isCardPart)) break;
+        // The cards go back in their reading order -- the walk runs backwards.
+        for (const part of parts) {
+          if (isCardPart(part)) collected.unshift(part as DataPart);
+        }
+      }
+      answer = collected;
+    }
+    byIndex.set(headIndex, answer);
+    return answer;
+  };
+})();
+
+const EMPTY_CARDS: readonly DataPart[] = [];

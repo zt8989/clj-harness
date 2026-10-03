@@ -37,6 +37,8 @@ import {
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/assistant-ui/elements/tooltip-icon-button";
 import { TurnStepsTrigger, useFoldedAnswer, useFollowingTurnFolded, useStepFold, useTurnFolded } from "@/components/turn-steps";
+import { turnIsSettled, turnStepBounds, type TurnMessage, type TurnOf } from "@/lib/turns";
+import { subscribeTurnRows, turnOfMessage, turnRows } from "@/lib/turn-rows";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 // LOCAL (ticket 06): the window's top, and the scroll container it anchors against.
@@ -45,7 +47,7 @@ import { WindowTop, type WindowTopProps } from "@/components/window-top";
 // from something a person typed -- and, since `.scratch/compaction-frames`, that the same is true of
 // EVERY card the server sends: the rule is over the names, not over one of them (`lib/card-parts`).
 import { InjectionCard } from "@/components/context-card";
-import { isCardOnly, isKeptCardPart } from "@/lib/card-parts";
+import { isCardOnly, isKeptCardPart, cardsUnderHead } from "@/lib/card-parts";
 import { isOpeningEntryId, textOfParts } from "@/lib/injections";
 // LOCAL (`.scratch/composer-loading-state`): the new-chat question lives in `lib/` now, so
 // the view and the composer's chrome ask it once instead of twice -- see that module's head.
@@ -113,7 +115,9 @@ import {
 } from "lucide-react";
 import {
   createContext,
+  useCallback,
   useContext,
+  useSyncExternalStore,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -232,6 +236,31 @@ const isStepAfter = (s: AssistantState) => {
     isCardOnly(previous.parts) ||
     isOpeningEntryId(previous.id)
   );
+};
+
+// LOCAL (2026-10-02): THE TWO QUESTIONS `UserInjectionCard` asks the turn in front of
+// it, answered by INDEX rather than by name -- the row's own position, `s.message.index`,
+// is where the walk starts. `followingHeadIndex` is the first message of the next turn
+// that the record puts a turn around (the same walk `turn-steps.tsx`'s `nextTurnIndex`
+// makes); `isFoldableAt` is that turn's `last > first && settled`, read AT the index
+// handed in. Both take the record's `turnOf` as an argument rather than closing over it,
+// because a `useAuiState` selector must be pure -- the caller owns the hook. The pair
+// exists for one reason: the head BORROWS this row's cards while its turn stands
+// (`cardsUnderHead` in `lib/card-parts`), and this row must not draw them a second time.
+const followingHeadIndex = (s: AssistantState, turnOf: TurnOf): number => {
+  const { messages } = s.thread;
+  for (let i = s.message.index + 1; i < messages.length; i += 1) {
+    if (turnOf(messages[i] ?? {}) !== undefined && turnStepBounds(messages, i, turnOf).first === i) {
+      return i;
+    }
+  }
+  return -1;
+};
+
+const isFoldableAt = (s: AssistantState, turnOf: TurnOf, index: number): boolean => {
+  const { messages } = s.thread;
+  const { first, last } = turnStepBounds(messages, index, turnOf);
+  return last > first && turnIsSettled(messages, last, s.thread.isRunning);
 };
 
 // LOCAL: WHAT TWO ADJACENT STEPS ARE SEPARATED BY, spelled once because three places draw
@@ -696,7 +725,16 @@ const AssistantMessage: FC = () => {
   const fold = useStepFold();
   const folded = useTurnFolded();
   const foldedAnswer = useFoldedAnswer();
-
+  // LOCAL (2026-10-02): THE CARDS THAT STAND IN FRONT OF THIS TURN'S HEAD. A card-only
+  // message (the opening's injections, drawn by `UserInjectionCard`) sits BELOW the head
+  // in the list, so open the turn and it drew ABOVE the summary line this head owns --
+  // `注入卡 → N 步折叠线 → …`, the wrong way round. The head BORROWS those cards and
+  // draws them right after its own trigger line, which is where a step of the fold
+  // would sit; the original row suppresses itself by the same fact, so the cards are
+  // drawn exactly once, and always under the line they belong to. An empty answer is
+  // the ordinary case: a mid-run injection lands INSIDE the assistant message and no
+  // message in front of this one is card-only at all.
+  const borrowedCards = useAuiState((s) => cardsUnderHead(s.thread.messages, s.message.index));
   // LOCAL: A CARD IS NOT A STEP (`lib/card-parts`, `.scratch/compaction-frames`). The
   // compaction card says the MODEL's view moved and the injected-context card says what it was
   // handed -- neither is work this turn did -- so a folded turn draws them and puts away only
@@ -746,7 +784,26 @@ const AssistantMessage: FC = () => {
       {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
           way back in. It is drawn by the turn's FIRST message, because that is
           where a reader meets the turn; the steps it hides are its siblings. */}
+      {/* LOCAL: the summary line a folded turn leaves behind -- what it did and the
+          way back in. It is drawn by the turn's FIRST message, because that is
+          where a reader meets the turn; the steps it hides are its siblings. */}
       {fold === "head" ? <TurnStepsTrigger /> : null}
+      {/* LOCAL (2026-10-02): the cards this head BORROWED from the card-only rows in
+          front of it, drawn right under the summary line -- the place a step of this
+          fold would sit. They are part of the head's own `putAway` scope below through
+          `hasCard`... actually through `borrowed` here: `putAway` only reaches the
+          GroupedParts body, so this block asks `folded` directly. While the turn is
+          folded the original rows are hidden by `useFollowingTurnFolded` and these are
+          hidden with it, so the cards exist exactly once either way. */}
+      {borrowedCards.map((card, i) => (
+        <div
+          key={`borrowed-${i}`}
+          data-slot="aui_borrowed-injection"
+          className={cn("px-2", fold === "head" && folded && "hidden")}
+        >
+          <InjectionCard value={card.data as never} />
+        </div>
+      ))}
       <div
         data-slot="aui_assistant-message-content"
         className={cn(
@@ -1064,13 +1121,36 @@ const UserInjectionCard: FC = () => {
   /// user message is not inside any turn (`lib/turns`), which is why the fold is read
   /// FORWARD (`useFollowingTurnFolded`).
   const folded = useFollowingTurnFolded();
+  /// LOCAL (2026-10-02): AND WHEN THE TURN IS OPEN, THE CARD MOVES INTO IT. The turn's
+  /// first assistant message (the fold's head) borrows the cards of the card-only rows
+  /// in front of it and draws them under its own summary line (`cardsUnderHead` in
+  /// `lib/card-parts`) -- which is where a step of the fold would sit. This row drawing
+  /// as well would put the card on screen twice: once above the line, once under it.
+  /// So when the head is actually borrowing -- its turn is foldable, which is what makes
+  /// the question non-vacuous -- this row steps aside for the whole turn, folded OR open.
+  ///
+  /// THE RECORD'S OWN turnOf, BUILT HERE: the same three parts `turn-steps.tsx` builds its
+  /// from (the thread id, a subscription to the turn rows, the id lookup), because a
+  /// selector must stay pure and cannot reach for a hook. `rows` rides the dependency of
+  /// nothing here -- it is read only so this component re-renders when the record moves a
+  /// turn, and the selectors below close over the CURRENT reading.
+  const threadId = useContext(ThreadIdContext);
+  useSyncExternalStore(subscribeTurnRows, () => turnRows(threadId));
+  const turnOf: TurnOf = useCallback(
+    (message: TurnMessage) => turnOfMessage(threadId, message.id ?? null)?.turnId,
+    [threadId],
+  );
+  const borrowed = useAuiState((s) => {
+    const head = followingHeadIndex(s, turnOf);
+    return head >= 0 && isFoldableAt(s, turnOf, head);
+  });
   const text = useAuiState((s) =>
     isCardOnly(s.message.parts) ? "" : textOfParts(s.message.parts),
   );
   /// EVERY HOOK ABOVE THE RETURN, EVERY TIME: a component that returns before its last
   /// `useAuiState` renders a different number of hooks on the folded render than on the open
   /// one, which React refuses (a blank page, not a wrong one).
-  if (folded) return null;
+  if (folded || borrowed) return null;
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-injection-root"

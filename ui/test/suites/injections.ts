@@ -30,7 +30,7 @@ import { expect } from "vitest";
 import { toAgUiMessages } from "@assistant-ui/react-ag-ui";
 
 import { type Case, type Suite } from "../e2e";
-import { isCardOnly, isKeptCardPart, keepCardParts } from "../../src/lib/card-parts";
+import { isCardOnly, isKeptCardPart, keepCardParts, cardsUnderHead } from "../../src/lib/card-parts";
 import { COMPACTION_PART } from "../../src/lib/compactions";
 import {
   INJECTION_PART,
@@ -433,6 +433,52 @@ const cases: readonly Case[] = [
       expect(isKeptCardPart({ type: "text", text: "x" })).toBe(false);
       expect(isKeptCardPart(null)).toBe(false);
       expect(isKeptCardPart("not a part")).toBe(false);
+      expect(isKeptCardPart({ type: "text", text: "x" })).toBe(false);
+      expect(isKeptCardPart(null)).toBe(false);
+      expect(isKeptCardPart("not a part")).toBe(false);
+    },
+  },
+  {
+    name: "a-head-borrows-the-cards-standing-in-front-of-it",
+    run: async () => {
+      const card = (data: unknown) => ({ type: "data", name: INJECTION_PART, data });
+      const assistant = { role: "assistant", parts: [{ type: "text", text: "答案" }] };
+      const person = { role: "user", parts: [{ type: "text", text: "问题" }] };
+
+      // THE OPENING SHAPE: two card-only rows, then the turn's head. The head borrows
+      // both, in reading order -- this is what puts them UNDER the summary line when the
+      // turn is drawn open (the row above the head would put them above it).
+      const opening = [
+        { role: "user", parts: [card({ text: "one" })] },
+        { role: "user", parts: [card({ text: "two" })] },
+        assistant,
+      ];
+      expect(cardsUnderHead(opening, 2).map((part) => (part.data as { text: string }).text)).toEqual([
+        "one",
+        "two",
+      ]);
+
+      // A RUN OF CARD-ONLY ROWS IS TAKEN WHOLE, and one card in it is not dropped.
+      expect(cardsUnderHead(opening, 2)).toHaveLength(2);
+
+      // THE WALK STOPS AT THE FIRST NON-CARD ROW: a person's message in front of the
+      // head is a turn boundary, not material of this turn -- its words belong to the
+      // reader, not under this fold's line.
+      expect(cardsUnderHead([person, assistant], 1)).toEqual([]);
+
+      // AN ASSISTANT STEP IN FRONT (an earlier turn's tail, or a mid-run injection the
+      // adapter hung INSIDE its own message) is not borrowed either -- the cards there
+      // are already where they belong.
+      expect(cardsUnderHead([{ role: "assistant", parts: [{ type: "text", text: "上一轮" }] }, assistant], 1)).toEqual([]);
+
+      // A HEAD AT INDEX 0 HAS NOTHING IN FRONT OF IT -- the ordinary live shape, where
+      // every injection arrived inside the assistant message the run was already writing.
+      expect(cardsUnderHead([assistant], 0)).toEqual([]);
+
+      // AND A CARD-ONLY MESSAGE IS NOT A HEAD: the question is only ever asked AT an
+      // assistant message (the fold's first), and handing it a card row would be asking
+      // a row to borrow itself.
+      expect(cardsUnderHead(opening, 0)).toEqual([]);
     },
   },
 ];
