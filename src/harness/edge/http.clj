@@ -2645,6 +2645,13 @@
   resolve from, and re-resolving from the default tier would quietly move it to a
   different model than the conversation that delegated to it is holding.
 
+  AND THE TURN IS WRITTEN DOWN (ADR 0017), like any conversation's: the task is this
+  record's one client message, so a `turn/start` row stands before it and the run's
+  terminal writes the `turn/end` -- the record stays self-describing (one row family,
+  one reader), and the trajectory's fold has a turn to draw the delegation's cells
+  inside. Without them the fold answers an EMPTY ledger: nothing here is different on
+  the wire, but what the record reads back as is.
+
   A RUN THAT DIED STILL LEAVES WHAT IT SAID. The frames collected so far are folded in
   the `finally`, which is the agent route's own rule for the same reason, and the
   answer is then the honest nothing `answer-of` words for an empty history -- the
@@ -2670,7 +2677,13 @@
         last-line (atom nil)
         ;; AND THE ONE PLACE THE AGENT ROUTE ALSO USES for its text (`text-lines`): the messages
         ;; still open live here, and what reaches the record is the snapshot, not the token.
-        text     (atom {})]
+        text     (atom {})
+        ;; AND THE LINE THE TURN OPENS ON (ADR 0017): the boundary row's own offset, taken
+        ;; by its lands callback and spent by the `turn/end` row at the run's terminal --
+        ;; the same holding the agent route's `:turn/from` state key does. NIL until the
+        ;; write lands, which is the record's own answer for a turn whose opening line
+        ;; never made it to disk.
+        turn-from (atom nil)]
     (binding [hook/*sink* (sink-for thread-id run-id)
               ;; THE DELEGATION'S OWN ROWS, for the same reason and the same reader as the agent
               ;; route's (`entry-lines`).
@@ -2690,6 +2703,16 @@
                :subagent   (:name definition)
                :threadId   thread-id})
       (try
+        ;; AND THE TURN IS WRITTEN DOWN (ADR 0017), exactly as the agent route's is: the
+        ;; delegated task is this conversation's one client message, so it OPENS the turn --
+        ;; `turn/start` before the words it bounds -- and the run's terminal closes it. THE
+        ;; FOLDS NEED IT: the trajectory draws a run's cells only inside a turn the record
+        ;; opened (`one-run`'s `:turn?` branch), so a delegation whose record held no turn
+        ;; row read back as an EMPTY trajectory, and the writer's `:turn` fold had nothing
+        ;; to close. THE ROW IS LAUNDRY, NOT A MESSAGE: nothing here goes on the wire, and
+        ;; the count folds answer the same two shapes they always did.
+        (log! thread-id run-id "turn/start" {}
+              (fn [offset] (reset! turn-from offset)))
         ;; THE TASK IS THIS CONVERSATION'S FIRST ENTRY, and it is NAMED by the run
         ;; (`-task`) the way the converter names the messages it mints: an entry with
         ;; no id cannot be deduped, by `append!`, by the fold or by a repeat.
@@ -2768,6 +2791,28 @@
                       ;; got to -- which is nothing, unless the write itself failed (the row is then
                       ;; still the account's, and the account is how the reconciliation knows).
                       (log-messages! thread-id run-id (drop @reported (:added ev)))
+                      ;; AND THE TURN CLOSES HERE (ADR 0017), after the returned tail has
+                      ;; landed -- the counts this row carries include the assistant messages
+                      ;; the run just wrote, read off the writer's own fold. THE FACT GOES OUT
+                      ;; TOO (`family-send!`), because a panel can open THIS conversation live
+                      ;; from its delegation card, and parity with the agent route is the whole
+                      ;; shape of these two rows.
+                      (when (some? @turn-from)
+                        (let [counts (turn/answer (sessions/fold-value thread-id :turn))
+                              to     (stream/flushed-seq thread-id)
+                              ;; THE TURN'S NAME IS DERIVED, NOT MINTED: the record line it
+                              ;; opened on (`turns/turn-id`), the same spelling the window reads.
+                              turnId (turns/turn-id thread-id @turn-from)
+                              ;; THE FACT'S `:seq` IS THE ROW'S OWN LINE (`family-send!`'s
+                              ;; contract): the number the write itself returns, like the agent
+                              ;; route's.
+                              row    (log! thread-id run-id "turn/end"
+                                           (cond-> (merge {:seqFrom @turn-from :seqTo to} counts)
+                                             (some? turnId) (assoc :turnId turnId)))]
+                          (family-send! thread-id
+                                        (cond-> {:type "turn/end" :seq row
+                                                 :numbers (merge {:seqFrom @turn-from :seqTo to} counts)}
+                                          (some? turnId) (assoc :turnId turnId)))))
                       {:answer (answer-of (:history ev))})
                     (do
                       ;; Tool-lifecycle and model-call events are audit lines rather
