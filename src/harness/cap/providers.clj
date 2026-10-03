@@ -2310,20 +2310,38 @@
   :replace', and a save that fills the default in for every model would rewrite
   lines nobody touched.
   
-  `:name-suggested` IS THE ONE THING HERE THE FILE DID NOT SAY, and it is a SUGGESTION
-  in the same sense the probe's `:instruction-updates` is: what
-  harness.cap.model-data calls this model, offered to a form as the placeholder it
-  shows when the entry has no name of its own. A miss carries no key, and nothing
-  reads it at run time -- the RESOLUTION answers `:model-name` for that."
+  THE `*-SUGGESTED` KEYS ARE WHAT THE FILE DID NOT SAY, and they are SUGGESTIONS in
+  the same sense the probe's `:instruction-updates` is: what harness.cap.model-data
+  answers for this id, carried so a form can SHOW it (a fold summary, a placeholder)
+  without WRITING it. A save that leaves the field empty still writes nothing, which
+  is what keeps 'the file is silent' a state a person can leave a row in. A miss
+  carries no key, and nothing at run time reads any of them -- the RESOLUTION answers
+  `:model-name` and fills the silence itself (see `assemble`)."
   [id m]
-  (let [facts (model-data/describe id)]
+  (let [facts (model-data/describe id)
+        ;; THE MODALITY SUGGESTION IS NARROWED to what this harness can carry, exactly
+        ;; as the resolution narrows it (`modalities-with`): the database says this
+        ;; model takes `:video`, and a checkbox row has nowhere to put that.
+        narrow (fn [k carried]
+                 (->> (get facts k)
+                      (filter carried)
+                      (map name)
+                      (sort-by str)
+                      vec
+                      not-empty))]
     (cond-> {:id     id
              :input  (set->wire (:input m))
              :output (set->wire (:output m))}
       (some? (:name m))                    (assoc :name (:name m))
       (and (nil? (:name m)) (:name facts)) (assoc :name-suggested (:name facts))
+      (and (empty? (:input m))  (narrow :input input-types))   (assoc :input-suggested  (narrow :input input-types))
+      (and (empty? (:output m)) (narrow :output output-types)) (assoc :output-suggested (narrow :output output-types))
       (some? (:context-window m))          (assoc :context-window (:context-window m))
+      (and (nil? (:context-window m)) (:context-window facts))
+      (assoc :context-window-suggested (:context-window facts))
       (some? (:max-output-tokens m))       (assoc :max-output-tokens (:max-output-tokens m))
+      (and (nil? (:max-output-tokens m)) (:max-output-tokens facts))
+      (assoc :max-output-tokens-suggested (:max-output-tokens facts))
       (some? (:instruction-updates m))     (assoc :instruction-updates (:instruction-updates m)))))
 
 (defn- known-providers
@@ -2340,7 +2358,16 @@
   
   MODELS.DEV WINS A COLLISION, being the fresher address, and a vendor whose row it
   carries is not added twice. Sorted the way the form shows it: by name, then by id, so
-  the order is total and stable."
+  the order is total and stable.
+  
+  EACH ROW CARRIES WHETHER THIS HOME CAN ALREADY USE IT (`:key-ready`), and the fact is
+  derived with the SAME lookup a run would do -- `env-source` over the credential names
+  the vendor's row names (models.dev's `env`), falling back to this harness's own derived
+  name and the global `HARNESS_API_KEY`. NO VALUE rides along -- only presence, source and
+  the name, exactly the shape `api-key-source` answers, because a key is a secret even in
+  a pick list. This is what lets the form offer a vendor whose key is already exported in
+  the environment as ready to use, without a `.env` edit: the person checks one box in the
+  environment once, and every vendor keyed that way lights up."
   []
   (let [from-md  (model-data/known-providers)
         claimed  (set (map :id from-md))
@@ -2350,8 +2377,26 @@
                                                 :base-url    (:base-url e)
                                                 :model-count (count (:models e))}
                                           (some? (:display-name e))
-                                          (assoc :name (:display-name e))))))]
-    (->> (concat from-md from-own)
+                                          (assoc :name (:display-name e))))))
+        ;; THE NAMES A VENDOR'S KEY MAY LIVE UNDER, as the RUN would try them: the
+        ;; document's own names first (its spelling, if it named one), then this
+        ;; harness's derived name, then the global. `env-source` applies the
+        ;; .env-before-environment order within each name.
+        names-of (fn [{:keys [id env]}]
+                   (distinct (concat (map str env)
+                                     [(credential-name (keyword id))]
+                                     ["HARNESS_API_KEY"])))
+        ready    (fn [row]
+                   (let [{:keys [name source]} (home/env-source (names-of row))]
+                     (assoc row
+                            :key-ready (some? name)
+                            :key (if (some? name)
+                                   {:present? true :source source :name name}
+                                   {:present? false :source nil
+                                    :name (first (names-of row))}))))
+        rows     (concat from-md from-own)]
+    (->> rows
+         (map ready)
          (sort-by (fn [p] [(str/lower-case (str (or (:name p) (:id p)))) (:id p)]))
          vec)))
 (defn registry-report
