@@ -173,9 +173,9 @@
   },
   "groups": {
     "title": "Session behaviour",
-    "intro": "How a session runs — which file-editing implementation it gets, when it compacts, how long a silent model call may sit, what the fence frees, which skills and instructions it reads. The default group serves every model; a group names the models it serves and overrides the default group, key by key. Which group a session gets follows the model it runs on, resolved by the server.",
+    "intro": "How a session runs — which file-editing implementation it gets, when it compacts, how long a silent model call may sit, how long a `bash` call may wait, what the fence frees, which skills and instructions it reads. The default group serves every model; a group names the models it serves and overrides the default group, key by key. Which group a session gets follows the model it runs on, resolved by the server.",
     "defaultTitle": "Default group — every model",
-    "defaultHint": "config.edn's own :session. Edit the six blocks directly — every model is served by them unless a group below says otherwise; a :skills / :instructions list left empty keeps the built-in one.",
+    "defaultHint": "config.edn's own :session. Edit the seven blocks directly — every model is served by them unless a group below says otherwise; a :skills / :instructions list left empty keeps the built-in one.",
     "groupsTitle": "Groups",
     "groupsHint": "Each group names the models it serves and overrides the default group. A block a group leaves off keeps the default group's value.",
     "add": "Add group",
@@ -204,6 +204,7 @@
       "approval": "Project fence",
       "skills": "Skills",
       "instructions": "Instructions",
+      "tools": "Tools",
       "editingDefault": "Every model edits files this way, unless a group below says otherwise.",
       "editingGroup": "On: this group's models edit files this way. Off: the default group's editing stands.",
       "compactionDefault": "Every model compacts by these numbers, unless a group below says otherwise.",
@@ -215,7 +216,9 @@
       "skillsDefault": "Every model reads these roots; leave it empty to use the built-in ones.",
       "skillsGroup": "On: this group's models read these roots. Off: the default group's roots stand.",
       "instructionsDefault": "Every model reads these files; leave it empty to use the built-in AGENTS.md.",
-      "instructionsGroup": "On: this group's models read these files. Off: the default group's files stand."
+      "instructionsGroup": "On: this group's models read these files. Off: the default group's files stand.",
+      "toolsDefault": "Every model's `bash` calls wait at most this long, unless a group below says otherwise.",
+      "toolsGroup": "On: this group's models wait at most this long. Off: the default group's ceiling stands."
     },
     "editing": {
       "mode": "Implementation",
@@ -245,6 +248,10 @@
     },
     "instructions": {
       "files": "Instruction files (one per line)"
+    },
+    "tools": {
+      "bashMaxTimeoutMs": "Bash wait ceiling (ms)",
+      "bashMaxTimeoutMsHint": "The longest a `bash` call may wait. A ceiling, not a default: a call asking for more is refused rather than shortened, and the harness's own 600000 ms bound cannot be raised from here."
     }
   },
   "sessions": {

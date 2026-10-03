@@ -154,7 +154,9 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 - `web_fetch` 取 URL 正文（**有损的文本抽取器**，不是渲染器）；`web_search` 的键按
   **Brave → Exa → Tavily**（`BRAVE_API_KEY` / `EXA_API_KEY` / `TAVILY_API_KEY`）顺序取，全都没有就指名拒绝。
   两个出网工具**不带审批**——这是决定（`bash` 今天就能 `curl`），要这道坎的会话自己装规则。
-- `bash` 有 `timeout`（默认 120000ms，到点**连子孙一起**停）、`stdin`（写完随即关掉，读它的命令看到
+- `bash` 有 `timeout`（默认 120000ms，**硬上限 600000ms**——超过上限的 `timeout` 按名字拒绝，不夹到上限；
+  上限可在 `config.edn` 的 `:session :tools :bash-max-timeout-ms` 里调小，不能调大——到点**连子孙一起**停）、
+  `stdin`（写完随即关掉，读它的命令看到
   EOF）与 `workdir`（不给就是本会话的项目目录）。**答案有上界**：默认带命令输出的最后 8000 字节
   （stdout 与 stderr **各算各的**），超出时整份落成一份记录，答案里写着**省略了多少字节、那份记录在哪**——
   再大的输出也读得回来（`bash` / `read` / `grep` 读同一个路径）。

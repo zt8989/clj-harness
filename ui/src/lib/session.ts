@@ -65,7 +65,15 @@ export type InstructionsBlock = {
   files: readonly string[];
 };
 
-/// The six blocks a group may carry. A block that is ABSENT is not "empty": it is the
+/// `:tools` -- how the tools a session is served behave. One knob today: the longest a
+/// `bash` call may wait, in milliseconds. A CEILING rather than a default -- a call asking
+/// for more than it is REFUSED rather than shortened -- and the server refuses a value
+/// above the harness's own 600000ms, so this knob can only lower it.
+export type ToolsBlock = {
+  "bash-max-timeout-ms": number;
+};
+
+/// The seven blocks a group may carry. A block that is ABSENT is not "empty": it is the
 /// default group's (for a group) or the harness's built-in default (for the default
 /// group), and the form draws that difference rather than flattening it.
 export type SessionBlocks = {
@@ -75,6 +83,7 @@ export type SessionBlocks = {
   approval?: ApprovalBlock;
   skills?: SkillsBlock;
   instructions?: InstructionsBlock;
+  tools?: ToolsBlock;
 };
 
 /// One model a group serves. `provider` is optional on purpose: leaving it out says
@@ -84,7 +93,7 @@ export type ModelRef = {
   model: string;
 };
 
-/// One per-model group: a name, the models it serves, and any of the six blocks it lays
+/// One per-model group: a name, the models it serves, and any of the seven blocks it lays
 /// over the default group.
 export type SessionGroup = {
   name: string;

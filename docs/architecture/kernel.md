@@ -335,7 +335,9 @@ thread-id → {:added {name tool}   ; presence：本会话贡献的定义
 **不做超时，也不做跨进程持久化**：人一直不响应，这个 thread 就一直待决——这是可接受的语义，
 不是缺陷（interrupt 也不填 `expiresAt`，延续本仓「不写 sleep、不重试」的纪律）。
 **这一条讲的只是审批**：命令自己的**时限**是另一件事，已经有了——`bash` 的 `timeout`（毫秒，
-默认 120000，到点连子孙一起停掉），而**后台作业反过来没有时限**（`job_output` 的 `timeout` 也不是它：
+默认 120000，**硬上限 600000**：`config.edn` 的 `:session :tools :bash-max-timeout-ms` 只能把它调小，
+超过上限的 `timeout` 按名字拒绝而不是夹到上限；到点连子孙一起停掉），而**后台作业反过来没有时限**
+（`job_output` 的 `timeout` 也不是它：
 那是「这一次我等你多久」）。「人一直不响应就一直等」是有意的
 无限等待，「一条命令不许无限跑」是命令的边界；两条不要读成同一条纪律。
 两个开启悬置的来源都不删：工具自带 `:requires-approval` 与 `session-require-approval!`，
