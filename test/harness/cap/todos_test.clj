@@ -485,3 +485,19 @@
     (with-todo-session! {:todo {:max-rounds 0}}
       (fn [] (is (= :bad-todo-knob
                    (:reason (try (todos/config tid) (catch Exception e (ex-data e))))))))))
+
+;; ------------------------------------------------------------ what counts as a reminder
+
+(deftest a-press-counts-as-a-reminder-without-spending-a-round
+  ;; THE BRAKE'S OTHER HALF (owner, 2026-10-03): 'has this list been reminded?' has to include a
+  ;; PERSON'S press, or the driver reads the list as un-reminded and says the same sentence again.
+  (todos/write! tid [{:content "one" :status "pending"}])
+  (todos/arm! tid)
+  (todos/note-reminded! tid "prints-a")
+  (is (= "prints-a" (:prints (todos/fuse-for tid))))
+  (is (= 0 (:rounds (todos/fuse-for tid)))
+      (str "a person's press is not one of the fuse's rounds -- the cap is about the harness"
+           " opening rounds by itself"))
+  (todos/note-a-round! tid "prints-b")
+  (is (= 1 (:rounds (todos/fuse-for tid))))
+  (is (= "prints-b" (:prints (todos/fuse-for tid)))))

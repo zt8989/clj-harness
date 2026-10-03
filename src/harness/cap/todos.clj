@@ -487,6 +487,21 @@
     (swap! fuse assoc tid {:rounds n :prints prints})
     n))
 
+(defn note-reminded!
+  "Record that a reminder about the list PRINTS has just been DELIVERED, without counting one
+  of the fuse's rounds. Called by the MANUAL press as well as by `note-a-round!` above.
+
+  THIS IS WHAT KEEPS THE TWO HANDS FROM SAYING THE SAME SENTENCE TWICE (owner, 2026-10-03): the
+  driver's brake is 'is this the list the LAST reminder was about', and a manual press that
+  recorded nothing left it looking like no reminder had ever happened -- so with the switch on,
+  the round the press opened was followed at once by an auto round repeating it. A press is a
+  reminder; the brake should count it as one."
+  [thread-id prints]
+  (let [tid (str thread-id)]
+    ;; `merge` over the zero value, so a row is never left without `:rounds` (`fuse-for`'s shape,
+    ;; and the driver reads that key with `long`).
+    (swap! fuse update tid (fn [row] (merge {:rounds 0 :prints nil} row {:prints prints})))))
+
 (defn before-llm
   "HISTORY with a person's reminder for THREAD-ID appended, when one is owed -- the todo half
   of the pre-LLM step, composed by `harness.cap.project/before-llm` beside the goal's.

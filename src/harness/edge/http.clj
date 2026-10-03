@@ -5568,6 +5568,11 @@
         (throw (ex-info (str "the task list has nothing left to be reminded about: every item is"
                              " \"completed\", or there is no list at all.")
                         {:reason :nothing-to-remind})))
+      ;; THE PRESS IS RECORDED AS A REMINDER, whichever road it takes (`note-reminded!`): the
+      ;; driver's brake asks 'is this the list the LAST reminder was about', and a press that
+      ;; recorded nothing left the driver free to open ANOTHER round about the very same list --
+      ;; two identical reminders for one click (owner, 2026-10-03).
+      (todos/note-reminded! thread-id (todos/fingerprint items))
       (if (running? thread-id)
         (todos/note-manual! thread-id)
         (start-run {:threadId (str thread-id) :append [(todos/reminder-turn items)]}

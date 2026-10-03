@@ -252,3 +252,27 @@
         (is (= tid (:threadId (first new))))
         (is (true? (:auto? (first new))) "the whole answer, switch included")
         (is (= [] (:todos (first new))) "and the list rides along")))))
+
+;; ------------------------------------------------- one click, one reminder
+
+(deftest a-press-and-the-switch-do-not-say-it-twice
+  ;; THE BUG THE OWNER FOUND (2026-10-03): with the auto switch on, ONE press of `remind` produced
+  ;; TWO identical reminders -- the round the press opened, and then an auto round the driver
+  ;; opened at the end of it, because a press recorded no fingerprint and the brake read that as
+  ;; 'this list has never been reminded about'.
+  (todos/write! tid [{:content "half done" :status "in_progress"}])
+  (todos/arm! tid)
+  (let [opened (atom [])]
+    (with-redefs-fn {#'http/start-run (fn [input run-id]
+                                         (swap! opened conj {:input input :run-id run-id})
+                                         {:status 200})}
+                      (fn [] (#'http/commands-request tid [{:type "todo" :action "remind"}])))
+    (is (= 1 (count @opened)) "the press opened the round its reminder needs")
+    (testing "and at that round's end the driver does NOT open a second one about the SAME list"
+      (#'http/drive-next-reminder-round! tid "r-after-press" (opened-by opened))
+      (is (= 1 (count @opened)) "one reminder for one list -- the sentence is not said twice"))
+    (testing "while a list that MOVED still earns one"
+      (todos/write! tid [{:content "half done" :status "completed"}
+                         {:content "the next thing" :status "pending"}])
+      (#'http/drive-next-reminder-round! tid "r-after-progress" (opened-by opened))
+      (is (= 2 (count @opened))))))
