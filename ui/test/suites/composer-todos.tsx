@@ -145,6 +145,10 @@ const cases: readonly Case[] = [
       expect(html).not.toContain('data-slot="composer-todos-item"');
       expect(composerTodosSource).toContain("<CollapsibleTrigger");
       expect(composerTodosSource).toContain("<CollapsibleContent");
+      // AND THE SECOND FOLD CONTROL (`.scratch/todo-strip-inline`): the rightmost chevron is its
+      // own button, it carries the same state the trigger does, and its name is not the icon.
+      expect(attrOf(html, "composer-todos-fold", "aria-expanded")).toBe("false");
+      expect(attrOf(html, "composer-todos-fold", "aria-label")).toBe("show or hide the task list");
     },
   },
   {
