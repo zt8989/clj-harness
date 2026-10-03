@@ -100,11 +100,16 @@
           (is (= [{:canonical-path "/kept" :created-at 7}]
                  (db/select "SELECT canonical_path, created_at FROM projects"))))
         (testing "and the anchor tables arrived beside it"
-          (let [;; THE CONTENT PROJECTION'S THREE ARE HERE TOO (ADR 0008): they arrive with the full
-                ;; chain like every other table, and a test that lists the store's tables says so.
-                all ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
-                     "goals" "hashline_undo" "messages" "projection_offsets" "projects"
-                     "schema_steps" "session_claims" "sessions" "todos" "tool_calls"]]
+          (let [;; THE CONTENT PROJECTION'S THREE ARE HERE TOO (ADR 0008), and the stats step's
+                ;; `model_calls` (its own appended step) rides the same sentence: they arrive
+                ;; with the full chain like every other table, and a test that lists the
+                ;; store's tables says so. SORTED, because `db/tables` answers `ORDER BY name`
+                ;; -- a literal in a different order would be a second spelling of one
+                ;; contract, and this list is what a next table appends to.
+                all (sort ["hashline_ownership" "hashline_sessions" "hashline_snapshots"
+                           "goals" "hashline_undo" "messages" "model_calls"
+                           "projection_offsets" "projects" "schema_steps" "session_claims"
+                           "sessions" "todos" "tool_calls"])]
             (is (= all (db/tables)))
             (is (= all (db/tables full)))))
         (finally
