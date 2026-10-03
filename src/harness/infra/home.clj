@@ -102,6 +102,23 @@
   for the migration for the same reason as `harness-file`."
   []
   (io/file (root) "mcp.edn"))
+(defn modelsdev-cache-file
+  "The models.dev listing's CACHE -- the raw answer with its fetch time, held as
+  JSON beside the configuration files. It is not a thing anyone edits and not a
+  thing anyone recovers from: it is a mirror of a public document a process can
+  re-download, kept on disk only so a restart does not pay for the download twice
+  inside one cache generation. See harness.cap.model-data for the rules around it."
+  []
+  (io/file (root) "models-dev.json"))
+
+(defn provider-models-cache-file
+  "The CACHE of what each provider says it serves -- the `/models` listing a vendor
+  publishes about itself, one line per provider with that line's fetch time. A
+  MIRROR, like models.dev's: nobody edits this file and a home that deletes it just
+  pays for one listing again. See harness.cap.model-data for the rules around it."
+  []
+  (io/file (root) "provider-models.json"))
+
 (defn dotenv-file    [] (io/file (root) ".env"))
 
 (defn config-backup-file

@@ -21,11 +21,16 @@
                   :model    \"qwen3\"
                   :models   {\"qwen3\" {:input #{:text} :output #{:text}}}}}
 
-  :model is the id a provider serves unless a tier picks another one, and it must
-  be a key of :models. :input / :output are required of every model entry and
-  speak the vocabulary this harness actually carries (input-types / output-types).
-  :context-window / :max-output-tokens are optional counts every model MAY state;
-  neither is enforced -- see `counts` for what they are for.
+  AN ENTRY MAY SAY AS LITTLE AS AN ID, and a provider may list no models at all.
+  :model is the id a provider serves unless a tier picks another one, and it must be
+  a key of :models WHEN the entry has a table; :input / :output are a PAIR -- both
+  or neither, and neither is fine, because the two facts harness.cap.model-data
+  caches (the models.dev database and the vendor's own /models listing) answer them
+  for every id a person merely NAMED. What is written in the file always wins; the
+  outside facts fill silence. See `assemble` for where the filling happens and
+  `catalog` for where a provider with no table of its own gets one.
+  :context-window / :max-output-tokens are the same kind of optional: a count the
+  entry states, or one the outside facts supply -- see `counts` for what they are for.
 
   WHAT THIS NAMESPACE OWNS
   ------------------------
@@ -71,6 +76,10 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [harness.infra.home :as home]
+            ;; THE TWO OUTSIDE FACTS about a model this catalog did not have to be told:
+            ;; the models.dev database and the vendor's own /models listing, both cached
+            ;; and both only ever used to fill SILENCE (see `assemble`).
+            [harness.cap.model-data :as model-data]
             [harness.infra.language :as language]
             ;; For the implemented-protocol set, READ off the multimethod
             ;; rather than keeping a list that could disagree with it. cap -> kernel
@@ -114,13 +123,18 @@
   #{:context-window :max-output-tokens})
 
 (def model-keys
-  "Everything a model entry may carry: the two modality sets it MUST declare, the
-  two counts it MAY, and the one delivery capability it MAY
-  (`.scratch/instruction-updates`): whether the endpoint accepts a mid-conversation
-  `developer` message, so a moved instruction can ride the tail instead of replacing
-  `message[0]`. A key outside this fails by name -- a stray :context_window would
-  otherwise be silently dropped, and the entry would look like it declared nothing."
-  (into #{:input :output :instruction-updates} counts))
+  "Everything a model entry may carry: the two modality sets it MAY declare (as a
+  pair), the two counts it MAY, the name a person reads it by, and the one delivery
+  capability it MAY (`.scratch/instruction-updates`): whether the endpoint accepts a
+  mid-conversation `developer` message, so a moved instruction can ride the tail
+  instead of replacing `message[0]`. A key outside this fails by name -- a stray
+  :context_window would otherwise be silently dropped, and the entry would look like
+  it declared nothing.
+  
+  AN ENTRY MADE OF NOTHING BUT AN ID IS THE POINT: every key here but the id can come
+  from harness.cap.model-data instead, which is what makes 'set the model id and the
+  name' a complete configuration."
+  (into #{:input :output :instruction-updates :name} counts))
 
 (def knobs
   "The three things a tier may choose. Everything else about a provider is the
@@ -135,8 +149,10 @@
   display name is an answer about the PROVIDER rather than the model, and it
   rides along for the same reason: it is the catalog's to say, never a tier's. The
   delivery capability is the model's, and it comes resolved because the sent array
-  depends on it -- a tier does not choose it, and `selection` refuses it by name."
-  [:protocol :base-url :model :display-name :input :output
+  depends on it -- a tier does not choose it, and `selection` refuses it by name. The
+  MODEL'S NAME is the outside facts' answer when the file wrote none (see `assemble`),
+  and `:model-name` is a key of its own because `:display-name` is the PROVIDER's."
+  [:protocol :base-url :model :display-name :model-name :input :output
    :context-window :max-output-tokens :instruction-updates])
 
 (def catalog-fields
@@ -256,22 +272,36 @@
       out (assoc :max-output-tokens out))))
 
 (defn- modalities-of
-  "The :input / :output pair for one model, BOTH required. A model that declares
-  neither would make the guard vacuous and leave the catalog silent about the one
-  thing it exists to state; a model that declares one has stated half a
-  capability, which is worse than stating nothing because it reads as complete.
-
-  The inline form is the one caller that may omit both -- see check-inline, which
-  only asks for the pair when the entry mentions one of them."
+  "The :input / :output pair a model entry declares, as a map -- EMPTY when it
+  declares neither. BOTH OR NEITHER: a model that declares one has stated half a
+  capability, which is worse than stating nothing because it reads as complete, and
+  a model that declares neither has said nothing about itself -- which the outside
+  facts (harness.cap.model-data) are free to answer, and the resolution floors at
+  :text (see `assemble`).
+  
+  DECLARING NEITHER IS NO LONGER AN ERROR, and that is the shape of the catalog now:
+  a person who writes the id and the name has written a complete entry, and the
+  modalities then come from a public database rather than from their memory of
+  which model takes pictures."
   [entry where]
-  (let [missing (remove #(contains? entry %) [:input :output])]
-    (when (seq missing)
-      (fail (str where " does not declare " (pr-str (vec missing))
-                 "; every model says what it takes in and gives out, e.g."
-                 " {:input #{:text :image} :output #{:text}}")
+  (let [has     (fn [k] (contains? entry k))
+        present (filter has [:input :output])
+        missing (remove has [:input :output])]
+    (when (and (seq missing) (seq present))
+      (fail (str where " declares " (pr-str (vec present))
+                 " but not " (pr-str (vec missing))
+                 "; a model states what it takes in and gives out TOGETHER, or says"
+                 " nothing about either -- half a capability reads as a complete one")
             {:where where :missing (vec missing)}))
-    {:input  (modalities entry :input input-types where)
-     :output (modalities entry :output output-types where)}))
+    ;; AN EMPTY DECLARED SET IS SILENCE, not a model that takes nothing. The form
+    ;; sends `[]` for a pair nobody ticked, and reading that as a claim would
+    ;; resolve every fresh row to a model that cannot be sent anything at all.
+    (cond-> {}
+      (seq (modalities entry :input input-types where))
+      (assoc :input (modalities entry :input input-types where))
+
+      (seq (modalities entry :output output-types where))
+      (assoc :output (modalities entry :output output-types where)))))
 
 
 (def ^:private instruction-update-modes
@@ -296,16 +326,27 @@
                :known (sortable (map name instruction-update-modes))}))
       {:instruction-updates k})))
 (defn- check-model
-  "One model entry -> what it declares: the two required modality sets, plus
-  whichever of the two counts it states.
-
+  "One model entry -> what it DECLARES: the modality pair when it states one,
+  whichever of the two counts it states, its name when it gives one, and its delivery
+  capability when it has one. An entry that carries nothing but its id is valid, and
+  answers {} -- the outside facts fill it at resolution (see `assemble`).
+  
   A key the entry is not understood to carry fails by name (model-keys): this is
   the one place a model speaks about itself, and a silent drop here would turn a
   typo into a model that quietly declares nothing."
   [entry where]
+  ;; THE NAME IS THE PERSON'S WORD FOR THE MODEL, so it is validated like the
+  ;; provider's :display-name: a non-empty string, or nothing at all.
+  (when-let [n (get entry :name)]
+    (when-not (and (string? n) (not (str/blank? n)))
+      (fail (str where " declares :name " (pr-str n)
+                 "; it is what a person calls this model, so it is a non-empty"
+                 " string -- the id is the identity, and this is only the label on screen")
+            {:where where :name n})))
   (unknown-keys! where entry model-keys)
   (merge (modalities-of entry where) (limits entry where)
-         (instruction-updates-of entry where)))
+         (instruction-updates-of entry where)
+         (when-let [n (get entry :name)] (when (and (string? n) (not (str/blank? n))) {:name n}))))
 
 ;; --------------------------------------------------------- one provider entry
 
@@ -327,59 +368,78 @@
 
 (defn- check-provider
   "A named registry entry -> its normalized form
-  {:protocol .. :base-url .. :model <default id> :models {id {:input .. :output ..}}}.
-
-  An entry with no :models table is the OLD flat shape -- a provider that WAS a
-  model -- and says so, in those words, with the new shape spelled out: this
-  harness does not read two shapes and does not migrate between them."
+  {:protocol .. :base-url .. :model <default id> :models {id {..}}}.
+  
+  IT MAY SAY ALMOST NOTHING. :protocol and :base-url are required -- without an
+  endpoint there is nothing to reach -- and :display-name is optional. :models and
+  :model are BOTH OPTIONAL:
+  
+    :models absent or empty   the provider lists no models itself, and its ids come
+                             from its own /models listing, which harness.cap.model-data
+                             fetches and caches (see `catalog`, which fills the table
+                             in before this validator ever sees the entry). An entry
+                             whose listing cannot be fetched yet is NOT a failure --
+                             it is a provider with no models YET, and `assemble` is what
+                             refuses to serve a run from it, in its own words.
+    :model absent            the DEFAULT MODEL is the first id the table holds, in
+                             sorted order -- a deterministic pick, and the one fact a
+                             person who wrote only an endpoint did not state."
+  
+  ;; AN EMPTY TABLE IS {}. It used to be a named failure ('lists no models'), and
+  ;; that is now exactly the state of a provider whose listing has not arrived.
   [name entry]
-  (let [where (str "provider " (pr-str name))]
+  (let [where  (str "provider " (pr-str name))
+        models (or (:models entry) {})]
     (when-not (map? entry)
       (fail (str where " is " (pr-str entry) ", not a map") {:provider name}))
-    (let [models (:models entry)]
-      (when-not (map? models)
-        (fail (str where
-                   (when (contains? entry :model)
-                     (str " has :model " (pr-str (:model entry)) " but no :models table"
-                          " -- that is the old flat shape, where a provider WAS a model"))
-                   "; a provider now names the vendor and lists the models reachable"
-                   " there: {:protocol :openai-completions :base-url \"https://…\""
-                   " :model \"the-default-id\""
-                   " :models {\"the-default-id\" {:input #{:text} :output #{:text}}}}")
-              {:provider name}))
-      (when (empty? models)
-        (fail (str where " lists no models") {:provider name}))
-      (unknown-keys! where entry provider-keys)
-      (when (contains? entry :display-name)
-        (let [label (:display-name entry)]
-          (when-not (and (string? label) (not (str/blank? label)))
-            (fail (str where " has :display-name " (pr-str label)
-                       "; it is what a person calls this vendor, so it is a"
-                       " non-empty string -- the ID is the identity, and this is"
-                       " only the label on screen")
-                  {:provider name :display-name label}))))
-      (doseq [k [:protocol :base-url :model]]
-        (when-not (contains? entry k)
-          (fail (str where " names no " (pr-str k)
-                     "; a provider needs an endpoint to reach and a default model to serve")
-                {:provider name :missing k})))
-      (let [norm (into {} (map (fn [[id m]]
-                                 [(str id)
-                                  (check-model m (str "model " (pr-str id)
-                                                      " of provider " (pr-str name)))]))
-                       models)
-            dflt (str (:model entry))]
-        (when-not (contains? norm dflt)
-          (fail (str where " names default model " (pr-str (:model entry))
-                     " but does not declare it; it declares " (pr-str (sortable (keys norm))))
-                {:provider name :model (:model entry) :known (sortable (keys norm))}))
-        (cond-> {:protocol (:protocol entry)
-                 :base-url (:base-url entry)
-                 :model    dflt
-                 :models   norm}
-          ;; ABSENT STAYS ABSENT, like every other optional field: an entry with no
-          ;; display name has none, and a nil here would read as 'named nothing'.
-          (some? (:display-name entry)) (assoc :display-name (:display-name entry)))))))
+    (when-not (map? models)
+      (fail (str where
+                 (when (contains? entry :model)
+                   (str " has :model " (pr-str (:model entry)) " but no :models table"
+                        " -- that is the old flat shape, where a provider WAS a model"))
+                 "; a provider names the vendor and lists the models reachable there:"
+                 " {:protocol :openai-completions :base-url \"https://…\""
+                 " :models {\"the-default-id\" {:input #{:text} :output #{:text}}}} --"
+                 " or, writing no :models at all, takes its ids from the vendor's own"
+                 " listing (harness.cap.model-data fetches and caches it)")
+            {:provider name}))
+    (unknown-keys! where entry provider-keys)
+    (when (contains? entry :display-name)
+      (let [label (:display-name entry)]
+        (when-not (and (string? label) (not (str/blank? label)))
+          (fail (str where " has :display-name " (pr-str label)
+                     "; it is what a person calls this vendor, so it is a"
+                     " non-empty string -- the ID is the identity, and this is"
+                     " only the label on screen")
+                {:provider name :display-name label}))))
+    (doseq [k [:protocol :base-url]]
+      (when-not (contains? entry k)
+        (fail (str where " names no " (pr-str k)
+                   "; a provider needs an endpoint to reach -- the rest it can take"
+                   " from the vendor itself")
+              {:provider name :missing k})))
+    (let [id-of (fn [id] (if (keyword? id) (name id) (str id)))
+          norm  (into {} (map (fn [[id m]]
+                               [(id-of id)
+                                (check-model m (str "model " (pr-str id)
+                                                    " of provider " (pr-str name)))]))
+                     models)
+          ;; THE DEFAULT MODEL IS THE FIRST TABLE KEY IN SORTED ORDER when no tier and
+          ;; no file named one. Deterministic on purpose: a map's own iteration order is
+          ;; not a fact about the vendor, and 'whichever came first' would make two runs
+          ;; on one config start on different models.
+          dflt  (if (contains? entry :model) (id-of (:model entry)) (first (sort (keys norm))))]
+      (when (and (seq norm) (contains? entry :model) (not (contains? norm dflt)))
+        (fail (str where " names default model " (pr-str (:model entry))
+                   " but does not declare it; it declares " (pr-str (sortable (keys norm))))
+              {:provider name :model (:model entry) :known (sortable (keys norm))}))
+      (cond-> {:protocol (:protocol entry)
+               :base-url (:base-url entry)
+               :model    dflt
+               :models   norm}
+        ;; ABSENT STAYS ABSENT, like every other optional field: an entry with no
+        ;; display name has none, and a nil here would read as 'named nothing'.
+        (some? (:display-name entry)) (assoc :display-name (:display-name entry))))))
 
 (defn- check-inline
   "A config.edn that DESCRIBES its provider instead of naming one -> the same
@@ -388,14 +448,16 @@
   Two spellings, both the escape hatch: a flat map of fields, or a map carrying
   its own :models table (which is just a registry entry without a name). With no
   :models table there is nothing to validate a model id against -- the entry IS
-  the one model -- so :model is the id and :input/:output are optional; when they
-  are declared, both must be, so the catalog never states half a capability.
-
-  The two counts are optional here for the same reason, and they are the reason
-  this branch still builds a :models table when NO modality is declared: an
-  inline entry that says only {:context-window 128000} has declared something,
-  and dropping it because it said nothing about modalities would be the silent
-  drop this catalog refuses to perform."
+  the one model -- so :model is the id, and every fact about it is optional: the
+  modality pair (both or neither), the counts, the name, the delivery capability.
+  Whatever is declared rides in the :models table under that id, and whatever is not
+  is filled from harness.cap.model-data at resolution, exactly as it is for a named
+  provider's entry.
+  
+  AN INLINE DESCRIPTION STILL NAMES ITS MODEL. It is the one-off form -- no
+  registry entry, no credential of its own -- and asking ITS endpoint for a listing
+  would be a second fetch path for a spelling nobody keeps. The fetching-and-caching
+  comfort belongs to a provider a home actually declares."
   [entry]
   (let [where "the provider described inline in config.edn"]
     (when-not (map? entry)
@@ -414,15 +476,18 @@
             (fail (str where " names no " (pr-str k)
                        "; the inline form is {:protocol … :base-url … :model …}")
                   {:missing k})))
-        (let [id    (str (:model entry))
-              half? (or (contains? entry :input) (contains? entry :output))
-              dirs  (cond-> (merge (limits entry where)
-                                   (instruction-updates-of entry where))
-                      half? (merge (modalities-of entry where)))]
-          (cond-> {:protocol (:protocol entry)
-                   :base-url (:base-url entry)
-                   :model    id}
-            (seq dirs) (assoc :models {id dirs})))))))
+        (let [id   (if (keyword? (:model entry)) (name (:model entry)) (str (:model entry)))
+              dirs (merge (limits entry where)
+                          (instruction-updates-of entry where)
+                          (modalities-of entry where)
+                          (when-let [n (get entry :name)]
+                            (when (and (string? n) (not (str/blank? n))) {:name n})))]
+          {:protocol (:protocol entry)
+           :base-url (:base-url entry)
+           :model    id
+           ;; ALWAYS A TABLE, even when it says nothing: 'this provider serves this
+           ;; id' is itself a declaration, and the resolution starts from this row.
+           :models   {id dirs}})))))
 
 ;; ------------------------------------------------------------------ the file
 ;;
@@ -1098,6 +1163,11 @@
 
 (defn- config-path [] (.getAbsolutePath (home/config-file)))
 
+;; DEFINED BESIDE `probe-models`, because it is the same act -- asking a vendor what it
+;; serves -- and it needs that section's seams (`*list-models*`) and its key rule
+;; (`api-key`). Declared here so `catalog`, which runs first, can call it.
+(declare vendor-model-tables)
+
 (defn- user-catalog
   "RAW -- a parsed :providers section -- -> the validated catalog, laid over the
   built-in table.
@@ -1135,17 +1205,28 @@
   :providers and delete, rather than leaving a person to wonder why an edit to it
   changed nothing.
 
+  A PROVIDER THAT NAMED NO MODELS GETS THEM HERE. `vendor-model-tables` asks each
+  such entry's own /models listing (through harness.cap.model-data, which caches it
+  for seven days) and fills the table in before validation, so an entry of an
+  endpoint and a name is a provider like any other. A listing that cannot be fetched
+  yet leaves the table EMPTY rather than failing: 'this provider serves nothing
+  YET' is a state a home can be in, and `assemble` is what refuses to run from it.
+  
   Every merged entry is validated eagerly, including ones this run will not use: a
   malformed catalog is a configuration mistake, and meeting it on the run that
   happens to name it turns one clear failure into an intermittent one."
   []
+  ;; THE DATABASE IS WARMED FIRST, and behind this call: a home that has never run
+  ;; this feature should start the one download it depends on before anybody asks a
+  ;; question that needs it (see harness.cap.model-data/warm!).
+  (model-data/warm!)
   (let [f (home/providers-file)]
     (when (.exists f)
       (fail (str (.getAbsolutePath f)
                  " is no longer read: the provider catalog is the :providers section of"
                  " config.edn now. Move its entries there and delete this file.")
             {:path (.getAbsolutePath f)}))
-    (user-catalog (:providers (config)))))
+    (user-catalog (vendor-model-tables (:providers (config))))))
 
 ;; ------------------------------------------------------------- the fold
 ;;
@@ -1278,6 +1359,55 @@
                    (pr-str (sortable (map name (keys registry))))))
             {:name src :known (sortable (map name (keys registry)))}))))
 
+(defn- model-id
+  "A model id as the string the vendor answers to, or nil. An EDN file may spell one
+  in a shape a keyword cannot hold -- the owner's cn:glm-5.3-flash has a colon, a
+  gateway's gpt-4o:free a tag -- and (str :cn:x) hands back :cn:x WITH the
+  colon, so an id that came through a keyword is read with `name` rather than `str`."
+  [id]
+  (when (some? id)
+    (if (keyword? id) (name id) (str id))))
+
+(defn- modalities-with
+  "The :input / :output pair a run is SERVED with: what the entry declared, else what
+  the outside facts (harness.cap.model-data) say about this id FILTERED to what this
+  harness can carry, else the conservative floor #{:text} -- a model nothing knows
+  about is one that takes text and gives text back, and never one that silently takes
+  pictures (owner's call, 2026-10-03)."
+  [m facts]
+  (let [pick (fn [k carried]
+               (or (get m k)
+                   (let [xs (set (filter carried (get facts k)))]
+                     (when (seq xs) xs))
+                   #{:text}))]
+    {:input  (pick :input input-types)
+     :output (pick :output output-types)}))
+
+(defn- counts-with
+  "The two token counts a run is served with, from the entry and the outside facts
+  together. WHAT THE FILE DECLARED IS NEVER SECOND-GUESSED; a REMOTE number that
+  cannot hold what the file declared is dropped rather than allowed to contradict it,
+  because a pair of counts that does not add up is worse than one number:
+    the file said both      both stand (check-model already proved they add up)
+    the file said output    a remote context is taken only when it can hold it
+    the file said context   a remote output is capped by it
+    the file said neither   the remote pair, kept consistent the same way"
+  [m facts]
+  (let [fctx (:context-window m)   fout (:max-output-tokens m)
+        rctx (:context-window facts) rout (:max-output-tokens facts)]
+    (cond
+      (and fctx fout) {:context-window fctx :max-output-tokens fout}
+      (and fout rctx) (if (<= fout rctx)
+                        {:context-window rctx :max-output-tokens fout}
+                        {:max-output-tokens fout})
+      fout            {:max-output-tokens fout}
+      (and fctx rout) {:context-window fctx :max-output-tokens (min rout fctx)}
+      fctx            {:context-window fctx}
+      :else           (cond-> {}
+                        rctx (assoc :context-window rctx)
+                        (and rout rctx) (assoc :max-output-tokens (min rout rctx))
+                        (and rout (nil? rctx)) (assoc :max-output-tokens rout)))))
+
 (defn assemble
   "A SELECTION -> the provider a run is served by.
 
@@ -1315,17 +1445,50 @@
         entry  (:entry found)
         chosen (:model selection)
         models (:models entry)
-        id     (str (or chosen (:model entry)))]
-    (when (and (map? models) (not (contains? models id)))
+        id     (if (contains? selection :model)
+                 (model-id (:model selection))
+                 (model-id (:model entry)))]
+    (when (nil? id)
+      (fail (str "provider "
+                 (if inline "described inline in config.edn" (pr-str (:name found)))
+                 " names no model, and it declares no table to take a default from:"
+                 " name one ({:model \"the-id\"}) or let the vendor's own /models"
+                 " listing answer it")
+            {:provider (:name found)}))
+    ;; AN EMPTY TABLE IS NOT A DECLARED TABLE. A provider whose own listing has not
+    ;; arrived (or answered nothing) cannot be served from: the catalog cannot say
+    ;; which ids it serves, and inventing one is the failure this whole shape exists
+    ;; to kill. A table that EXISTS but does not hold this id is the other sentence --
+    ;; the id was named and the vendor does not declare it.
+    (when (empty? models)
+      (fail (str "provider "
+                 (if inline "described inline in config.edn" (pr-str (:name found)))
+                 " declares no models: its own /models listing has not been fetched yet"
+                 " (or answered nothing), so nothing says it serves " (pr-str id)
+                 " -- name its models in config.edn's :providers, or look at the listing"
+                 " itself")
+            {:provider (:name found) :model id}))
+    (when-not (contains? models id)
       (fail (str "provider "
                  (if inline "described inline in config.edn" (pr-str (:name found)))
                  " declares no model " (pr-str id)
                  "; it declares " (pr-str (sortable (keys models))))
             {:provider (:name found) :model id :known (sortable (keys models))}))
-    (let [m (get models id)]
+    (let [m      (get models id)
+          ;; WHAT THE WORLD SAYS ABOUT THIS ID, when the entry said nothing: the two
+          ;; counts, the modalities and the name. Read here rather than folded into the
+          ;; catalog so the REPORT can still show the file as written -- see
+          ;; `registry-report`, which answers 'what does the file say' while this answers
+          ;; 'what is a run on it served by'.
+          facts  (model-data/describe id)
+          dirs   (modalities-with m facts)
+          counts (counts-with m facts)
+          named  (or (:name m) (:name facts))]
       (cond-> (merge {:protocol (:protocol entry)
                       :base-url (:base-url entry)
                       :model    id
+                      :input    (:input dirs)
+                      :output   (:output dirs)
                       ;; THE DEFAULT LIVES HERE AND NOWHERE ELSE. A model that said
                       ;; nothing about :instruction-updates is served with :replace, so
                       ;; 'what is this session on' has an answer without a second rule at
@@ -1333,12 +1496,8 @@
                       ;; silence, because 'said nothing' and 'said :replace' are two facts
                       ;; a form must not be made to confuse.
                       :instruction-updates (or (:instruction-updates m) :replace)}
-                     ;; The model's own declaration travels as ONE unit: whatever
-                     ;; check-model validated, keyed by model-keys -- modalities, counts
-                     ;; and the delivery capability alike. Copying them one at a time is
-                     ;; how a third field would get declared, validated, and then
-                     ;; silently left out of every resolution.
-                     (select-keys m model-keys))
+                     counts
+                     (when named {:model-name named}))
         ;; The PROVIDER's label, not the model's: it travels from the entry for the
         ;; same reason the model's declaration travels from the model entry -- a
         ;; reader answering 'what is this session on' should read the catalog's
@@ -1781,7 +1940,7 @@
   a tool result."
   [thread-id]
   (let [p (effective-provider thread-id)]
-    (select-keys p [:provider :model :reasoning-effort :display-name
+    (select-keys p [:provider :model :reasoning-effort :display-name :model-name
                     :protocol :base-url :input :output
                     :context-window :max-output-tokens])))
 
@@ -2141,18 +2300,29 @@
       :else              :user)))
 
 (defn- model-row
-  "One model entry -> the row a form edits: the id, its two modality sets as wire
-  strings, whichever counts it states, and its delivery capability IF THE FILE SAID
-  ONE. THE SILENCE IS KEPT, deliberately: a row that always carried a value could
-  not be used to tell 'never declared' from 'declared :replace', and a save that
-  fills the default in for every model would rewrite lines nobody touched."
+  "One model entry -> the row a form edits: the id, its modality sets as wire strings
+  ([] when the entry declared none -- a form draws an empty pair, and a save that
+  changes nothing writes nothing back), whatever it states, and its delivery
+  capability IF THE FILE SAID ONE. THE SILENCE IS KEPT, deliberately: a row that
+  always carried a value could not be used to tell 'never declared' from 'declared
+  :replace', and a save that fills the default in for every model would rewrite
+  lines nobody touched.
+  
+  `:name-suggested` IS THE ONE THING HERE THE FILE DID NOT SAY, and it is a SUGGESTION
+  in the same sense the probe's `:instruction-updates` is: what
+  harness.cap.model-data calls this model, offered to a form as the placeholder it
+  shows when the entry has no name of its own. A miss carries no key, and nothing
+  reads it at run time -- the RESOLUTION answers `:model-name` for that."
   [id m]
-  (cond-> {:id     id
-           :input  (set->wire (:input m))
-           :output (set->wire (:output m))}
-    (some? (:context-window m))       (assoc :context-window (:context-window m))
-    (some? (:max-output-tokens m))    (assoc :max-output-tokens (:max-output-tokens m))
-    (some? (:instruction-updates m))  (assoc :instruction-updates (:instruction-updates m))))
+  (let [facts (model-data/describe id)]
+    (cond-> {:id     id
+             :input  (set->wire (:input m))
+             :output (set->wire (:output m))}
+      (some? (:name m))                    (assoc :name (:name m))
+      (and (nil? (:name m)) (:name facts)) (assoc :name-suggested (:name facts))
+      (some? (:context-window m))          (assoc :context-window (:context-window m))
+      (some? (:max-output-tokens m))       (assoc :max-output-tokens (:max-output-tokens m))
+      (some? (:instruction-updates m))     (assoc :instruction-updates (:instruction-updates m)))))
 
 (defn registry-report
   "The catalog as the settings page needs it:
@@ -2313,12 +2483,17 @@
           (fail (str "the form listed " (pr-str dupes) " more than once; a model id is"
                      " one row, and a repeated one would silently be the last")
                 {:duplicates dupes}))
-        (cond-> {:protocol proto
-                 :base-url (:base-url m)
-                 :model    (:model m)
-                 :models   (into {} models)}
-          (contains? m :display-name) (assoc :display-name (:display-name m)))))))
-
+        ;; AN EMPTY LIST IS NOT AN ERROR, and neither is a list of rows that say nothing:
+        ;; they are the shape of 'this provider takes its ids from its own /models
+        ;; listing' and 'this model gets its facts from harness.cap.model-data'. Keys
+        ;; with nothing to say are LEFT OUT rather than written as nil, so the file a
+        ;; form saves is the file it will read back.
+        (let [nm (:model (kw-keys m))]
+          (cond-> {:protocol proto
+                   :base-url (:base-url m)}
+            (and (string? nm) (not (str/blank? nm))) (assoc :model nm)
+            (seq models)                            (assoc :models (into {} models))
+            (contains? m :display-name)             (assoc :display-name (:display-name m))))))))
 (def ^:private written-header
   "The first lines of a config.edn this process WROTE. It is here because the write
   is a rewrite: EDN has no way to keep a person's comments through one, and no
@@ -2950,6 +3125,69 @@
                          {:id id}))
                      ids)
        :asked  url})))
+
+;; --------------------------------------------- a provider that named no models
+;;
+;; THE LISTING IS THE TABLE. An entry with an endpoint and a name and no :models is a
+;; complete way to declare a vendor now: its ids are what its own /models answers,
+;; fetched and cached by harness.cap.model-data (seven days, refreshed behind the
+;; read once it has aged out).
+;;
+;; THIS IS THE PROBE'S TWIN -- same seam, same shape, same key rule -- with two
+;; differences that are the whole reason it is not the same function:
+;;
+;;   IT CACHES     a form pressing Fetch wants the vendor's live answer; a RESOLUTION
+;;                 wants the same answer for a week, because a run must not wait on
+;;                 a vendor to learn which id it is being served.
+;;   IT IS STRICT  a listing that cannot be fetched leaves the table EMPTY and the
+;;                 failure is logged -- the cache holds only answers that ARRIVED, so
+;;                 a typo in a base-url is retried rather than frozen for a week.
+
+(defn- listing-thunk
+  "NAME + ENTRY -> a thunk answering the ids that provider's own endpoint publishes.
+  It throws rather than answering []: a vendor that listed NOTHING is an answer worth
+  caching, while 'could not ask' must never be written down as one (see
+  harness.cap.model-data/listing)."
+  [name entry]
+  (let [proto (some-> (:protocol entry) keyword)
+        base  (:base-url entry)]
+    (fn []
+      (when-not (and (string? base) (seq base))
+        (fail (str "provider " (pr-str name) " has no usable :base-url to ask for its"
+                   " model list")
+              {:provider name :base-url base}))
+      (when-not (contains? (implemented-protocols) proto)
+        (fail (str "cannot ask " (pr-str name) " for its model list: this harness"
+                   " speaks " (pr-str (protocol-names)) ", and that entry says "
+                   (pr-str proto))
+              {:provider name :protocol proto}))
+      (*list-models* {:protocol proto
+                      :base-url base
+                      :api-key  (api-key (keyword (name name)))}))))
+
+(defn- vendor-model-tables
+  "RAW -- the :providers section as written -- -> the same map, with a :models table
+  for every entry that named none (see the section above).
+  
+  PROVIDERS ARE WALKED IN SORTED ORDER so a home with several table-less entries
+  fetches them in one deterministic order; each one's answer is cached separately.
+  An entry that already lists models is carried through untouched -- the file's own
+  word is not second-guessed, which is the same rule the resolution keeps."
+  [raw]
+  (into {}
+        (map (fn [[n entry]]
+               (if (or (not (map? entry)) (seq (:models entry)))
+                 [n entry]
+                 (let [ids (model-data/listing (name n) (listing-thunk n entry))]
+                   [n (if (seq ids)
+                        (cond-> (assoc entry :models (into {} (map (fn [id] [id {}]) ids)))
+                          ;; THE VENDOR'S OWN ORDER DECIDES THE DEFAULT: the first id
+                          ;; its listing names is the model a session starts on when
+                          ;; nobody named one. Unlike a hand-written table, this order
+                          ;; IS a fact -- it is the order the vendor publishes.
+                          (not (contains? entry :model)) (assoc :model (first ids)))
+                        entry)]))))
+             (sort-by (comp str key) raw)))
 
 (defn put-defaults!
   "KNOBS (a map over the three knobs) -> the default tier now in config.edn's
