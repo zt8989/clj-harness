@@ -34,6 +34,7 @@
             [harness.cap.hashline.write :as hashline-write]
             [harness.cap.jobs :as jobs]
             [harness.cap.project :as project]
+            [harness.cap.providers :as providers]
             [harness.cap.skills :as skills]
             [harness.cap.todos :as todos]
             [harness.cap.goal :as goal]
@@ -203,6 +204,66 @@
   two minutes after somebody changes the default."
   120000)
 
+(def bash-timeout-ceiling-ms
+  "The longest a `bash` call may wait, in MILLISECONDS -- the harness's own ceiling, and
+  the value config.edn's `:session :tools :bash-max-timeout-ms` starts from.
+
+  A CEILING AND NOT A DEFAULT, and the two must not be confused: a call that names no
+  `timeout` waits `bash-default-timeout-ms`, while a call that names one past this is
+  REFUSED rather than quietly shortened. A run held open for an hour because a model
+  guessed at `3600000` is the failure this number exists to prevent, and a silent
+  shortening would leave the model planning against a wait it never got.
+
+  PUBLIC because the tool's description and its schema interpolate it, and because the
+  example config states the bound. A home may set the knob BELOW this and never above
+  it -- `bash-max-timeout-ms` refuses anything larger by name, since a limit a
+  configuration can raise is not a limit."
+  600000)
+
+(def ^:private tools-config-keys
+  "The keys config.edn's `:session :tools` block may carry. One today, and a NAMED SET
+  for the reason harness.cap.todos/todo-block uses one: a typo here must fail rather
+  than leave the cap at whatever the default happened to be."
+  #{:bash-max-timeout-ms})
+
+(defn- tools-block
+  "config.edn's `:session :tools` block for THREAD-ID, as written -- nothing merged with
+  the defaults, and every key checked by name, exactly as `:session :todo` is."
+  [thread-id]
+  (let [b (:tools (providers/session-config thread-id))]
+    (when-not (or (nil? b) (map? b))
+      (throw (ex-info (str "config.edn's :session :tools must be a map of knobs (:bash-max-timeout-ms),"
+                           " but it is " (pr-str b))
+                      {:reason :bad-tools-config :value b})))
+    (let [unknown (remove tools-config-keys (keys b))]
+      (when (seq unknown)
+        (throw (ex-info (str "config.edn's :session :tools carries " (count unknown)
+                             " key(s) nothing reads: " (str/join ", " (sort (map name unknown)))
+                             " -- known: " (str/join ", " (sort (map name tools-config-keys))))
+                        {:reason :unknown-tools-key :keys (vec unknown)}))))
+    (or b {})))
+
+(defn bash-max-timeout-ms
+  "The longest a `bash` call in THREAD-ID may wait, in MILLISECONDS: config.edn's
+  `:session :tools :bash-max-timeout-ms` over `bash-timeout-ceiling-ms`.
+
+  READ FRESH ON EVERY CALL (the config.edn discipline), so editing the file moves the
+  answer with no restart. Anything outside (0, ceiling] is refused BY NAME rather than
+  quietly served as something else: this is the number that decides how long a run can be
+  held open, so a home that wrote 900000 is told it did."
+  [thread-id]
+  (let [n (get (tools-block thread-id) :bash-max-timeout-ms bash-timeout-ceiling-ms)]
+    (when-not (and (integer? n) (pos? n))
+      (throw (ex-info (str "config.edn's :session :tools :bash-max-timeout-ms must be a positive whole"
+                           " number of milliseconds, but it is " (pr-str n))
+                      {:reason :bad-tools-knob :key :bash-max-timeout-ms :value n})))
+    (when (> n bash-timeout-ceiling-ms)
+      (throw (ex-info (str "config.edn's :session :tools :bash-max-timeout-ms is " n "ms, and a `bash`"
+                           " call may never wait longer than " bash-timeout-ceiling-ms "ms -- this knob"
+                           " can only shorten that ceiling, so write at most " bash-timeout-ceiling-ms "ms")
+                      {:reason :tools-knob-above-ceiling :value n :ceiling bash-timeout-ceiling-ms})))
+    (long n)))
+
 (def ^:private shell-names
   "The names a `bash` call may give for `shell` -- and the ONLY source of them: the
   description advertises this list, the schema's `:enum` publishes it, the validation
@@ -355,7 +416,23 @@
         ;; RESOLVED BEFORE ANYTHING IS STARTED, so a kind this machine does not have
         ;; refuses without a job id, a record file or a half-started process to clean up.
         kind  (named-shell shell-named)
-        limit (or (positive-int :timeout timeout) bash-default-timeout-ms)
+        ;; THE CEILING IS READ BEFORE THE COMMAND IS, and for the same reason: a call this
+        ;; session may not make refuses without a process started. The numbers come from
+        ;; config.edn (`:session :tools :bash-max-timeout-ms`), so they are read here
+        ;; rather than frozen into the description -- see `bash-max-timeout-ms`.
+        cap   (bash-max-timeout-ms kernel-tools/*thread-id*)
+        asked (positive-int :timeout timeout)
+        ;; REFUSED, NOT SHORTENED. A limit quietly applied would leave the model planning
+        ;; against a wait it never got, with nothing in the answer to tell it so.
+        _     (when (and asked (> asked cap))
+                (throw (ex-info (str "`timeout` is " asked "ms, and this session's `bash` calls may"
+                                     " wait at most " cap "ms (config.edn's :session :tools"
+                                     " :bash-max-timeout-ms). Ask for no more than " cap "ms, or leave"
+                                     " `timeout` out for the " (min bash-default-timeout-ms cap) "ms"
+                                     " default.")
+                                {:argument :timeout :value asked :max cap
+                                 :reason :timeout-above-cap})))
+        limit (or asked (min bash-default-timeout-ms cap))
         {:keys [exit out err] stopped :timeout} (shell/run {:command command
                                                             :stdin stdin
                                                             :dir (when dir dir)
@@ -907,12 +984,14 @@
              " `Write-Output $env:TEMP` for the two PowerShells, `echo $PWD` for the bash ones."
              " A name this machine does not have is refused by name, and so is a word that is"
              " not one of the above; neither falls back to another shell. "
-             "THE COMMAND GETS " bash-default-timeout-ms "ms TO FINISH; `timeout` overrides that,"
-             " in milliseconds. When the limit is reached the command is stopped -- together with"
-             " everything it started -- and whatever it printed by then comes back, with a line"
-             " saying it was stopped. A very large `timeout` means this call really does wait that"
-             " long: waiting for a slow command is what this tool is FOR, and how long the command"
-             " takes is not the question. "
+             "THE COMMAND GETS " bash-default-timeout-ms "ms TO FINISH, and no `bash` call may wait"
+             " longer than " bash-timeout-ceiling-ms "ms; `timeout` overrides the default, in"
+             " milliseconds, and a larger one is REFUSED rather than quietly shortened (a home may"
+             " lower that ceiling in config.edn's :session :tools :bash-max-timeout-ms). When the"
+             " limit is reached the command is stopped -- together with everything it started -- and"
+             " whatever it printed by then comes back, with a line saying it was stopped. Waiting for"
+             " a slow command is what this tool is FOR, and how long the command takes is not the"
+             " question -- but no command is worth holding a run open past that ceiling. "
              "The answer carries at most " jobs/answer-budget-bytes " bytes of what the command"
              " printed -- the tail of it, each stream counted on its own. When there is more, the"
              " whole output is written to a file and the answer says how many bytes are missing"
@@ -933,9 +1012,11 @@
                     :description (str "Directory to run in; relative paths resolve against this"
                                       " session's project directory, as they do for `read`. It"
                                       " must be a directory.")}
-         "timeout" {:type "integer" :minimum 1
+         "timeout" {:type "integer" :minimum 1 :maximum bash-timeout-ceiling-ms
                     :description (str "How long to wait, in milliseconds. Default "
-                                      bash-default-timeout-ms ".")}}
+                                      bash-default-timeout-ms "; at most "
+                                      bash-timeout-ceiling-ms " -- a larger value is refused"
+                                      " rather than shortened.")}}
         [:command] t-bash))
 
 ;; ---------------------------------------------------------------- 后台执行

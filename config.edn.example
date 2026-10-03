@@ -126,6 +126,17 @@
    ;; tightened.
    :strict false}
 
+  ;; THE TOOLS a session is served, and how they behave. One knob today.
+  :tools
+  {;; The longest a `bash` call may wait, in milliseconds -- a HARD CEILING and not a
+   ;; default: a call that names no `timeout` waits two minutes, while a call asking for
+   ;; more than this is REFUSED rather than quietly shortened, and the tool's own
+   ;; description says so. 600000 (ten minutes) is the harness's own ceiling, and this
+   ;; knob can only LOWER it -- a larger number is refused by name, since a limit a
+   ;; configuration can raise is not a limit. Read fresh on every call, like everything
+   ;; else in this section, so an edit takes effect without a restart.
+   :bash-max-timeout-ms 600000}
+
   ;; GROUPS -- THE PER-MODEL OVERRIDES. The blocks above are the DEFAULT group, and
   ;; they serve EVERY model. Each entry of :groups names the models it serves and lays
   ;; its own blocks over the default group's, KEY BY KEY: this one says only that
@@ -134,7 +145,7 @@
   ;; by the groups whose :models match the model it resolved to (a later matching group
   ;; wins a key an earlier also named), and by the default group underneath them all.
   ;;
-  ;; A group is {:name .. :models [..] ..any of the six blocks above..}. :name is a
+  ;; A group is {:name .. :models [..] ..any of the seven blocks above..}. :name is a
   ;; non-empty, unique string; :models is a non-empty list of {:provider :x :model ".."},
   ;; where :provider may be left out to say 'this id, from whoever serves it'. :subagents
   ;; is NOT a group key -- a subagent is a fact about this home, not about a model -- so

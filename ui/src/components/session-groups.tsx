@@ -8,10 +8,11 @@
 // --------------------------------------------------------------- why groups
 //
 // How a session runs -- which editing implementation it gets, when it compacts, how long
-// a silent model call may sit, what the fence frees, which skills and instructions it
-// reads -- used to be ONE answer for the whole home. It is per-MODEL now: the default
-// group serves every model, and a group names the models it serves and lays its own
-// blocks over the default group's, key by key (harness.cap.providers/merge-session-blocks).
+// a silent model call may sit, what the fence frees, which skills and instructions it reads,
+// and how long a `bash` call may wait -- used to be ONE answer for the whole home. It is
+// per-MODEL now: the default group serves every model, and a group names the models it
+// serves and lays its own blocks over the default group's, key by key
+// (harness.cap.providers/merge-session-blocks).
 //
 // ------------------------------------------------------ what this page decides
 //
@@ -47,14 +48,22 @@ import {
   type SessionConfig,
   type SessionGroup,
   type SkillsBlock,
+  type ToolsBlock,
 } from "@/lib/session";
 
 /// The settings catalog, because every string below is drawn in the settings dialog.
 type Translate = TFunction<"settings">;
 
-/// The six blocks a group may carry. The order is the page's: the server's
+/// The seven blocks a group may carry. The order is the page's: the server's
 /// `default-group-keys` is a set.
-type BlockKey = "editing" | "compaction" | "llm" | "approval" | "skills" | "instructions";
+type BlockKey =
+  | "editing"
+  | "compaction"
+  | "llm"
+  | "approval"
+  | "skills"
+  | "instructions"
+  | "tools";
 
 /// A block's name, and the two hints under it. LITERAL KEYS RATHER THAN `t(`block.${key}`)`
 /// for the rule the trajectory lanes keep: a built key is one the type gate cannot check,
@@ -67,6 +76,7 @@ const BLOCK_LABEL: Record<BlockKey, (t: Translate) => string> = {
   approval: (t) => t("groups.block.approval"),
   skills: (t) => t("groups.block.skills"),
   instructions: (t) => t("groups.block.instructions"),
+  tools: (t) => t("groups.block.tools"),
 };
 
 /// The hint under a block in the DEFAULT group's form: on is "every model is served by
@@ -78,6 +88,7 @@ const BLOCK_HINT_DEFAULT: Record<BlockKey, (t: Translate) => string> = {
   approval: (t) => t("groups.block.approvalDefault"),
   skills: (t) => t("groups.block.skillsDefault"),
   instructions: (t) => t("groups.block.instructionsDefault"),
+  tools: (t) => t("groups.block.toolsDefault"),
 };
 
 /// The hint under a block in a GROUP's form: on is "this group says so for its models",
@@ -89,6 +100,7 @@ const BLOCK_HINT_GROUP: Record<BlockKey, (t: Translate) => string> = {
   approval: (t) => t("groups.block.approvalGroup"),
   skills: (t) => t("groups.block.skillsGroup"),
   instructions: (t) => t("groups.block.instructionsGroup"),
+  tools: (t) => t("groups.block.toolsGroup"),
 };
 
 /// The values a block starts from when a person first turns it on. A FORM STARTER and not
@@ -103,6 +115,7 @@ const STARTERS: {
   approval: ApprovalBlock;
   skills: SkillsBlock;
   instructions: InstructionsBlock;
+  tools: ToolsBlock;
 } = {
   editing: {
     mode: "hashline",
@@ -121,9 +134,10 @@ const STARTERS: {
   approval: { allow: [], strict: false },
   skills: { roots: [] },
   instructions: { files: [] },
+  tools: { "bash-max-timeout-ms": 600000 },
 };
 
-/// What a form holds while it is open: the six blocks' values, plus WHICH OF THEM ARE ON --
+/// What a form holds while it is open: the seven blocks' values, plus WHICH OF THEM ARE ON --
 /// the last being the GROUP form's own question (a block it leaves off is served by the
 /// default group's). The default group's form edits directly and reads `enabled` not at
 /// all; it is kept in one type so both forms share `BlocksForm` and `draftFrom`.
@@ -136,6 +150,7 @@ type BlocksDraft = {
     approval: ApprovalBlock;
     skills: SkillsBlock;
     instructions: InstructionsBlock;
+    tools: ToolsBlock;
   };
 };
 
@@ -159,6 +174,7 @@ function draftFrom(blocks: SessionBlocks): BlocksDraft {
       approval: blocks.approval !== undefined,
       skills: blocks.skills !== undefined,
       instructions: blocks.instructions !== undefined,
+      tools: blocks.tools !== undefined,
     },
     values: {
       editing: blocks.editing ?? STARTERS.editing,
@@ -167,6 +183,7 @@ function draftFrom(blocks: SessionBlocks): BlocksDraft {
       approval: blocks.approval ?? STARTERS.approval,
       skills: blocks.skills ?? STARTERS.skills,
       instructions: blocks.instructions ?? STARTERS.instructions,
+      tools: blocks.tools ?? STARTERS.tools,
     },
   };
 }
@@ -181,6 +198,7 @@ function blocksOf(draft: BlocksDraft): SessionBlocks {
   if (draft.enabled.approval) out.approval = draft.values.approval;
   if (draft.enabled.skills) out.skills = draft.values.skills;
   if (draft.enabled.instructions) out.instructions = draft.values.instructions;
+  if (draft.enabled.tools) out.tools = draft.values.tools;
   return out;
 }
 
@@ -188,10 +206,12 @@ function blocksOf(draft: BlocksDraft): SessionBlocks {
 /// there is no on/off state to read; what a save writes is what the fields hold, and the
 /// only question left is which blocks MEAN something:
 ///
-///   :editing / :compaction / :llm   always written -- the fields are numbers, switches and a
-///                                   select, and their values are the harness's own
-///                                   defaults until somebody changes one (harness.cap.editing's
-///                                   `defaults`, pressure/default-ratios, llm's timeout).
+///   :editing / :compaction / :llm / :tools
+///                                   always written -- the fields are numbers, switches and a
+///                                   select, and their values are the harness's own defaults
+///                                   until somebody changes one (harness.cap.editing's
+///                                   `defaults`, pressure/default-ratios, llm's timeout, the
+///                                   `bash` tool's ceiling).
 ///   :approval                       written only when it says something (strict, or a free
 ///                                   path); an empty fence and no fence are the same fence,
 ///                                   and writing it would only add noise to the file.
@@ -209,6 +229,7 @@ function patchOf(draft: BlocksDraft): SessionBlocksPatch {
     approval: v.approval.strict || v.approval.allow.length > 0 ? v.approval : null,
     skills: v.skills.roots.length > 0 ? v.skills : null,
     instructions: v.instructions.files.length > 0 ? v.instructions : null,
+    tools: v.tools,
   };
 }
 
@@ -574,6 +595,31 @@ const BlocksForm: FC<{
             value={draft.values.instructions.files.join("\n")}
             disabled={busy}
             onChange={(e) => set("instructions", { files: linesOf(e.target.value) })}
+          />
+        </Field>
+      </BlockSection>
+
+      <BlockSection {...section("tools")}>
+        <Field
+          label={t("groups.tools.bashMaxTimeoutMs")}
+          slot="settings-group-tools-bash-ms"
+          hint={t("groups.tools.bashMaxTimeoutMsHint")}
+        >
+          <Input
+            className="h-8 text-xs"
+            type="number"
+            min={1}
+            value={draft.values.tools["bash-max-timeout-ms"]}
+            disabled={busy}
+            onChange={(e) =>
+              set("tools", {
+                ...draft.values.tools,
+                "bash-max-timeout-ms": numberOr(
+                  e.target.value,
+                  draft.values.tools["bash-max-timeout-ms"],
+                ),
+              })
+            }
           />
         </Field>
       </BlockSection>

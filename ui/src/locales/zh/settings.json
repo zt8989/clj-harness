@@ -170,9 +170,9 @@
   },
   "groups": {
     "title": "会话行为",
-    "intro": "一次会话怎么跑——用哪套文件编辑、什么时候压缩、模型沉默多久算断线、围栏放行哪些路径、读哪些技能与指令。默认组适配所有模型；一个分组点名它服务的模型，并逐键覆盖默认组。某个会话落到哪一组，由服务器按它跑的模型解析。",
+    "intro": "一次会话怎么跑——用哪套文件编辑、什么时候压缩、模型沉默多久算断线、`bash` 一次最多等多久、围栏放行哪些路径、读哪些技能与指令。默认组适配所有模型；一个分组点名它服务的模型，并逐键覆盖默认组。某个会话落到哪一组，由服务器按它跑的模型解析。",
     "defaultTitle": "默认组——适配所有模型",
-    "defaultHint": "这就是 config.edn 自己的 :session。六个块直接编辑——除非下面的分组另有说法，所有模型都由它们服务；:skills / :instructions 留空则沿用内置的。",
+    "defaultHint": "这就是 config.edn 自己的 :session。七个块直接编辑——除非下面的分组另有说法，所有模型都由它们服务；:skills / :instructions 留空则沿用内置的。",
     "groupsTitle": "分组",
     "groupsHint": "每个分组点名它服务的模型并覆盖默认组；分组没写的块沿用默认组的值。",
     "add": "新增分组",
@@ -201,6 +201,7 @@
       "approval": "项目围栏",
       "skills": "技能",
       "instructions": "指令",
+      "tools": "工具",
       "editingDefault": "所有模型都这样编辑文件，除非下面的分组另有说法。",
       "editingGroup": "开：这个分组的模型这样编辑文件。关：沿用默认组。",
       "compactionDefault": "所有模型都按这些数字压缩，除非下面的分组另有说法。",
@@ -212,7 +213,9 @@
       "skillsDefault": "所有模型都读这些根目录；留空就用内置根目录。",
       "skillsGroup": "开：这个分组的模型读这些根目录。关：沿用默认组。",
       "instructionsDefault": "所有模型都读这些文件；留空就用内置的 AGENTS.md。",
-      "instructionsGroup": "开：这个分组的模型读这些文件。关：沿用默认组。"
+      "instructionsGroup": "开：这个分组的模型读这些文件。关：沿用默认组。",
+      "toolsDefault": "所有模型的 `bash` 调用最多等这么久，除非下面的分组另有说法。",
+      "toolsGroup": "开：这个分组的模型最多等这么久。关：沿用默认组的上限。"
     },
     "editing": {
       "mode": "实现",
@@ -242,6 +245,10 @@
     },
     "instructions": {
       "files": "指令文件（一行一条）"
+    },
+    "tools": {
+      "bashMaxTimeoutMs": "Bash 最长等待（毫秒）",
+      "bashMaxTimeoutMsHint": "`bash` 一次调用最多等多久。这是上限不是默认值：要得比它多的调用会被拒（不是夹到上限），而且不能超过 harness 自己的 600000 毫秒。"
     }
   },
   "sessions": {

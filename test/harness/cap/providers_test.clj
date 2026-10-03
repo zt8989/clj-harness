@@ -2232,6 +2232,18 @@
 (defn- with-groups [session f]
   (with-config-text (groups-config session) f))
 
+(deftest the-tools-block-round-trips-through-the-panel-writer
+  (with-groups {:tools {:bash-max-timeout-ms 30000}}
+    (fn []
+      (testing "the page reads the block as written"
+        (is (= {:tools {:bash-max-timeout-ms 30000}}
+               (:default (providers/session-config-for-panel)))))
+      (testing "a save writes it back, and the session is then held to it"
+        (providers/set-session-config! {:default {:tools {:bash-max-timeout-ms 45000}}})
+        (is (= {:tools {:bash-max-timeout-ms 45000}}
+               (:default (providers/session-config-for-panel))))
+        (is (= 45000 (get-in (providers/session-config nil) [:tools :bash-max-timeout-ms])))))))
+
 (deftest a-group-overrides-the-default-group-for-the-model-it-serves
   (with-groups {:editing {:mode :hashline :grep true}
                 :groups [{:name "replace-editing"

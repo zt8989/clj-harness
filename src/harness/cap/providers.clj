@@ -507,10 +507,10 @@
                 parks on them; the built-in list is always in force on top of these
     :session    how a session runs -- the DEFAULT group, which serves every model:
                 :editing / :compaction / :llm / :approval / :skills / :instructions /
-                :subagents / :goal / :todo (what harness.edn held, plus the caps the goal's
-                rounds and the task list's reminder run under), plus :groups -- named per-model
-                :subagents (what harness.edn held), plus :groups -- named per-model
-                overrides of those blocks, each naming the models it serves
+                :tools / :subagents / :goal / :todo (what harness.edn held, plus the caps
+                the goal's rounds, the task list's reminder and the `bash` tool's wait run
+                under), plus :groups -- named per-model overrides of those blocks, each
+                naming the models it serves
     :mcp        the outside programs whose tools join this session: {:servers {..}}
 
   ONE FILE, BECAUSE IT IS ONE HOME. Which vendors this process can reach, which one it
@@ -544,14 +544,15 @@
 
 (def ^:private session-keys
   "The keys config.edn's :session section may carry -- the seven harness.edn used to hold,
-  unchanged, because that move was a change of address rather than of meaning, PLUS the two caps
-  a session's own machinery reads: :goal (`.scratch/goal`), which bounds a goal's rounds and
-  how long a blocker has to be reported before it stands, and :todo (`.scratch/todo-reminder`),
-  which bounds the rounds a task list's automatic reminder may open. A NAMED SET for the reason
+  unchanged, because that move was a change of address rather than of meaning, PLUS the blocks
+  a session's own machinery reads: :tools (harness.cap.tools), the ceiling on how long a `bash`
+  call may wait; :goal (`.scratch/goal`), which bounds a goal's rounds and how long a blocker has
+  to be reported before it stands; and :todo (`.scratch/todo-reminder`), which bounds the rounds
+  a task list's automatic reminder may open. A NAMED SET for the reason
   the other sections' are: a typo in a
   key that decides how a session runs must fail by name rather than leave the session
   behaving as if nothing had been written."
-  #{:editing :compaction :llm :approval :skills :instructions :subagents :goal :todo})
+  #{:editing :compaction :llm :approval :skills :instructions :tools :subagents :goal :todo})
 
 (def ^:private mcp-keys
   "The keys config.edn's :mcp section may carry. One: :servers, the {name declaration}
@@ -570,20 +571,20 @@
 
     :name      what to call it -- a non-empty string, unique among the groups
     :models    the models it serves, [{:provider :openrouter :model ...} ..]
-    the six session keys it overrides (:editing / :compaction / :llm / :approval /
-    :skills / :instructions), each merged key by key over the default group's
+    the seven session keys it overrides (:editing / :compaction / :llm / :approval /
+    :skills / :instructions / :tools), each merged key by key over the default group's
 
   :subagents IS NOT HERE, and that is a decision rather than an omission: a subagent
   definition is a fact about the HOME (the roster the delegation tool reads and the
   panel draws), not about whichever model serves a session. It keeps its own settings
   page, and a group that names it fails by name rather than quietly carrying a key
   nothing reads."
-  #{:name :models :editing :compaction :llm :approval :skills :instructions})
+  #{:name :models :editing :compaction :llm :approval :skills :instructions :tools})
 
 (defn- check-session-groups
   "The :session :groups value -> nil, or a named failure about its SHAPE.
 
-  A group is a map with a :name, the :models it serves, and any of the six session
+  A group is a map with a :name, the :models it serves, and any of the seven session
   blocks it overrides. What a BLOCK MEANS is its consumer's business (see
   check-config); what this checks is the skeleton -- a list of named maps, each naming
   at least one model. A group with no name or no models is a row nothing can pick out
@@ -834,16 +835,17 @@
   "What this home's :session section says for THREAD-ID -- how a session runs.
 
   THE DEFAULT GROUP IS THE :session SECTION ITSELF: its :editing / :compaction /
-  :llm / :approval / :skills / :instructions / :subagents are what every model is
-  served by. Its :groups are PER-MODEL overrides, each naming the models it serves; the
+  :llm / :approval / :skills / :instructions / :tools / :subagents are what every
+  model is served by. Its :groups are PER-MODEL overrides, each naming the models it serves; the
   ones whose :models match THREAD-ID's resolved model lay their own blocks over the
   default group, key by key (see merge-session-blocks).
 
   ABSENT IS THE EMPTY MAP, which is what every reader wants ('says nothing') and is the
   rule `config` applies to a missing file too. WHAT A KEY MEANS IS NOT THIS NAMESPACE'S
-  BUSINESS: harness.cap.editing refuses an :editing block it cannot use and
-  harness.edge.compaction refuses ratios that are not fractions, each with a sentence
-  naming the key -- see check-config for why an unknown KEY is still refused here.
+  BUSINESS: harness.cap.editing refuses an :editing block it cannot use,
+  harness.edge.compaction refuses ratios that are not fractions, and harness.cap.tools
+  refuses a :tools block it cannot read, each with a sentence naming the key -- see
+  check-config for why an unknown KEY is still refused here.
 
   A NIL THREAD-ID ASKS THE HOME'S OWN ANSWER -- the default group with no session's
   model to match. The roster and an offline tool want that. Otherwise the model comes
@@ -2782,13 +2784,13 @@
   :subagents, which has a page of its own, and minus :groups, which is the list below
   it. A SET rather than a vector: it is used as `(remove default-group-keys ..)` and
   `(select-keys s ..)`, and a vector in either place would index instead of test."
-  #{:editing :compaction :llm :approval :skills :instructions})
+  #{:editing :compaction :llm :approval :skills :instructions :tools})
 
 (defn session-config-for-panel
   "What the settings form's Session behaviour page reads: the session section AS THE
   FILE HOLDS IT, not as a session resolves it --
 
-    {:default {the six blocks as written} :groups [..] :path \"..\"}
+    {:default {the seven blocks as written} :groups [..] :path \"..\"}
 
   AS WRITTEN, because that is what the form edits and what a save writes: `~` in a
   path, a block the default group does not have, a group that names two models -- all
@@ -2837,7 +2839,7 @@
 
     :default  {block ..} -- a block set to its value, or written as null to REMOVE it:
               'leave it alone' and 'stop saying it' are different requests, and only one
-              of them has a value. A key outside the six fails by name.
+              of them has a value. A key outside the seven fails by name.
     :groups   [{:name .. :models [..] ..} ..] -- replaces the whole list; [] removes
               them.
 

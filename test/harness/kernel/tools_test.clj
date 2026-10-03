@@ -376,6 +376,64 @@
       (is (true? error) (str (pr-str bad) " is refused"))
       (is (str/includes? content "`timeout` must be a positive integer")))))
 
+;; -------------------------------------------------------------- the ceiling
+;;
+;; A `bash` CALL MAY NOT BE ASKED TO WAIT FOREVER. `harness.cap.tools/bash-timeout-ceiling-ms`
+;; is the harness's own ceiling (600000ms), and config.edn's `:session :tools
+;; :bash-max-timeout-ms` can only LOWER it. A call asking for more is REFUSED rather than
+;; clamped -- a limit quietly applied would leave the model planning against a wait it
+;; never got -- and the refusal names the ceiling and the key. Why a refusal and not a
+;; clamp: `.scratch/bash-timeout-cap/spec.md`, decision 2.
+
+(deftest bash-refuses-a-wait-past-the-harness-ceiling
+  (let [asked (atom [])]
+    (with-redefs [shell/run (fn [opts] (swap! asked conj opts) {:exit 0 :out "" :err ""})]
+      (testing "the ceiling itself is a wait a call may ask for"
+        (let [{:keys [error]} (call "bash" {:command "true" :timeout 600000})]
+          (is (false? error))))
+      (testing "one millisecond past it is refused, and the refusal names the ceiling and the key"
+        (let [{:keys [content error]} (call "bash" {:command "true" :timeout 600001})]
+          (is (true? error))
+          (is (str/includes? content "600000ms"))
+          (is (str/includes? content ":bash-max-timeout-ms"))))
+      (testing "and a refused call started no process at all"
+        (is (= [600000] (mapv :timeout-ms @asked)))))))
+
+(deftest a-home-can-lower-the-bash-ceiling-and-never-raise-it
+  (try
+    (let [asked (atom [])]
+      (with-redefs [shell/run (fn [opts] (swap! asked conj opts) {:exit 0 :out "" :err ""})]
+        (testing "a ceiling below the harness's own is what this session's calls are held to"
+          (support/write-session! {:tools {:bash-max-timeout-ms 30000}})
+          (is (false? (:error (call "bash" {:command "true" :timeout 30000}))))
+          (let [{:keys [content error]} (call "bash" {:command "true" :timeout 30001})]
+            (is (true? error))
+            (is (str/includes? content "30000ms")))
+          (testing "and the DEFAULT wait is the ceiling too, once the ceiling is the lower number"
+            (call "bash" {:command "true"})
+            (is (= [30000 30000] (mapv :timeout-ms @asked)))))
+        (testing "a ceiling above the harness's own is refused by name"
+          (support/write-session! {:tools {:bash-max-timeout-ms 900000}})
+          (let [{:keys [content error]} (call "bash" {:command "true"})]
+            (is (true? error))
+            (is (str/includes? content "600000ms"))))
+        (testing "so is a ceiling that is not a positive whole number"
+          (support/write-session! {:tools {:bash-max-timeout-ms 0}})
+          (let [{:keys [content error]} (call "bash" {:command "true"})]
+            (is (true? error))
+            (is (str/includes? content "must be a positive whole number"))))
+        (testing "a key nothing reads fails by name rather than sitting there doing nothing"
+          (support/write-session! {:tools {:bash-max-timeout 30000}})
+          (let [{:keys [content error]} (call "bash" {:command "true"})]
+            (is (true? error))
+            (is (str/includes? content "bash-max-timeout"))))
+        (testing "and the block itself must be a map"
+          (support/write-session! "{:tools 3}")
+          (let [{:keys [content error]} (call "bash" {:command "true"})]
+            (is (true? error))
+            (is (str/includes? content ":session :tools must be a map"))))))
+    (finally (support/wipe-session!))))
+
 (deftest a-command-that-would-hang-is-stopped-at-the-limit
   ;; Through the TOOL, not just through `shell/run`: this is the path a model's call
   ;; takes, and the pid file is the command's own child -- the thing that used to
