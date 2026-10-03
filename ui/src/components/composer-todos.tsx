@@ -170,6 +170,9 @@ export const ComposerTodosView: FC<{
   /// IS THERE ANYTHING LEFT FOR A REMINDER TO BE ABOUT? The nudge's disabled state -- the same
   /// question the server asks before it refuses the press (`:nothing-to-remind`).
   const unfinished = todos.some((todo) => todo.status !== "completed");
+  /// THE COUNTS LINE, once: it is the trigger's text and its `title` (the sentence a truncated
+  /// strip still owes a hover).
+  const counts = countsLine(t, todos);
 
   return (
     <Collapsible
@@ -183,79 +186,101 @@ export const ComposerTodosView: FC<{
       // sits flush against the composer's box.
       className="border-border/60 bg-(--composer-bg) mb-1.5 flex flex-col rounded-(--composer-radius) border"
     >
-      <CollapsibleTrigger
-        data-slot="composer-todos-toggle"
-        className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex w-full items-center gap-2 rounded-(--composer-radius) px-2 py-1.5 text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
-      >
-        <ListTodoIcon aria-hidden className="size-4 shrink-0" />
-        <span data-slot="composer-todos-summary" className="min-w-0 flex-1 text-start">
-          {countsLine(t, todos)}
+      {/* THE FOLD LINE AND THE TWO HANDS ARE ONE ROW (`.scratch/todo-strip-inline`): on a phone
+          the hands are icon-only, so they sit at the END of the counts line and the strip is ONE
+          line tall -- what the fold hides is the LIST, never the controls. */}
+      <div className="flex w-full min-w-0 items-center gap-1 pr-1">
+        {/* THE HANDS ARE SIBLINGS OF THE TRIGGER, NEVER INSIDE IT: a button inside a button is
+            invalid, and a tap on a hand must never fold the strip. */}
+        <CollapsibleTrigger
+          data-slot="composer-todos-toggle"
+          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-2 rounded-(--composer-radius) px-2 py-1.5 text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <ListTodoIcon aria-hidden className="size-4 shrink-0" />
+          {/* ONE LINE, AND IT MAY ELLIPSIZE: the hands share this row now, so on a narrow screen
+              the counts are what gives -- the whole sentence is the `title`, and the detail is
+              one tap away. */}
+          <span data-slot="composer-todos-summary" title={counts} className="min-w-0 flex-1 truncate text-start">
+            {counts}
+          </span>
+        </CollapsibleTrigger>
+        <span className="flex shrink-0 items-center gap-1">
+          {/* THE NUDGE'S DISABLED STATE IS THE SERVER'S RULE, said before the press: a list every
+              item of which is done has nothing to be reminded about (`:nothing-to-remind`). */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-slot="composer-todos-remind"
+            title={unfinished ? undefined : t("todos.remind.none")}
+            disabled={!unfinished}
+            onClick={onRemind}
+          >
+            <BellRingIcon aria-hidden className="size-3.5" />
+            {/* ICON ONLY ON A PHONE (`.scratch/todo-strip-mobile`): two labelled buttons are wide
+                enough to push the counts into a second row on a narrow screen, so the word is
+                hidden there and comes back from `sm` up. `sr-only` KEEPS IT AS THE BUTTON'S
+                NAME -- a screen reader still hears `提醒一下` -- and the `title` above is the
+                tooltip a pointer gets. */}
+            <span data-slot="composer-todos-remind-word" className="sr-only sm:not-sr-only">
+              {t("todos.remind.now")}
+            </span>
+          </Button>
+          {/* THE SWITCH SAYS ITS OWN STATE: the icon, the on/off word and `aria-pressed` are
+              three readings of one boolean, and none of them is inferred from the list. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-slot="composer-todos-auto"
+            data-on={auto ? "true" : "false"}
+            aria-pressed={auto}
+            onClick={onToggleAuto}
+          >
+            {auto ? (
+              <BellIcon aria-hidden className="size-3.5" />
+            ) : (
+              <BellOffIcon aria-hidden className="size-3.5" />
+            )}
+            {/* ICON ONLY ON A PHONE, the nudge's rule again -- and here the icon is what says
+                the state (a bell against a bell with a slash), with the word, the `title` and
+                `aria-pressed` all saying it too wherever there is room. */}
+            <span data-slot="composer-todos-auto-word" className="sr-only sm:not-sr-only">
+              {t("todos.auto.label")} · {auto ? t("todos.auto.on") : t("todos.auto.off")}
+            </span>
+          </Button>
         </span>
-        {/* THE ARROW TURNS OVER RATHER THAN BEING SWAPPED: the point is that the control is
-            the same one, and only which way it faces changed. */}
-        <ChevronUpIcon
-          aria-hidden
-          className={
-            open
-              ? "size-4 shrink-0 rotate-180 transition-transform"
-              : "size-4 shrink-0 transition-transform"
-          }
-        />
-      </CollapsibleTrigger>
+        {/* THE FOLD IS THE LAST THING IN THE ROW (owner, 2026-10-03): the chevron belongs at the
+            strip's RIGHT EDGE, where the eye looks for it. It is a SECOND control for the same
+            verb the trigger carries -- the row's text folds too -- because a chevron inside the
+            trigger would sit here only if the hands were inside the trigger as well, and a
+            button inside a button is invalid. */}
+        <button
+          type="button"
+          data-slot="composer-todos-fold"
+          aria-expanded={open}
+          aria-label={t("todos.fold.label")}
+          title={t("todos.fold.label")}
+          onClick={() => setOpen(!open)}
+          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring shrink-0 cursor-pointer rounded-(--composer-radius) py-1.5 pr-0.5 pl-0.5 transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        >
+          {/* THE ARROW TURNS OVER RATHER THAN BEING SWAPPED: the point is that the control is
+              the same one, and only which way it faces changed. */}
+          <ChevronUpIcon
+            aria-hidden
+            className={
+              open
+                ? "size-4 shrink-0 rotate-180 transition-transform"
+                : "size-4 shrink-0 transition-transform"
+            }
+          />
+        </button>
+      </div>
       {/* THE DETAIL SCROLLS ITSELF. It sits inside the composer's own box, and a long list
           that pushed the input down the screen would be the strip taking over the page. */}
       <CollapsibleContent data-slot="composer-todos-list" className="max-h-40 overflow-y-auto py-0.5">
         <TodoRows todos={todos} />
       </CollapsibleContent>
-      {/* THE TWO HANDS ARE ALWAYS DRAWN -- the fold hides the LIST, not the controls: asking
-          the harness to push a reminder is not a detail of what the list says. `px-2` lines
-          them up with the rows above, `justify-end` keeps them off the trigger's text.
-          THE NUDGE'S DISABLED STATE IS THE SERVER'S RULE, said before the press: a list every
-          item of which is done has nothing to be reminded about (`:nothing-to-remind`). */}
-      <div className="flex items-center justify-end gap-1 px-2 pb-1.5">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-slot="composer-todos-remind"
-          title={unfinished ? undefined : t("todos.remind.none")}
-          disabled={!unfinished}
-          onClick={onRemind}
-        >
-          <BellRingIcon aria-hidden className="size-3.5" />
-          {/* ICON ONLY ON A PHONE (`.scratch/todo-strip-mobile`): two labelled buttons are wide
-              enough to push the counts into a second row on a narrow screen, so the word is
-              hidden there and comes back from `sm` up. `sr-only` KEEPS IT AS THE BUTTON'S
-              NAME -- a screen reader still hears `提醒一下` -- and the `title` above is the
-              tooltip a pointer gets. */}
-          <span data-slot="composer-todos-remind-word" className="sr-only sm:not-sr-only">
-            {t("todos.remind.now")}
-          </span>
-        </Button>
-        {/* THE SWITCH SAYS ITS OWN STATE: the icon, the on/off word and `aria-pressed` are
-            three readings of one boolean, and none of them is inferred from the list. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-slot="composer-todos-auto"
-          data-on={auto ? "true" : "false"}
-          aria-pressed={auto}
-          onClick={onToggleAuto}
-        >
-          {auto ? (
-            <BellIcon aria-hidden className="size-3.5" />
-          ) : (
-            <BellOffIcon aria-hidden className="size-3.5" />
-          )}
-          {/* ICON ONLY ON A PHONE, the nudge's rule again -- and here the icon is what says
-              the state (a bell against a bell with a slash), with the word, the `title` and
-              `aria-pressed` all saying it too wherever there is room. */}
-          <span data-slot="composer-todos-auto-word" className="sr-only sm:not-sr-only">
-            {t("todos.auto.label")} · {auto ? t("todos.auto.on") : t("todos.auto.off")}
-          </span>
-        </Button>
-      </div>
       {failure !== null && (
         <p role="alert" data-slot="composer-todos-error" className="text-destructive px-2 pb-1.5 text-xs">
           {failure}

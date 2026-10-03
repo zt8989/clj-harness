@@ -48,6 +48,9 @@
       "on": "on",
       "off": "off"
     },
+    "fold": {
+      "label": "show or hide the task list"
+    },
     "done_one": "{{count}} done",
     "done_other": "{{count}} done",
     "inProgress_one": "{{count}} in progress",

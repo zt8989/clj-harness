@@ -47,6 +47,9 @@
       "on": "开",
       "off": "关"
     },
+    "fold": {
+      "label": "展开／收起任务清单"
+    },
     "done_other": "{{count}} 已完成",
     "inProgress_other": "{{count}} 进行中",
     "pending_other": "{{count}} 待处理",

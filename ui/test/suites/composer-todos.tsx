@@ -269,6 +269,23 @@ const cases: readonly Case[] = [
       expect(attrOf(on, "composer-todos-auto", "data-on")).toBe("true");
       expect(attrOf(on, "composer-todos-auto", "aria-pressed")).toBe("true");
       expect(on).toContain("lucide-bell");
+      // AND THE HANDS SHARE THE FOLD'S ROW (`.scratch/todo-strip-inline`): the strip is ONE line
+      // tall because the two controls sit in the counts' row instead of a row of their own.
+      // Read off the SOURCE, because 'the same parent element' is what a rendered string is
+      // worst at saying: the trigger closes, the hands follow, and only then does the list
+      // begin -- and the row they share carries the class below.
+      expect(composerTodosSource).toContain("flex w-full min-w-0 items-center gap-1 pr-1");
+      const triggerAt = composerTodosSource.indexOf("</CollapsibleTrigger>");
+      const handsAt = composerTodosSource.indexOf('data-slot="composer-todos-remind"');
+      const listAt = composerTodosSource.indexOf("<CollapsibleContent");
+      expect(triggerAt).toBeGreaterThan(-1);
+      expect(handsAt).toBeGreaterThan(triggerAt);
+      expect(listAt).toBeGreaterThan(handsAt);
+      // AND THE FOLD IS THE RIGHTMOST OF THE THREE (owner, 2026-10-03): the chevron is a
+      // control of its own at the row's right edge, after the hands.
+      const foldAt = composerTodosSource.indexOf('data-slot="composer-todos-fold"');
+      expect(foldAt).toBeGreaterThan(handsAt);
+      expect(listAt).toBeGreaterThan(foldAt);
     },
   },
   {
