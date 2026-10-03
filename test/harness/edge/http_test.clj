@@ -2747,9 +2747,12 @@
          (finally (providers/set-override! id nil)))))))
 
 (deftest the-model-endpoint-reports-a-sparse-configuration-as-sparse
-  ;; Absent is a fact, not a failure. A provider described inline that declared no
-  ;; modalities has nothing to report, and saying so beats inventing a default or
-  ;; returning an error the client has to interpret.
+  ;; A SPARSE CONFIGURATION STILL ANSWERS, and what it answers with has changed with
+  ;; the shape of a model entry: an inline description that declares no modalities is
+  ;; served the TEXT FLOOR now (`harness.cap.providers/modalities-with`) rather than
+  ;; reporting nothing -- 'said nothing' and 'takes text' are ONE answer, because a
+  ;; model that declared nothing is one this harness will send text to. What is still
+  ;; NOT invented is anything the two counts would have said: those stay absent.
   (with-server
    "sparse"
    (fn []
@@ -2759,8 +2762,10 @@
            body (read-json (api-call :get (str "/api/model?threadId=" tid) nil))]
        (is (= "seeded" (:model body)))
        (is (= "fake" (:protocol body)))
-       (is (not (contains? body :input)) "nothing was declared, so nothing is claimed")
-       (is (not (contains? body :output)))
+       (is (= ["text"] (:input body)) "the floor: text in")
+       (is (= ["text"] (:output body)) "and text back")
+       (is (not (contains? body :context-window)) "no window was invented")
+       (is (not (contains? body :max-output-tokens)) "and no ceiling either")
        (is (not (contains? body :provider)) "and no provider was named")))))
 
 (deftest the-directory-picker-answers-but-binds-nothing
@@ -5305,13 +5310,17 @@
                (providers/set-override! "edge-write" nil))))
 
          (testing "a change that cannot be served is refused, and the file does not move"
+           ;; AN EMPTY MODEL LIST IS NO LONGER THE REFUSAL (a provider may take its ids
+           ;; from its own /models listing), so this case uses one that still is: a
+           ;; model row whose id is present but not a string.
            (let [before (.length cfg)
                  stamp  (.lastModified cfg)
                  resp   (api-call :post "/api/providers"
-                                  (json/write-str (assoc a-provider-body "models" [])))
+                                  (json/write-str (assoc a-provider-body
+                                                       "models" [{"id" 7 "input" ["text"]}])))
                  body   (read-json resp)]
              (is (= 400 (.statusCode resp)))
-             (is (str/includes? (:error body) "lists no models")
+             (is (str/includes? (:error body) "model row")
                  "the server's own sentence, which is what the form will show")
              (is (= before (.length cfg)))
              (is (= stamp (.lastModified cfg)) "byte for byte, mtime included")))

@@ -470,10 +470,16 @@ const SecurityPage: FC = () => (
 
 // -------------------------------------------------------------------- Models
 
-const emptyModel = (id: string, input: string[] = ["text"]): ModelRow => ({
+/// A FRESH ROW DECLARES NOTHING BUT ITS ID. It used to arrive claiming `text`, and
+/// that was this form inventing a fact about somebody's model: the server now reads
+/// an empty pair as SILENCE and fills it from the models.dev database
+/// (`harness.cap.providers/modalities-with`), flooring at text where the database
+/// knows nothing. So the checkboxes start empty and mean 'not stated' until a person
+/// ticks one.
+const emptyModel = (id: string): ModelRow => ({
   id,
-  input,
-  output: ["text"],
+  input: [],
+  output: [],
 });
 
 /// One model row: what it is called, what it accepts, and whether it is the
@@ -497,6 +503,24 @@ const ModelRowEditor: FC<{
           className="h-7 flex-1 text-xs"
           value={row.id}
           onChange={(e) => onChange({ ...row, id: e.target.value })}
+        />
+        {/* THE NAME IS OPTIONAL, and it is the ONE fact the form offers from the
+            outside: the database's own name for this id (`name-suggested`) shows as
+            the placeholder, and typing over it is the only way a name is written.
+            Leaving it empty keeps the file silent and the resolution answers the
+            database's name -- or the id -- when somebody asks what this model is
+            called. */}
+        <Input
+          aria-label={t("form.modelName")}
+          className="h-7 flex-1 text-xs"
+          placeholder={row["name-suggested"] ?? t("form.modelNamePlaceholder")}
+          value={row.name ?? ""}
+          onChange={(e) => {
+            const next = { ...row };
+            if (e.target.value === "") delete next.name;
+            else next.name = e.target.value;
+            onChange(next);
+          }}
         />
         <Button
           variant="ghost"
@@ -807,9 +831,11 @@ const ProviderForm: FC<{
             // stable for as long as the row is on screen.
             key={i}
             row={row}
-            // The LAST model cannot go: a vendor with no models cannot be selected
-            // at all, so the form would be building something the file refuses.
-            canRemove={draft.models.length > 1}
+            // EVERY ROW MAY GO, including the last: a provider that lists no models
+            // of its own is a provider whose ids come from its own /models listing
+            // (`harness.cap.providers/vendor-model-tables`), and the form no longer
+            // builds something the file refuses.
+            canRemove
             onChange={(next) =>
               set({ models: draft.models.map((m, j) => (j === i ? next : m)) })
             }

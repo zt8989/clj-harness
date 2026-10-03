@@ -44,15 +44,25 @@ async function reasonFrom(res: Response, t: Translate): Promise<string> {
 /// rendering the model endpoint and the log lines use.
 export type ModelRow = {
   id: string;
+  /// EMPTY MEANS THE FILE SAID NOTHING, which is a state and not an error: the
+  /// server fills the modalities from the models.dev database at resolution and
+  /// floors at text (`harness.cap.providers/assemble`). The form draws them as
+  /// unchecked, and a save that leaves them unchecked writes nothing.
   input: readonly string[];
   output: readonly string[];
+  /// WHAT A PERSON CALLS THIS MODEL. Optional, and only ever the person's word:
+  /// the server's resolution carries the database's name as `:model-name` when the
+  /// file wrote none, while the report offers it as `name-suggested`.
+  name?: string;
+  /// The database's name for this id, OFFERED rather than applied -- a placeholder
+  /// the form shows when the row has no name of its own (`harness.cap.model-data`).
+  "name-suggested"?: string;
   "context-window"?: number;
   "max-output-tokens"?: number;
   /// WHERE A MOVED INSTRUCTION GOES, IF THIS MODEL's line says. ABSENT is not
   /// the same as "replace": absent means the file is SILENT (and the server serves
   /// the conservative default), while "replace" is something a person wrote. The
-  /// control is three-state for exactly that reason (`lib/providers.ts`'s caller,
-  /// the Models form).
+  /// control is three-state for exactly that reason.
   "instruction-updates"?: "in-place" | "replace";
 };
 
@@ -116,11 +126,18 @@ export type ProviderPayload = {
   "display-name"?: string;
   protocol: string;
   "base-url": string;
-  model: string;
+  /// THE DEFAULT MODEL, when the form has one to name. It may be left OUT: the
+  /// server then takes the first id the vendor's own listing answers with.
+  model?: string;
+  /// MAY BE EMPTY, and that is a complete provider: its ids come from its own
+  /// `/models` listing (`harness.cap.providers/vendor-model-tables`).
   models: readonly {
     id: string;
+    /// EMPTY ARRAYS ARE 'THE FILE SAID NOTHING' -- the server reads them as
+    /// silence, fills the modalities from the database, and floors at text.
     input: readonly string[];
     output: readonly string[];
+    name?: string;
     "context-window"?: number;
     "max-output-tokens"?: number;
     "instruction-updates"?: "in-place" | "replace";

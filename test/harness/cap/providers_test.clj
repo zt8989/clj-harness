@@ -29,6 +29,17 @@
   ;; from an earlier case would make the catalog refuse the very next one.
   (io/delete-file (home/providers-file) true))
 
+(defn- with-clear-model-caches
+  "Run F with the two MIRRORS OF THE OUTSIDE WORLD empty: harness.cap.model-data's
+  cache files, which belong to the HOME rather than to a case. A listing one case
+  cached would otherwise answer the next case's stub with ids it never asked for, and
+  a fact one case planted would fill a model the next case means to leave silent."
+  [f]
+  (io/delete-file (home/modelsdev-cache-file) true)
+  (io/delete-file (home/provider-models-cache-file) true)
+  (f))
+
+(use-fixtures :each with-clear-model-caches)
 (defn- with-home [config providers f]
   (let [old-config (when (.exists (home/config-file))
                      (slurp (home/config-file) :encoding "UTF-8"))]
@@ -413,38 +424,72 @@
           (is (= #{:text :image} (get-in c [:alpha :models "alpha-large" :input])))
           (is (= #{:text} (get-in c [:beta :models "beta-plain" :input]))))))))
 
-(deftest the-old-flat-shape-fails-by-name-and-says-what-to-write
-  ;; A provider entry that still has a :model string and no :models table is the
-  ;; shape this feature replaced. It is NOT read and NOT migrated -- it stops the
-  ;; run, and the message says which shape to write instead.
+(deftest a-provider-may-name-only-an-endpoint-and-take-its-own-listing
+  ;; THE SHAPE A PERSON WRITES NOW (.scratch/modelsdev-context): an endpoint, a
+  ;; default model, and nothing else. The table comes from the vendor's own /models
+  ;; listing, which harness.cap.model-data fetches and caches -- here through the
+  ;; seam the runner stubs, so the ids below are a stub's answer and no test leaves
+  ;; the machine.
   (with-home (cfg :cheap)
              (pr-str {:cheap {:protocol :openai-completions :base-url "https://a/v1"
-                              :model "small"}})
+                              :model "small" :display-name "Cheap Gateway"}})
     (fn []
-      (let [e (try (providers/catalog) nil (catch clojure.lang.ExceptionInfo e e))]
-        (is (some? e) "the old shape is a hard failure, not a quiet upgrade")
-        (is (str/includes? (ex-message e) ":models")
-            "and the message names the table it is missing")
-        (is (str/includes? (ex-message e) ":input")
-            "and shows a model entry, so the reader has the new shape in hand")))))
+      (with-redefs [providers/*list-models* (fn [_] ["small" "large"])]
+        (let [c    (providers/catalog)
+              cheap (get c :cheap)]
+          (is (= #{"small" "large"} (set (keys (:models cheap))))
+              "the vendor's own listing became the table")
+          (is (= "small" (:model cheap)) "and the default model is the one the entry named")
+          (is (= "https://a/v1" (:base-url cheap))))))))
 
-(deftest a-provider-with-no-models-lists-nothing-to-serve
+(deftest a-provider-with-no-default-model-takes-the-first-of-its-listing
+  ;; The other half of the same promise: the model id may be left out too, and the
+  ;; default is then the FIRST id the vendor's own listing names -- its order, not a
+  ;; map's, because that order is a fact the vendor published.
+  (with-home (cfg :cheap)
+             (pr-str {:cheap {:protocol :openai-completions :base-url "https://a/v1"}})
+    (fn []
+      (with-redefs [providers/*list-models* (fn [_] ["zzz-first" "aaa-second"])]
+        (let [cheap (get (providers/catalog) :cheap)]
+          (is (= "zzz-first" (:model cheap))
+              "the listing's order decides, and it is not sorted here on purpose"))))))
+
+(deftest a-provider-whose-listing-answers-nothing-serves-nothing
+  ;; EMPTY IS A STATE, NOT A FAILURE. A vendor that lists nothing (or that nobody
+  ;; could ask) leaves the table empty, the catalog still reads, and it is the
+  ;; RESOLUTION that refuses -- in a sentence naming the listing rather than the
+  ;; table, because the table is not something a person forgot to write.
   (with-home (cfg :alpha) (pr-str {:alpha {:protocol :p :base-url "https://a/v1"
                                             :model "m" :models {}}})
     (fn []
-      (let [e (try (providers/catalog) nil (catch clojure.lang.ExceptionInfo e e))]
-        (is (str/includes? (ex-message e) "lists no models"))))))
+      (let [c (providers/catalog)]
+        (is (= {} (:models (get c :alpha)))
+            "the catalog reads: a provider with no models yet is a state a home can be in"))
+      (let [e (try (providers/effective-provider "p-empty") nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? e) "but a run cannot be served from it")
+        (is (str/includes? (ex-message e) "declares no models")
+            "and the sentence says which fact is missing")
+        (is (str/includes? (ex-message e) ":providers")
+            "and where to write them by hand if the listing is not what they mean")))))
 
-(deftest a-model-must-declare-both-directions
-  (testing "declaring neither is a failure -- a model silent about its modalities
-            would make the guard vacuous"
+(deftest a-model-states-both-directions-or-says-nothing-about-either
+  ;; THE PAIR RULE: a model that declares one direction has stated half a capability,
+  ;; which reads as complete and is worse than silence. Declaring NEITHER is no longer
+  ;; a failure -- it is the ordinary shape of an entry that named only an id, and the
+  ;; facts fill it at resolution (see the resolution tests below).
+  (testing "declaring neither reads, and resolves to the text floor"
     (with-home (cfg :alpha)
                (pr-str {:alpha {:protocol :p :base-url "https://a/v1" :model "m"
                                 :models {"m" {}}}})
       (fn []
-        (let [e (try (providers/catalog) nil (catch clojure.lang.ExceptionInfo e e))]
-          (is (str/includes? (ex-message e) ":input"))
-          (is (str/includes? (ex-message e) ":output"))))))
+        (let [c (providers/catalog)
+              p (providers/effective-provider "p-quiet")]
+          (is (= {} (get-in c [:alpha :models "m"]))
+              "nothing is claimed in the catalog")
+          (is (= #{:text} (:input p)) "and the resolution floors at text")
+          (is (not (contains? (:input p) :image))
+              "an unknown model does not silently take pictures")))))
   (testing "declaring only one is also a failure -- half a capability is not a statement"
     (with-home (cfg :alpha)
                (pr-str {:alpha {:protocol :p :base-url "https://a/v1" :model "m"
@@ -613,17 +658,19 @@
         (is (= 4096 (:max-output-tokens p)))))))
 
 (deftest an-inline-provider-declaring-only-a-count-still-declares-something
-  ;; The counts are the reason the inline branch still builds a model entry when
-  ;; no modality is declared: an entry that states only a context window HAS
-  ;; stated something, and dropping it for saying nothing about modalities would
-  ;; be the silent drop this catalog refuses to perform.
+  ;; A COUNT ALONE IS STILL A DECLARATION: an entry that states only a context
+  ;; window has stated something, and dropping it for saying nothing about
+  ;; modalities would be the silent drop this catalog refuses to perform. The
+  ;; MODALITIES are not claimed by that entry -- they resolve to the text floor
+  ;; every unknown model gets, which is a different fact from 'it takes pictures'.
   (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"
                       :context-window 128000})
              nil
     (fn []
       (let [p (providers/effective-provider "p-only-ctx")]
         (is (= 128000 (:context-window p)))
-        (is (not (contains? p :input)) "and nothing was claimed about modalities")))))
+        (is (= #{:text} (:input p)) "the floor, not a modality the entry declared")
+        (is (not (contains? (:input p) :image)))))))
 
 (deftest an-inline-count-still-has-to-be-a-count
   (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"
@@ -778,15 +825,16 @@
           (is (not (contains? p :provider))))))))
 
 (deftest an-inline-provider-may-declare-nothing
-  ;; Modalities are optional in the inline form. Declaring nothing is a
-  ;; statement ('this entry promises nothing'), not an error -- which is what
-  ;; lets a bare {:protocol :fake} config work in tests and in a minimal setup.
+  ;; Modalities are optional in the inline form. Declaring nothing is a statement
+  ;; ('this entry promises nothing'), not an error -- which is what lets a bare
+  ;; {:protocol :fake} config work in tests and in a minimal setup. What it RESOLVES
+  ;; to is the text floor: no :input the entry claimed, and no image either.
   (with-home "{:protocol :fake :base-url \"https://bare/v1\" :model \"m\"}\n" nil
     (fn []
       (let [p (providers/effective-provider "p-bare")]
         (is (= "https://bare/v1" (:base-url p)))
-        (is (not (contains? p :input)) "nothing was declared, so nothing is claimed")
-        (is (not (contains? p :output)))))))
+        (is (= #{:text} (:input p)) "the floor, not a claim the entry made")
+        (is (= #{:text} (:output p)))))))
 
 (deftest an-inline-provider-declaring-half-a-capability-is-refused
   (with-home "{:protocol :fake :base-url \"https://half/v1\" :model \"m\" :input #{:text}}\n" nil
@@ -1538,7 +1586,7 @@
     (fn []
       (doseq [[what entry] {"a new id that is not one"      (form-entry)
                             "a protocol nobody implements"  (form-entry :protocol "anthropic-messages")
-                            "no models at all"              (form-entry :models [])
+                            "a display name that is not one" (form-entry :display-name 7)
                             "a model row with no id"        (form-entry :models [{:input ["text"] :output ["text"]}])
                             "the same model id twice"       (form-entry :models [{:id "a" :input ["text"] :output ["text"]}
                                                                                   {:id "a" :input ["text"] :output ["text"]}])
@@ -2414,4 +2462,94 @@
 ;; the security-list tests above replaced the old whole-list assertions with
 ;; built-in UNION custom ones when the list became additions-only (see
 ;; .scratch/read-write-fence-split).
+
+;; ------------------------------------------- what the outside facts fill in
+
+(defn- write-db!
+  "A models.dev cache file with ONE family in it, as harness.cap.model-data reads it:
+  `{id facts}` written as pairs, because a model id is a string and not a keyword."
+  [index]
+  (spit (home/modelsdev-cache-file)
+        (json/write-str {:fetched-at (System/currentTimeMillis)
+                         :models (vec index)})
+        :encoding "UTF-8"))
+
+(deftest a-model-that-names-only-an-id-takes-its-facts-from-the-database
+  ;; THE WHOLE POINT OF THE FEATURE: an entry may be an id and a name. What the
+  ;; models.dev database says about that id fills the rest at RESOLUTION -- the
+  ;; modalities, the two counts and the name -- and the FILE still wins wherever it
+  ;; said something of its own.
+  (write-db! {"alpha-large" {:context-window 1000000 :max-output-tokens 131072
+                              :input [:image :text :video] :output [:text]
+                              :name "Alpha Large"}
+               "alpha-small" {:context-window 64000 :max-output-tokens 64000
+                              :input [:text] :output [:text]}})
+  (with-home (cfg :alpha)
+             (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                              :model "alpha-large"
+                              :models {"alpha-large" {}                     ;; says nothing at all
+                                       "alpha-small" {:input #{:text} :output #{:text}}   ;; modality pair, no counts
+                                       "alpha-mine"  {:input #{:text} :output #{:text}
+                                                      :context-window 4096
+                                                      :max-output-tokens 1024
+                                                      :name "My Name"}
+                                       "alpha-unknown" {}}}})
+    (fn []
+      (testing "an entry that says nothing wears the database's answer"
+        (let [p (providers/effective-provider "p-filled")]
+          (is (= 1000000 (:context-window p)))
+          (is (= 131072 (:max-output-tokens p)))
+          (is (= #{:text :image} (:input p))
+              "the database's modalities, NARROWED to what this harness can carry")
+          (is (= #{:text} (:output p)))
+          (is (= "Alpha Large" (:model-name p)))))
+      (testing "and a model that declared its own pair keeps it, taking only the counts"
+        (let [p (providers/effective-provider "p-half")]
+          (providers/set-override! "p-half" {:model "alpha-small"})
+          (is (= 64000 (:context-window p)))
+          (is (= #{:text} (:input p)) "its own pair, not the database's"))
+        (providers/set-override! "p-half" nil))
+      (testing "what the file said is never second-guessed"
+        (providers/set-override! "p-mine" {:model "alpha-mine"})
+        (let [p (providers/effective-provider "p-mine")]
+          (is (= 4096 (:context-window p)) "the file's window")
+          (is (= 1024 (:max-output-tokens p)) "and the file's ceiling")
+          (is (= "My Name" (:model-name p)))
+          (is (not= 64000 (:context-window p))))
+        (providers/set-override! "p-mine" nil))
+      (testing "a model neither the file nor the database knows states nothing"
+        (providers/set-override! "p-unknown" {:model "alpha-unknown"})
+        (let [p (providers/effective-provider "p-unknown")]
+          (is (not (contains? p :context-window)) "no window is invented")
+          (is (= #{:text} (:input p)) "and the floor is text, never image"))
+        (providers/set-override! "p-unknown" nil)))))
+
+(deftest the-report-shows-the-file-as-written-and-offers-the-name-as-a-suggestion
+  ;; THE REPORT IS NOT THE RESOLUTION. A form edits the FILE, so a model row carries
+  ;; what the file says -- an empty modality pair when it said nothing -- and the
+  ;; database's name rides beside it as a SUGGESTION, the same way the probe's
+  ;; :instruction-updates does. Filling the row in would rewrite lines nobody touched.
+  (write-db! {"gpt-x" {:context-window 128000 :max-output-tokens 16384 :name "GPT-X"}})
+  (with-home (cfg :alpha)
+             (pr-str {:alpha {:protocol :openai-completions :base-url "https://alpha/v1"
+                              :model "gpt-x"
+                              :models {"gpt-x" {}   ;; the file says nothing about it
+                                       "bare"  {:name "Written"}}}})
+    (fn []
+      (let [rows (->> (providers/registry-report)
+                      :providers
+                      (filter #(= "alpha" (:name %)))
+                      first
+                      :models
+                      (map (fn [r] [(:id r) r]))
+                      (into {}))]
+        (is (= [] (get-in rows ["gpt-x" :input])) "as written: an empty pair")
+        (is (not (contains? (get-in rows ["gpt-x"]) :context-window))
+            "and no count the file never wrote")
+        (is (= "GPT-X" (get-in rows ["gpt-x" :name-suggested]))
+            "the database's name is offered beside it")
+        (is (= "Written" (get-in rows ["bare" :name]))
+            "a name the file DID write is carried as its own")
+        (is (not (contains? (get-in rows ["bare"]) :name-suggested))
+            "and nothing is suggested over it")))))
 )

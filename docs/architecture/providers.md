@@ -17,13 +17,17 @@
  :security {:sensitive-paths ["~/.ssh/" "~/.aws/"]}  ; 叠在内置清单之上的自家敏感路径；[] 表示不额外加
 
  :providers
- {:openrouter {:protocol :openai-completions
+ {:workbuddy {:protocol :openai-completions          ; 一个最小的供应商：地址 + 名字
+               :base-url "http://192.168.1.230:7863/v1"
+               :display-name "Workbuddy"}
+                                                       ; 一个模型也可以只写 id 与名称
+  :openrouter {:protocol :openai-completions
                :base-url "https://openrouter.ai/api/v1"
                :model    "anthropic/claude-sonnet-4.5"        ; 该厂商的默认 model id
                :models   {"anthropic/claude-sonnet-4.5" {:input #{:text :image} :output #{:text}
                                                          :context-window 1000000
                                                          :max-output-tokens 64000}
-                          "deepseek/deepseek-v4-pro"    {:input #{:text} :output #{:text}}}}}}
+                          "deepseek/deepseek-v4-pro"    {}}}}   ; 什么也没说：事实从 models.dev 来
 ```
 
 **`:security` 是唯一一节既不是 model 也不是界面的东西**：它装的是一份**路径清单**，文件工具落到上面就 park
@@ -69,10 +73,31 @@
 用户条目**逐字段、逐 model** 合在内置表之上，所以 `{:providers {:openrouter {:base-url "…"}}}` 是一条
 合法的「补丁」：只说自己要改的那一件事，其余借内置的。
 
-**provider 是厂商（endpoint），model 挂在它下面。** 每个 model **必须**声明 `:input` / `:output`，
-词汇表就是本 harness 真搬得动的类型（`:input` ⊆ `#{:text :image}`，`:output` ⊆ `#{:text}`）。
-声明一个搬不动的东西是谎话。
+**provider 是厂商（endpoint），model 挂在它下面。条目可以只写一个小小的 id。**
+`config.edn` 里一个 model 条目的**底线是「这个 id」**：`:input` / `:output` 是一对（**要么两个都写，
+要么都不写**），`:context-window` / `:max-output-tokens` 可以缺，`:name` 可以缺。写了的**永远赢**——
+文件是主人的话——没写的由**两条外部事实**在解析时补上（`harness.cap.model-data`）：
 
+- **models.dev 数据库**（`https://models.dev/api.json`，无密钥，5MB 一份）：每个 id 的模态、上下文与
+  最大输出、以及它的显示名。**它只补沉默，从不覆盖文件**；查不到的照旧沉默，解析时的模态底线是
+  `#{:text}`（「不接受图片」是保守的那一半，`assemble` 的 `modalities-with`）。
+- **供应商自己的 `/models`**：条目**一个模型都不写**时，它的 id 就是这份清单，默认模型（`:model` 也缺时）
+  是清单里的**第一个**（厂商自己发布的顺序，不是排序后的）。**这一条是必需品，不是锦上添花**：没有表就
+  没有 id 可跑，所以第一次真需要、缓存又没有时会**同步抓一次并等它**；抓不到就留一张空表，由
+  `assemble` 指名拒绝这次运行。
+
+两份都缓存 7 天（`stale-after-ms` 是个 def，不是旋钮），镜像文件放在配置家（`models-dev.json` /
+`provider-models.json`），随时可删。数据库那份**永远不在调用线程上抓**：读的人拿到当下缓存的答案，
+过期或缺失的刷新跑在背后；失败只记一行 warn，一小时内不再重试。`/api/providers/models`（设置页那个
+「获取」按钮）走的是**同一条缝**（`providers/*list-models*`），但**不落缓存**——表单要的是厂商此刻的
+答案，而一次解析要的是能撑一周的答案。
+
+**报告照文件说，解析才补。** `registry-report` 的 model 行给的是文件里写的样子（没写的模态渲染成空数组，
+并另带一个 `name-suggested` 建议），`active-provider` / `GET /api/model` 给的才是补过的事实
+（多一个 `:model-name`）。
+
+词汇表就是本 harness 真搬得动的类型（`:input` ⊆ `#{:text :image}`，`:output` ⊆ `#{:text}`）：
+数据库说这个模型收 `:video`，进到解析里也只剩 `:text` / `:image`。声明一个搬不动的东西仍然是谎话。
 两个数字（`:context-window` / `:max-output-tokens`）**可选**，都是**报告用，不是执行用**：
 
 - 本仓**不数 token**，所以 `:context-window` 不拦任何 run——拿近似值去拦，是把谎话写进错误信息；
@@ -87,9 +112,13 @@
 设置页的三态控件靠这个分别（见 [client](client.md)）。这个值也是**闭集**，写别的名字在
 `check-model` 里**指名报错**，不静默退化。
 
-**校验会指名报错**：未知键（`:context_window` 这种拼错）、未声明的 model id、搬不动的模态、
-非正整数的数字、`max-output-tokens > context-window`——四条都在加载时停下，不静默丢弃。
-**旧扁平形状不读不迁移**（provider 自己就是一个裸 model 字符串而没有 `:models` 表）——指名报错并说明该写成什么。
+**校验会指名报错**：未知键（`:context_window` 这种拼错）、未声明的 model id（**表非空时**才判）、
+只写了一半的模态对、搬不动的模态、非正整数的数字、`max-output-tokens > context-window`、
+`display-name` / `name` 不是非空字符串——都在加载时停下，不静默丢弃。
+
+**「一个模型都不写」和「空表」现在是合法状态**（等价，都表示「id 去问厂商自己的清单」）；
+**裸 model 字符串那条老形状已经没有区别了**——它正是今天的推荐写法。真正会拦下来的只剩：
+清单迟迟抓不到时那一次运行，它由 `assemble` 指名拒绝（`declares no models`）。
 
 内置表里的主流 model 带真实数字，**逐条读自厂商现网列表**（`:as-of` 标在表上）；核对不到的一律留空，
 不写凭记忆的数——内置表里的 id 已经因为凭记忆写错过一次。

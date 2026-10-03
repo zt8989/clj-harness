@@ -58,6 +58,12 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :as t]
+            ;; THE TWO OUTSIDE FACTS ABOUT A MODEL, so that NO TEST RUN LEAVES THE
+            ;; MACHINE: `isolate!` stubs both seams below (a vendor that lists nothing,
+            ;; a database that cannot be downloaded). A namespace that wants either
+            ;; answer says so itself -- with a stub, or with a cache file it writes.
+            [harness.cap.model-data :as model-data]
+            [harness.cap.providers :as providers]
             [harness.infra.db :as db]
             [harness.infra.env :as env]
             [harness.infra.home :as home]
@@ -89,6 +95,7 @@
     harness.edge.ag-ui-test
     harness.edge.replay-test
     harness.evals-test
+    harness.cap.model-data-test
     harness.cap.providers-test
     harness.cap.project-test
     harness.cap.claims-test
@@ -227,6 +234,19 @@
         (alter-var-root #'env/*temp-dir-override* (constantly [tmp']))
         (reset! tmp-temp-dir tmp')
         ;; BEFORE THE PAIR IS HANDED BACK, so that no run ever exists during a moment
+        ;; AND THE TWO DOORS TO THE OUTSIDE ARE SHUT, because 'no test run depends
+        ;; on a vendor answering' is already the rule for the probe's seam
+        ;; (`providers/*list-models*`) and a model entry that names no models now
+        ;; goes through that same door on its own. A VENDOR THAT LISTS NOTHING is the
+        ;; answer, so a case that declares a table-less provider sees a provider with
+        ;; an empty table rather than a DNS timeout; a case that wants ids stubs the
+        ;; seam itself. THE DATABASE CANNOT BE DOWNLOADED AT ALL -- one 5MB request
+        ;; per run would be the whole suite waiting on somebody else's site, and a
+        ;; case that wants facts writes the cache file (see harness.cap.model-data).
+        (alter-var-root #'providers/*list-models* (constantly (fn [_] [])))
+        (alter-var-root #'model-data/*http-get*
+                        (constantly (fn [_url _seconds]
+                                      (throw (ex-info "no network in tests" {})))))
         ;; when this process's exit has nothing to remove it.
         (ensure-cleanup-hook!)
         dir)))
@@ -558,6 +578,23 @@
 
 ;; -------------------------------------------------------------- running them
 
+
+(defn- forget-model-facts!
+  "Empty the two MIRRORS OF THE OUTSIDE WORLD before a namespace runs: the cache files
+  harness.cap.model-data reads (models.dev's index and each provider's listing) and the
+  process's memory of them.
+  
+  THEY BELONG TO THE HOME, NOT TO A CASE, and the home is shared by the whole run.
+  One namespace that plants a fact for an id would otherwise be answering another
+  namespace's question about that same id -- measured 2026-10-03: `providers-test`
+  plants a `gpt-x` row, and `http-test`'s catalog assertion then carried a
+  `:name-suggested` it had never asked for. Deleting them is safe: they are mirrors of
+  documents a process can re-fetch, and the run's own two stubs (installed by
+  `isolate!`) are what any test that wants facts must replace anyway."
+  []
+  (io/delete-file (home/modelsdev-cache-file) true)
+  (io/delete-file (home/provider-models-cache-file) true)
+  (model-data/forget!))
 (defn- run-namespaces!
   "Run NAMESPACES one at a time, each under its own deadline, and answer
 
@@ -580,7 +617,10 @@
           {:status :timeout, :kind :run, :budget-ms run-ms, :ms elapsed,
            :counters counters, :ran ran, :not-run (vec todo)}
           (let [result (run-with-deadline namespace-ms
-                                          #(if timing? (run-timed-ns ns) (t/test-ns ns)))]
+                                          #(do (forget-model-facts!)
+                                               (if timing?
+                                                 (run-timed-ns ns)
+                                                 (t/test-ns ns))))]
             (case (:status result)
               :threw   {:status :threw, :threw (:threw result), :subject ns}
 
