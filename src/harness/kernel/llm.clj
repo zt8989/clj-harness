@@ -189,27 +189,65 @@
 ;; WHY A VENDOR CAN LEAVE IT BLANK (owner's report, 2026-10-04, session
 ;; `71683598-…`): that run's FIRST call came back `call_function_imapxgsc8u1o_1` and
 ;; every call after it came back `""`. An id is not decoration -- four readers assume
-;; one -- and none of them can report a blank: `ag-ui`'s `apply-frames` finds a call's
-;; ARGUMENTS by matching that id, so two calls sharing `""` append one call's JSON to
-;; the other's (measured: a `read` whose arguments had a `bash`'s spliced onto the end);
+;; one, and NONE of them can report a bad one, whether it is blank or repeated: `ag-ui`'s
+;; `apply-frames` finds a call's ARGUMENTS by matching that id, so two calls sharing one
+;; append one call's JSON to the other's (measured on the blank case: a `read` whose arguments
+;; had a `bash`'s spliced onto the end; measured on the repeated case, 2026-10-04, session
+;; `6f1986e9`: 181 of one run's 190 calls, every one holding two calls' arguments);
 ;; `replay/park-on-call` finds the message a parked run's card belongs on the same way;
-;; `replay/prune-messages` keys a tool RESULT on it, so results land on the wrong call;
-;; and the client cannot match an interrupt to its call at all, which is how a parked
-;; `ask` came to draw NO CARD -- `ElicitationGate` returns null on a call whose id no
-;; interrupt names, and the question sat at 「待审批」 with nothing to click.
+;; `replay/prune-messages` keys a tool RESULT on it, so results land on the wrong call; and
+;; the client cannot match an interrupt to its call at all -- on a blank id that is how a parked
+;; `ask` came to draw NO CARD (`ElicitationGate` returns null on a call whose id no interrupt
+;; names, and the question sat at 「待审批」 with nothing to click), and on a REPEATED one it is
+;; worse -- `ElicitationGate` finds that one interrupt and binds it to every call sharing the id,
+;; which is how one question drew its card on 181 tool cards at once."
 ;;
-;; THE ID IS INDEX-BASED AND RUN-SCOPED (`call-<index>`): the index is the vendor's own
-;; key for this call within this assistant message, it is unique within it BY
-;; CONSTRUCTION (the map above is keyed by it), and it is the same id the deltas were
-;; folded under -- so a vendor that NAMED some calls and left others blank gets a mix of
-;; its own names and ours, each still unique, which is all any reader asks. It is NOT
-;; namespaced by run id: this id never becomes an entry id (no reader folds a call to
-;; one), and a call is only ever looked up inside its own assistant message.
-(defn- fold-tool-calls [calls]
-(mapv (fn [[i t]] {:id (if (seq (:id t)) (:id t) (str "call-" i))
-:type "function"
-:function {:name (:name t) :arguments (:arguments t)}})
-(sort-by key calls)))
+;; THE MINTED ID IS INDEX-BASED (`call-<index>`): the index is the vendor's own key for this call
+;; within this assistant message and is the same id the deltas were folded under -- so a vendor that
+;; NAMED some calls and left others blank gets a mix of its own names and ours, each still unique.
+;; It is NOT namespaced by run id: this id never becomes an entry id (no reader folds a call to one),
+;; and what a reader needs from it is uniqueness in the CONVERSATION, which is why the next paragraph
+;; matters more than this one.
+;;
+;; A REPEATED ID IS THE SAME FAILURE AS A BLANK ONE, and it is the vendor that numbers its calls
+;; from the start of the REQUEST: every call in the conversation comes back `call-0` (owner's
+;; report, 2026-10-04, session `6f1986e9`: 181 of that run's 190 calls, across five tools, each
+;; in its OWN turn -- so uniqueness within one message is not enough, and this fold, which sees one
+;; turn at a time, is handed IN-USE to make up the difference."
+;;
+;; SO A SEEN ID IS KEPT AND A REPEATED ONE IS RE-SPELLED, the second and any later call wearing
+;; `call-<index>` like a blank one does. The minted name is checked against every id already in the
+;; conversation AND every one minted this turn, because a vendor that sends `call-0` twice and
+;; `call-1` once would otherwise be handed a call whose new name is the one its third call owns."
+(defn- fold-tool-calls [calls in-use]
+  (let [ordered (sort-by key calls)
+        taken   (volatile! in-use)]
+    (mapv (fn [[i t]]
+            (let [own (:id t)
+                  id  (if (and (seq own) (not (contains? @taken own)))
+                         own
+                         ;; THE FIRST FREE NAME, counting on from this call's own index, so the
+                         ;; order the deltas already carry is the order the names come out in.
+                         (loop [n i]
+                           (let [candidate (str "call-" n)]
+                             (if (contains? @taken candidate)
+                               (recur (inc n))
+                               candidate))))]
+              (vswap! taken conj id)
+              {:id id
+               :type "function"
+               :function {:name (:name t) :arguments (:arguments t)}}))
+          ordered)))
+
+(defn- call-ids-in-use
+  "MESSAGES -> every tool-call id those messages already carry, in an assistant message's
+`tool_calls` AND in the `tool_call_id` of a tool answer.
+
+  THE CONVERSATION IS WHAT MAKES AN ID A PROBLEM, so this is what the whole conversation says."
+  [messages]
+  (into #{} (mapcat (fn [m] (concat (map :id (:tool_calls m))
+                                (when-let [id (:tool_call_id m)] [id]))))
+        messages))
 
 (defn- telemetry-fields
   "The three things a chunk says ABOUT the call rather than IN it: the vendor's
@@ -269,39 +307,43 @@
 
   Returns {:message <assistant message> :telemetry <map>}, and the telemetry map is
   EMPTY when the stream reported nothing about the call -- which is what a stream
-  that died mid-way looks like, and is not the same as one that reported zeroes."
-  [lines emit]
-  (let [text      (StringBuilder.)
-        think     (StringBuilder.)
-        calls     (atom {})
-        seen?     (atom false)
-        telemetry (atom {})]
-    (doseq [payload (data-payloads lines)]
-      (let [chunk (json/read-str payload :key-fn keyword)
-            delta (get-in chunk [:choices 0 :delta])
-            [_ present?] (reasoning-field delta)]
-        (swap! telemetry merge (telemetry-fields chunk))
-        (when present? (reset! seen? true))
-        (absorb! text think calls delta)
-        (speak! delta emit)))
-    (let [assembled (fold-tool-calls @calls)]
-      ;; Emitted only once fully assembled: no incremental args, and therefore no
-      ;; state machine that can be cut off in the middle of a JSON string.
-      (doseq [{:keys [id function]} assembled]
-        (emit (ev/tool-call id (:name function) (:arguments function))))
-      {:message
-       (cond-> {:role "assistant" :content (str text)}
-         ;; THE FIELD IS KEPT WHEN THE VENDOR MENTIONED IT, EMPTY INCLUDED -- which is
-         ;; not the same rule as 'when there is text'. A thinking-mode vendor that has
-         ;; nothing to reason about still sends the field, and it REQUIRES it back on
-         ;; the next request (a DeepSeek-compatible gateway answers HTTP 400 otherwise:
-         ;; 'The reasoning_content in the thinking mode must be passed back to the API').
-         ;; Answering 'the vendor said nothing' with silence is what this used to do,
-         ;; and it is what made the next request impossible: see
-         ;; `thinking-mode-history` and .scratch/reasoning-round-trip/spec.md.
-         @seen?          (assoc :reasoning_content (str think))
-         (seq assembled) (assoc :tool_calls assembled))
-       :telemetry @telemetry})))
+  that died mid-way looks like, and is not the same as one that reported zeroes.
+
+  IN-USE, the call ids ALREADY IN THE CONVERSATION this call is answering, are handed in by `stream!`
+  and are what a repeated vendor id is re-spelled against -- see `fold-tool-calls`."
+  ([lines emit] (consume-sse lines emit #{}))
+  ([lines emit in-use]
+   (let [text      (StringBuilder.)
+         think     (StringBuilder.)
+         calls     (atom {})
+         seen?     (atom false)
+         telemetry (atom {})]
+     (doseq [payload (data-payloads lines)]
+       (let [chunk (json/read-str payload :key-fn keyword)
+             delta (get-in chunk [:choices 0 :delta])
+             [_ present?] (reasoning-field delta)]
+         (swap! telemetry merge (telemetry-fields chunk))
+         (when present? (reset! seen? true))
+         (absorb! text think calls delta)
+         (speak! delta emit)))
+     (let [assembled (fold-tool-calls @calls in-use)]
+       ;; Emitted only once fully assembled: no incremental args, and therefore no
+       ;; state machine that can be cut off in the middle of a JSON string.
+       (doseq [{:keys [id function]} assembled]
+         (emit (ev/tool-call id (:name function) (:arguments function))))
+       {:message
+        (cond-> {:role "assistant" :content (str text)}
+          ;; THE FIELD IS KEPT WHEN THE VENDOR MENTIONED IT, EMPTY INCLUDED -- which is
+          ;; not the same rule as 'when there is text'. A thinking-mode vendor that has
+          ;; nothing to reason about still sends the field, and it REQUIRES it back on
+          ;; the next request (a DeepSeek-compatible gateway answers HTTP 400 otherwise:
+          ;; 'The reasoning_content in the thinking mode must be passed back to the API').
+          ;; Answering 'the vendor said nothing' with silence is what this used to do,
+          ;; and it is what made the next request impossible: see
+          ;; `thinking-mode-history` and .scratch/reasoning-round-trip/spec.md.
+          @seen?          (assoc :reasoning_content (str think))
+          (seq assembled) (assoc :tool_calls assembled))
+        :telemetry @telemetry}))))
 
 (defn thinking-mode-history
   "MESSAGES -> the history a THINKING-MODE vendor must be shown, which is the same
@@ -681,7 +723,11 @@ two agree about what 'answered' means."
           guard (idle-guarded-lines body r (:idle-timeout-ms provider))]
       (try
         (let [raw (StringBuilder.)
-              out (consume-sse (tee-lines raw (:lines guard)) on-event)]
+              out (consume-sse (tee-lines raw (:lines guard)) on-event
+                                ;; THE IDS ALREADY IN PLAY, so a vendor that names every call in
+                                ;; the conversation `call-0` is re-spelled against the whole of it --
+                                ;; see `fold-tool-calls`.
+                                (call-ids-in-use messages))]
           ;; THE RESPONSE IS LOGGED AS THE VENDOR SENT IT *AND* AS WHAT IT MEANT, and it
           ;; takes both to be able to check either. `:body` is the raw frame text, the way
           ;; the request line's `:body` is the raw request -- the same argument on the
