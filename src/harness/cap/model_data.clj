@@ -476,6 +476,32 @@
       (let [index (or (:models payload) {})]
         (or (some #(get index %) (lookup-keys id)) {})))))
 
+(defn provider-env-names
+  "PROVIDER-ID -> the variable names the vendor ITSELF says its key lives in
+  (models.dev's `env`), as a vector, or [] for a vendor the document does not name.
+  
+  IT IS THE VENDOR'S OWN SPELLING (`ZHIPU_API_KEY`, not the id-derived
+  `ZAI_API_KEY`), which is the whole point: a person who already exported the key
+  under the platform's conventional name should not have to write the same secret
+  again under a name this harness invented. The document's own row carries them, and
+  rows with more than one name (`CLOUDFLARE_ACCOUNT_ID,CLOUDFLARE_API_KEY`) carry them
+  all -- which name is the secret and which is setup is the caller's business.
+  
+  IT IS A PURE READ AND IT DOES NOT START A DOWNLOAD -- deliberately, and this one is
+  load-bearing (measured 2026-10-03): a KEY lookup that kicked a refresh hung the child
+  process of a test probe for the whole namespace limit, because a `future` holding a
+  half-finished download keeps a JVM alive. More to the point, asking 'is there a key'
+  should not be able to send a request anywhere: a cache that is absent or aged out
+  answers [] here, and `warm!` (which `catalog` already calls) is what fills it -- so the
+  cheapest possible answer is also the one with no side effects. NOTHING DEPENDS ON IT
+  FOR A RUN TO WORK: the id-derived name is always tried first, so an empty (or stale, or
+  changed) document can never be why a run's key went missing."
+  [id]
+  (let [payload (current-db)]
+    (if (str/blank? (str id))
+      []
+      (let [row (get (:providers payload) (str id))]
+        (vec (filter string? (:env row)))))))
 ;; -------------------------------------------------- the vendor's own listing
 
 (defonce ^:private listings-state (atom nil))  ;; {:mtime ms :payload {..}}

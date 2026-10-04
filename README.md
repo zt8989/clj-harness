@@ -87,7 +87,7 @@ cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
 config.edn    唯一一份配置，六段：:default（三个旋钮）+ :providers（厂商）+ :ui（语言）
               + :security（敏感路径）+ :session（编辑/压缩/围栏/技能/指令/子agent）+ :mcp（MCP 服务器），每轮重读
 hooks.edn     hook 声明（可选；不存在 = 这个点没人监听）——唯一留在外面的那份
-.env          密钥：一家厂商一把 <ID>_API_KEY，全局 HARNESS_API_KEY 兜底；优先于真实环境变量
+.env          密钥：一家厂商一把 <ID>_API_KEY（没有全局兜底）；优先于真实环境变量
 harness.infra.db         sqlite：项目 / 会话归属 / 归档 / 文件锚点 / 任务清单
 projects/<项目>/*.jsonl  会话日志，按项目分目录
 ```
@@ -97,7 +97,7 @@ projects/<项目>/*.jsonl  会话日志，按项目分目录
 - **`config.edn` 不用自己造**：第一次启动会替你写一份带注释的空配置；`*.edn.example`（config /
   harness / hooks / mcp）是带完整注释的参考起点。
 - **技能与指令读的是 OS 家目录**（`~/AGENTS.md`、`~/.agents/skills/`），**不跟随 `CLJ_HARNESS_HOME`**。
-- 首次使用：往 `~/.clj-harness/.env` 填 `HARNESS_API_KEY`（或某家厂商自己的 `<ID>_API_KEY`）。
+- 首次使用：往 `~/.clj-harness/.env` 填你要用的那家厂商自己的 `<ID>_API_KEY`（内置厂商同样要各自填一把）。
 - **要给厂商缓存做分析时才打开 LLM 流量日志**：设 `CLJ_HARNESS_LLM_DEBUG=1`（每次调用重读，不必重启），
   之后每一次模型调用都往 `<配置家>/logs/llm-debug.jsonl` 追加一行 JSON —— 请求是**发出去的原样字节**
   （前缀缓存认的就是这些字节，重编码过就不是同一个事实了），响应带厂商报的那份 `usage`（含 `cached_tokens`）。

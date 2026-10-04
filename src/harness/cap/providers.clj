@@ -1678,38 +1678,63 @@
   (str (str/upper-case (str/replace (name provider) #"[^A-Za-z0-9]" "_")) "_API_KEY"))
 
 (defn- credential-names
-  "The names PROVIDER's api-key may live under, in the order they are tried: the
-  provider's own derived name first, then the global HARNESS_API_KEY as the
-  fallback.
-
-  THE FALLBACK IS WHAT MAKES THIS LAND: every home configured before this change has
-  one HARNESS_API_KEY, and the three built-in vendors and any inline description
-  keep working off it with nothing to edit. A provider that says its own name wins;
-  a provider that says nothing still has a key.
-
-  AN INLINE PROVIDER HAS NO NAME (it is a description, not an entry in the catalog),
-  so it has only the global one -- not a derived name invented from its endpoint,
-  which would be a credential nobody could have known to write."
+  "The names PROVIDER's api-key may live under, in the order they are tried: THE NAME
+  THIS HARNESS DERIVES FROM ITS ID first, then THE NAMES THE VENDOR ITSELF USES
+  (models.dev's `env` for that id) -- and NOTHING GLOBAL.
+  
+  THERE IS NO GLOBAL KEY (owner, 2026-10-03: 'clean out HARNESS_API_KEY entirely --
+  there is no universal key, every vendor has its own'). `HARNESS_API_KEY` used to be a
+  floor every provider could fall back on, and it was wrong twice over: a vendor never
+  answers to a name this harness invented, and a single exported variable made EVERY
+  entry report itself as keyed -- which is how Ollama, which needs no key at all, came
+  to sit in the settings list as though somebody had configured it.
+  
+  THE VENDOR'S OWN NAME IS THE SECOND HALF (`.scratch/own-key-only`): `zai` derives
+  `ZAI_API_KEY`, while the platform's own variable -- and what anybody who already has
+  that key exported will have set -- is `ZHIPU_API_KEY`. Accepting both is what makes
+  'this vendor is already usable' mean something: the pick list asks THIS function, so
+  the sentence the form shows and the lookup a run does are one answer rather than two
+  that happen to agree.
+  
+  THE DERIVED NAME IS TRIED FIRST, deliberately: it is the line this harness writes
+  and the one its own docs name, and the second half is a convenience that depends on a
+  cached document (`harness.cap.model-data/provider-env-names`, which never blocks and
+  answers [] when it knows nothing). A run can therefore never lose its key because a
+  cached document went missing -- only gain a spelling it did not have to write.
+  
+  AN INLINE PROVIDER HAS NO NAME (it is a description, not an entry in the catalog) AND
+  THEREFORE NO KEY: it gets `[]` rather than a name invented from its endpoint, which
+  would be a credential nobody could have known to write. An endpoint that needs a key
+  belongs in `:providers` under an id -- which is what 'every provider has an ID, even a
+  custom one' means."
   [provider]
   (if (some? provider)
-    [(credential-name provider) "HARNESS_API_KEY"]
-    ["HARNESS_API_KEY"]))
+    (distinct (concat [(credential-name provider)]
+                      (model-data/provider-env-names (name provider))))
+    []))
 
 (defn- api-key
-  "PROVIDER's API key: the provider's own derived name first, then the global
-  HARNESS_API_KEY -- and within each name, the home's .env before the environment
-  (harness.infra.home/env-source owns that order; prompt.md owns the discipline that
-  this is the only place a key is ever resolved).
-
+  "PROVIDER's API key: its OWN derived name, and nothing else -- the home's .env before
+  the environment (`harness.infra.home/env-source` owns that order; prompt.md owns the
+  discipline that this is the only place a key is ever resolved).
+  
   PROVIDER is the catalog NAME of a provider, or nil for an inline description. A
   key attached to the wrong provider is indistinguishable from a working one until
   the vendor answers 401, so the name is asked for rather than guessed from
-  whatever happens to be in the environment.
+  whatever happens to be in the environment. NIL -- an inline description, which has no
+  name to derive one from -- answers NIL WITHOUT ASKING ANYTHING, and the guard is the
+  first thing this function does rather than a consequence of the lookup's answer:
+  `credential-names` reads a cached document, and a 'nil provider' is what every
+  offline probe and pinned fixture is -- asking one to read the cache at all used to
+  start a download behind it, and a child process with a half-finished download open
+  does not exit (measured 2026-10-03, `providers-test` hitting the 300s namespace
+  limit with 40 other failures downstream of it).
 
   PRIVATE, and doubly so by discipline: the key flows ONLY into resolve-provider's
   result, and prompt.md forbids reaching for it any other way."
   [provider]
-  (some-> (home/env-source (credential-names provider)) :name (home/env-value)))
+  (when (some? provider)
+    (some-> (home/env-source (credential-names provider)) :name (home/env-value))))
 
 ;; ---------------------------------------------- the selection and its tiers
 ;;
@@ -2022,11 +2047,17 @@
   which is the line a person has to add. Reporting only presence would leave them to
   derive the name from the provider id in their heads, which is the one step this
   feature exists to remove.
-
-  THE PRECEDENCE IS `api-key`'s, not a guess: the provider's own name before the
-  global one, and within a name the home's .env before the environment. So a home
-  with both is a home whose key comes from the file. Reporting the other one would
-  send a person to edit a variable that is being ignored.
+  
+  `:name` IS NIL FOR AN INLINE DESCRIPTION, which has no id and therefore no line: with
+  the global key gone there is nothing left to name, and reporting one of the built-in
+  vendors' names would send a person to write a line that would never be read (see
+  `credential-names`). Presence, source and name are one answer, and the answer is
+  'nobody supplies this one'.
+  
+  THE PRECEDENCE IS `api-key`'s, not a guess: the provider's own name, and within a name
+  the home's .env before the environment. There is no second name to fall back to, so
+  what this reports is exactly the line a run would read -- reporting anything else
+  would send a person to edit something that is being ignored.
 
   THE VALUE, ITS LENGTH AND ITS PREFIX ARE ALL ABSENT, and this is a separate
   function from `api-key` rather than a wrapper over it: a wrapper would have the
@@ -2360,14 +2391,15 @@
   carries is not added twice. Sorted the way the form shows it: by name, then by id, so
   the order is total and stable.
   
-  EACH ROW CARRIES WHETHER THIS HOME CAN ALREADY USE IT (`:key-ready`), and the fact is
-  derived with the SAME lookup a run would do -- `env-source` over the credential names
-  the vendor's row names (models.dev's `env`), falling back to this harness's own derived
-  name and the global `HARNESS_API_KEY`. NO VALUE rides along -- only presence, source and
-  the name, exactly the shape `api-key-source` answers, because a key is a secret even in
-  a pick list. This is what lets the form offer a vendor whose key is already exported in
-  the environment as ready to use, without a `.env` edit: the person checks one box in the
-  environment once, and every vendor keyed that way lights up."
+  EACH ROW CARRIES WHETHER THIS PLATFORM'S OWN KEY IS ALREADY HERE (`:key-ready`), and the
+  fact is derived with the SAME lookup a run would do -- `env-source` over the names THAT
+  VENDOR answers to: models.dev's own `env` spelling first, then this harness's derived
+  name. **NO GLOBAL FALLBACK** (owner, 2026-10-03): a universal `HARNESS_API_KEY` made
+  every row report itself ready, which is the same mistake that put Ollama in the
+  settings list. NO VALUE rides along either -- only presence, source and the name,
+  exactly the shape `api-key-source` answers, because a key is a secret even in a pick
+  list. This is what lets the form offer a vendor whose key is already exported in the
+  environment as ready to use, without a `.env` edit."
   []
   (let [from-md  (model-data/known-providers)
         claimed  (set (map :id from-md))
@@ -2378,14 +2410,12 @@
                                                 :model-count (count (:models e))}
                                           (some? (:display-name e))
                                           (assoc :name (:display-name e))))))
-        ;; THE NAMES A VENDOR'S KEY MAY LIVE UNDER, as the RUN would try them: the
-        ;; document's own names first (its spelling, if it named one), then this
-        ;; harness's derived name, then the global. `env-source` applies the
+        ;; THE NAMES A VENDOR'S KEY MAY LIVE UNDER -- ASKED OF THE SAME FUNCTION A RUN
+        ;; ASKS (`credential-names`), which is the only way the sentence this list shows
+        ;; can be true: the name this harness derives from the id, plus models.dev's own
+        ;; names for that vendor, and nothing global. `env-source` applies the
         ;; .env-before-environment order within each name.
-        names-of (fn [{:keys [id env]}]
-                   (distinct (concat (map str env)
-                                     [(credential-name (keyword id))]
-                                     ["HARNESS_API_KEY"])))
+        names-of (fn [{:keys [id]}] (credential-names (keyword id)))
         ready    (fn [row]
                    (let [{:keys [name source]} (home/env-source (names-of row))]
                      (assoc row

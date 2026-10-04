@@ -25,6 +25,7 @@
             [harness.infra.home :as home]
             [harness.infra.shell :as shell]
             [harness.cap.project :as project]
+            [harness.cap.providers :as providers]
             [harness.cap.system-prompt :as system-prompt]
             [harness.test-support :as support]))
 
@@ -476,13 +477,33 @@
   ;; stays. So the search for the FIELD is made against what the hooks appended, which
   ;; is the part a leak could come from; the search for the SECRET is made against the
   ;; whole message, opening included.
+  ;; A NAMED PROVIDER, because there is no global key any more (owner, 2026-10-03):
+  ;; an inline description has no id, so it has no credential, and the session under
+  ;; test has to be one whose provider ACTUALLY has a key for the search to be a search
+  ;; of something. The name is `sp-key`'s derived one -- the only line a run would read.
+  ;;
+  ;; AND THE FILE IS PUT BACK, NOT MERELY OVERWRITTEN. A case that plants a
+  ;; `config.edn` and leaves it behind hands the NEXT namespace a home that is not the
+  ;; one its own fixture seeds -- measured 2026-10-03, exactly that: this file's planted
+  ;; `{:default {:provider :sp-key …}}` survived into every namespace that ran after it, and
+  ;; each run there refused with 'no provider' (40 failures downstream, none of them about
+  ;; this ticket). The home belongs to the whole run, so a case that changes it has to
+  ;; undo it -- the same discipline `providers-test`'s `with-home` keeps.
   (let [secret "sk-live-DO-NOT-LEAK-4f2a9c"
-        f      (home/dotenv-file)]
+        f      (home/dotenv-file)
+        cfg    (home/config-file)
+        was    (when (.exists cfg) (slurp cfg :encoding "UTF-8"))]
     (.mkdirs (.getParentFile f))
-    (spit f (str "HARNESS_API_KEY=" secret "\n") :encoding "UTF-8")
+    (spit cfg (str "{:default {:provider :sp-key :model \"seeded\"}\n"
+                   " :providers {:sp-key {:protocol :fake :base-url \"http://offline.invalid/v1\""
+                   " :model \"seeded\" :models {\"seeded\" {}}}}}\n")
+          :encoding "UTF-8")
+    (spit f (str "SP_KEY_API_KEY=" secret "\n") :encoding "UTF-8")
     (try
       (is (str/includes? (slurp f :encoding "UTF-8") secret)
           "the key really is where the resolver reads it, so this is a search of something")
+      (is (= secret (:api-key (providers/effective-provider "sp-key")))
+          "and the resolver really does read THAT line for this session's provider")
       (let [text     (:text (assemble-run "sp-key"))
             appended (subs text (count (str/trimr (opening))))]
         (is (str/includes? text "<env>") "and the message really was assembled")
@@ -493,4 +514,10 @@
         (testing "while the search itself is one that could have found a key"
           ;; Without this half the assertion above would pass on an empty string too.
           (is (str/includes? (str text " " secret) secret))))
-      (finally (io/delete-file f true)))))
+      (finally
+        (io/delete-file f true)
+        ;; PUT THE FILE BACK rather than deleting it: the home was seeded with a
+        ;; config.edn before this namespace ran, and deleting it is a different change
+        ;; from the one this case made. What the next namespace must find is the home
+        ;; its OWN fixture builds, not a home with a file missing from it.
+        (if was (spit cfg was :encoding "UTF-8") (io/delete-file cfg true))))))

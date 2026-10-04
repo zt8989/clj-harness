@@ -259,3 +259,26 @@
       (is (pos? @fetches) "and the refresh went out anyway")
       (finally (alter-var-root #'md/*http-get*
                                (constantly (fn [_ _] (throw (ex-info "no network" {})))))))))
+
+(deftest a-vendors-own-variable-names-come-back-for-the-home-to-check
+  ;; WHAT THE VENDOR SAYS ITS KEY IS CALLED (models.dev's `env`). The harness asks this
+  ;; so a person who already exported `ZHIPU_API_KEY` does not have to write the same
+  ;; secret again under a name this harness derived from the id.
+  ;; THREE ARGUMENTS: this file's helper is (fetched-at, index, providers) -- the other
+  ;; one in providers_test is (index, providers), and mixing them up writes the vendor
+  ;; table where the model index belongs.
+  (write-db! (System/currentTimeMillis)
+             {"m" {:context-window 1000}}
+             {"zai"      {:name "Z.AI" :base-url "https://api.z.ai/v4" :model-count 18
+                          :env ["ZHIPU_API_KEY"]}
+              "cloudflare-workers-ai" {:name "Cloudflare" :base-url "https://cf/v1"
+                                       :model-count 27
+                                       :env ["CLOUDFLARE_ACCOUNT_ID" "CLOUDFLARE_API_KEY"]}})
+  (is (= ["ZHIPU_API_KEY"] (md/provider-env-names "zai")))
+  (is (= ["CLOUDFLARE_ACCOUNT_ID" "CLOUDFLARE_API_KEY"]
+         (md/provider-env-names "cloudflare-workers-ai"))
+      "a vendor whose key needs setup beside it carries BOTH names")
+  (testing "and a vendor the document does not name answers nothing rather than something"
+    (is (= [] (md/provider-env-names "my-own-gateway")))
+    (is (= [] (md/provider-env-names nil)))
+    (is (= [] (md/provider-env-names "")))))

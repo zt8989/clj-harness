@@ -18,7 +18,7 @@
   THE KEY IS NOT CONFIGURATION. Each vendor's variable has a fixed name (no
   `config.edn` entry, no configurable env-var name) and is read through
   harness.infra.home/env-value -- the home's .env first, then the environment, the same
-  lookup the provider's HARNESS_API_KEY goes through. A key is a secret somebody put
+  lookup a provider's own <ID>_API_KEY goes through. A key is a secret somebody put
   outside the repository; where it is looked for is not a per-session preference.
 
   NOTHING HERE IS A SECURITY BOUNDARY. The query goes to an endpoint chosen by this

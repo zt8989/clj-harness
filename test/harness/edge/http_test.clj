@@ -4084,7 +4084,7 @@
       (spit config (support/config-text (pr-str {:provider :alpha :reasoning-effort "low"})
                                         settings-providers)
             :encoding "UTF-8")
-      (spit dotenv (str "HARNESS_API_KEY=" settings-sentinel "\n") :encoding "UTF-8")
+      (spit dotenv (str "ALPHA_API_KEY=" settings-sentinel "\n") :encoding "UTF-8")
       (with-server
        "settings-unused"
        (fn []
@@ -4116,11 +4116,10 @@
            (testing "the api-key is presence and origin, and NOTHING else"
              (let [body  (.body (settings))
                    reply (parse)]
-               (is (= {:present? true :source "env-file" :name "HARNESS_API_KEY"}
+               (is (= {:present? true :source "env-file" :name "ALPHA_API_KEY"}
                       (:key reply))
-                   "presence, origin, AND the line: this home's .env sets the global
-                    one, and alpha -- the provider :default names -- has no
-                    ALPHA_API_KEY, so that is the line this session reads")
+                   "presence, origin, AND the line: alpha's OWN name is what this home
+                    wrote, and it is the only name a run reads")
                (is (not (contains? reply :api-key)))
                (is (not (str/includes? body settings-sentinel))
                    "the whole body, searched as a string -- not a field checked for emptiness")
