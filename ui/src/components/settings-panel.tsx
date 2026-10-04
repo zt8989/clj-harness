@@ -818,7 +818,13 @@ const ProviderForm: FC<{
         // (an entry whose :model is not among its models is refused). Asking here
         // would ask a question General already answers for the thing people mean by
         // "the default model" -- which one a run STARTS on.
-        model: draft.models[0]?.id ?? "",
+        //
+        // ABSENT when the form has no rows, which is what an endpoint plus a key and no
+        // model list IS: the vendor's own /models listing answers it. The `?? ""` this
+        // replaced was worse than nothing -- an empty string reached the server as a
+        // NAMED model, and came back as "it does not declare one" for a vendor that had
+        // never been asked.
+        ...(draft.models[0] !== undefined ? { model: draft.models[0].id } : {}),
         models: draft.models,
         // ABSENT when the field is empty: that means "leave .env alone", which is
         // what an untouched key field means. (The server refuses an empty string.)

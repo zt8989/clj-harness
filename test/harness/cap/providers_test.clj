@@ -13,6 +13,7 @@
             [harness.infra.home :as home]
             [harness.infra.language :as language]
             [harness.kernel.llm :as llm]
+            [harness.cap.model-data :as model-data]
             [harness.cap.providers :as providers]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]))
@@ -30,10 +31,10 @@
   (io/delete-file (home/providers-file) true))
 
 (defn- with-clear-model-caches
-  "Run F with the two MIRRORS OF THE OUTSIDE WORLD empty: harness.cap.model-data's
-  cache files, which belong to the HOME rather than to a case. A listing one case
-  cached would otherwise answer the next case's stub with ids it never asked for, and
-  a fact one case planted would fill a model the next case means to leave silent."
+  "Run F with harness.cap.model-data's cache files gone -- they belong to the HOME rather
+  than to a case. A listing one case cached would otherwise answer the next case's stub with
+  ids it never asked for, and a fact one case planted would fill a model the next case
+  means to leave silent."
   [f]
   (io/delete-file (home/modelsdev-cache-file) true)
   (io/delete-file (home/provider-models-cache-file) true)
@@ -1595,6 +1596,10 @@
 (deftest a-refused-write-leaves-the-file-exactly-as-it-was
   (with-home (cfg :alpha) reg
     (fn []
+      ;; The runner's home is shared with every other case in this namespace, so a backup
+      ;; left by an earlier one is not evidence about THIS write. The assertion below asks
+      ;; 'no backup was made', and only a home that HAD none can answer that.
+      (io/delete-file (home/config-backup-file) true)
       (doseq [[what entry] {"a new id that is not one"      (form-entry)
                             "a protocol nobody implements"  (form-entry :protocol "anthropic-messages")
                             "a display name that is not one" (form-entry :display-name 7)
@@ -1613,6 +1618,66 @@
           (is (not (.exists (home/config-backup-file)))
               "and not even a backup: a refusal is not a write that happened"))))))
 
+
+;; THE FORM'S EMPTY LIST. Two facts the writer used to get wrong, both of which took two
+;; reads to arrive: a write reported success, and what it had written down became a model
+;; id -- nil, or the empty string -- that no vendor serves.
+;;
+;; TWO PROVIDER NAMES, one per case, and that is the isolation: a listing that answered
+;; nothing is CACHED under the provider's own name, so the case that wants an answer and
+;; the case that wants a vendor with no models cannot see each other's.
+(defn- write-a-provider-naming-no-model [id]
+  "The form's submission for a person who pasted a base-url and a key and nothing else."
+  (providers/put-provider! id (form-entry :model "" :models []) "sk-acme"))
+
+(deftest a-provider-written-with-no-model-names-no-model
+  ;; An endpoint plus an api-key, and nothing else. What the NORMALIZER inferred must not
+  ;; be written down -- see the notes on `check-provider` and `put-provider!`.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (write-a-provider-naming-no-model "silent-gateway")
+
+      (testing "the catalog entry names no default"
+        ;; The vendor's own listing answers it, and here that listing answered nothing.
+        (let [entry (get (providers/catalog) :silent-gateway)]
+          (is (not (contains? entry :model)))
+          (is (empty? (:models entry)) "and no table")))
+
+      (testing "the FILE says nothing, rather than saying nil"
+        (let [after (slurp (home/config-file))]
+          (is (str/includes? after ":silent-gateway"))
+          (is (not (str/includes? after ":model nil"))
+              "a :model nil here is a name the next read keeps")
+          (is (not (str/includes? after ":model \"\""))
+              "and so is an empty id, which is that same name one read later")))
+
+      (testing "and the report omits the key rather than sending null"
+        (let [rows  (:providers (providers/registry-report))
+              row   (first (filter #(= "silent-gateway" (:name %)) rows))]
+          (is (not (contains? row :model))
+              "JSON's null would reach the form as the model id \"\""))))))
+
+(deftest a-written-provider-takes-the-model-ids-its-own-listing-gives
+  ;; The other half, and the reason not writing :model and :models down is a FEATURE rather
+  ;; than a hole: a provider the form gave nothing to is served from the vendor's own
+  ;; /models listing, in the order the vendor published. `put-provider!` answers with what a
+  ;; RUN would get -- it reads the catalog, not the raw file -- which is the path that used to
+  ;; answer `:models {}` and cache that as the vendor's listing.
+  ;;
+  ;; ITS OWN CASE because a listing that answered nothing is CACHED as an answer, and the
+  ;; case above deliberately provokes exactly that.
+  (with-home (cfg :alpha) reg
+    (fn []
+      (with-redefs [providers/*list-models* (fn [_] ["gpt-4o-mini" "gpt-4o"])]
+        (let [wrote (write-a-provider-naming-no-model "listed-gateway")
+              file  (get-in (read-string (slurp (home/config-file)))
+                            [:providers :listed-gateway])]
+          (is (= "gpt-4o-mini" (:model wrote))
+              "the vendor's own order decides")
+          (is (= #{"gpt-4o-mini" "gpt-4o"} (set (keys (:models wrote))))
+              "and the whole listing became the table")
+          (is (not (contains? file :model))
+              "while the FILE still names no model: an inference is not a fact"))))))
 (deftest an-update-keeps-the-id-the-file-already-uses
   ;; The id rule is the FORM's, for ids it creates. An entry already in the file --
   ;; hand-written, possibly in a spelling that rule would refuse -- is edited, not

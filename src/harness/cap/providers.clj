@@ -424,21 +424,35 @@
                                 (check-model m (str "model " (pr-str id)
                                                     " of provider " (pr-str name)))]))
                      models)
+          ;; A NIL OR BLANK :model NAMES NOTHING, and 'names nothing' is an answer this
+          ;; table already has: the default falls back to the first key below. It has to be
+          ;; treated as silence because a writer that DERIVES a default (:first over an empty
+          ;; table is nil) and then STORES what it derived would leave `:model nil` in
+          ;; config.edn -- and on the next read `contains?` would call that a name, which is a
+          ;; model the vendor serves spelled as the empty string.
+          stated (let [m (:model entry)]
+                   (when-not (or (nil? m) (and (string? m) (str/blank? m))) m))
           ;; THE DEFAULT MODEL IS THE FIRST TABLE KEY IN SORTED ORDER when no tier and
           ;; no file named one. Deterministic on purpose: a map's own iteration order is
           ;; not a fact about the vendor, and 'whichever came first' would make two runs
           ;; on one config start on different models.
-          dflt  (if (contains? entry :model) (id-of (:model entry)) (first (sort (keys norm))))]
-      (when (and (seq norm) (contains? entry :model) (not (contains? norm dflt)))
-        (fail (str where " names default model " (pr-str (:model entry))
+          dflt  (if (some? stated) (id-of stated) (first (sort (keys norm))))]
+      (when (and (seq norm) (some? stated) (not (contains? norm dflt)))
+        (fail (str where " names default model " (pr-str stated)
                    " but does not declare it; it declares " (pr-str (sortable (keys norm))))
-              {:provider name :model (:model entry) :known (sortable (keys norm))}))
+              {:provider name :model stated :known (sortable (keys norm))}))
       (cond-> {:protocol (:protocol entry)
                :base-url (:base-url entry)
-               :model    dflt
                :models   norm}
         ;; ABSENT STAYS ABSENT, like every other optional field: an entry with no
         ;; display name has none, and a nil here would read as 'named nothing'.
+        ;;
+        ;; A DERIVED DEFAULT IS ABSENT TOO, while the TABLE stays an empty one. The two are
+        ;; not the same kind of fact: an empty table says 'this provider serves nothing yet',
+        ;; and `assemble` has a sentence for exactly that -- a different one from the one for
+        ;; a table that was never written. A `:model nil` would be a third thing, a NAME, and
+        ;; the next read would keep it: a model spelled as the empty string.
+        (some? dflt)                  (assoc :model dflt)
         (some? (:display-name entry)) (assoc :display-name (:display-name entry))))))
 
 (defn- check-inline
@@ -2434,7 +2448,7 @@
 
     {:providers [{:name \"acme-gateway\" :display-name \"Acme Gateway\" :origin :user
                   :protocol \"openai-completions\" :base-url \"https://…\"
-                  :model \"gpt-x\"
+                  :model \"gpt-x\"                         ; OMITTED when the file names none
                   :models [{:id \"gpt-x\" :input [\"text\"] :output [\"text\"]} …]
                   :credential \"ACME_GATEWAY_API_KEY\"
                   :key {:present? true :source :env-file :name \"ACME_GATEWAY_API_KEY\"}}
@@ -2446,6 +2460,10 @@
   EVERY FIELD IS ONE THIS FUNCTION CHOSE -- it does not merge a resolution in -- and
   :api-key is therefore not in it at any depth, at any nesting the rows might grow.
   The `:key` facts come from `api-key-source`, which never reads a value.
+
+  A ROW'S `:model` IS OMITTED RATHER THAN SENT AS nil. A provider that names no default
+  has none, and JSON's null would reach a form as the string \"\" -- a model id spelled
+  as nothing, drawn in a select whose options cannot contain it.
 
   `:default` IS THE SECTION AS WRITTEN, rendered by `wire`: the three knobs when it
   names a provider, the endpoint fields when it DESCRIBES one. Which of the two it is
@@ -2471,11 +2489,15 @@
                                      :origin     (origin-of user n)
                                      :protocol   (name (:protocol entry))
                                      :base-url   (:base-url entry)
-                                     :model      (:model entry)
                                      :models     (mapv (fn [[id m]] (model-row id m))
                                                        (sort-by (comp str key) (:models entry)))
                                      :credential (credential-name n)
                                      :key        (api-key-source n)}
+                              ;; ABSENT WHEN THE FILE NAMES NONE, and absent is the whole
+                              ;; point: a nil here reaches the form as the model id "" -- a name
+                              ;; the vendor cannot serve, drawn in a select with no such row.
+                              (some? (:model entry))
+                              (assoc :model (:model entry))
                               (some? (:display-name entry))
                               (assoc :display-name (:display-name entry)))))
                      (sort-by :name)
@@ -3023,19 +3045,49 @@
   (`#{:text}`) -- so writing the raw row would put a shape in the file that the next
   read normalizes differently from what was validated, and the modality guard (which
   compares against the catalog's spelling) would read a set of strings as a model
-  that declares nothing."
+  that declares nothing.
+
+  AND WHAT THE NORMALIZER DERIVED IS NOT STORED. `check-provider` FILLS IN a default
+  model (the first key of the table), and a form that named none gets one for free.
+  Writing that back would turn an inference into a fact on disk: a table-less entry
+  derives nil, and `:model nil` in config.edn is a name the next read KEEPS -- a model
+  spelled as the empty string, which is the failure this whole shape exists to kill. So
+  the file holds what the FORM said, and the default is derived on every read."
   [id entry key]
   (let [raw      (config)
         user     (:providers raw)
         id       (or (existing-key user id) (check-new-id! id))
-        validated (check-provider id (entry-from-wire entry))]
+        ;; THE SHAPE THE FILE GETS: the wire's own fields, normalized, minus what the
+        ;; NORMALIZER filled in. `entry-from-wire` is where 'the form said nothing' is still
+        ;; visible as an absent key -- after `check-provider` neither fact is, because a
+        ;; default model and a table have been supplied beside them.
+        from-wire (entry-from-wire entry)
+        normalized (check-provider id from-wire)
+        ;; :model is dropped when the form NAMED none, for the reason on `check-provider`: a
+        ;; derived default written down is a name, and nil spells it as the empty string.
+        ;;
+        ;; :models is dropped when the form listed none, and the reason is the same one the
+        ;; reverse way: an empty table written down says 'this vendor's listing answered
+        ;; nothing' FOREVER -- `vendor-model-tables` only asks a vendor when the key is absent,
+        ;; so a `{}` here could never be rescued by a later successful fetch. The form's
+        ;; silence has to stay silence, or 'ask the vendor' becomes a thing that only works
+        ;; before the first save.
+        validated (cond-> normalized
+                    (not (contains? from-wire :model)) (dissoc :model)
+                    (not (contains? from-wire :models)) (dissoc :models))]
     (when (some? key)
       (when (re-find #"[\r\n]" (str key))
         (fail "an api-key cannot span lines" {:id (name id)})))
-    (let [next (change-providers! (fn [cfg] (assoc-in cfg [:providers id] validated)))]
+    (do (change-providers! (fn [cfg] (assoc-in cfg [:providers id] validated)))
       (when (some? key)
         (home/write-env-line! (credential-name id) key))
-      (get (user-catalog (:providers next)) id))))
+      ;; READ THE WAY A RUN READS IT -- through `catalog`, not through `user-catalog`.
+      ;; The difference is the whole point of a table-less entry: `user-catalog` skips
+      ;; `vendor-model-tables`, so it would answer `:models {}` and then CACHE that as the
+      ;; vendor's listing -- a provider whose ids had been fetched, thrown away, and
+      ;; remembered as 'this vendor serves nothing'. The answer the form shows after a save
+      ;; has to be the one the NEXT run gets.
+      (get (catalog) id))))
 
 (defn remove-provider!
   "ID -> {:name .. :remaining ..}, after config.edn is written without that entry.

@@ -100,8 +100,10 @@ export type ProviderRow = {
   origin: Origin;
   protocol: string;
   "base-url": string;
-  /// The model id served when no tier names one.
-  model: string;
+  /// The model id served when no tier names one, or ABSENT when the file names none --
+  /// then the vendor's own `/models` listing answers it. Absent, never `""`: an empty id
+  /// is not a model, and the save would write one the server has to refuse.
+  model?: string;
   models: readonly ModelRow[];
   /// The `.env` name this provider's key is read from -- derived from the id, and
   /// named here so nobody has to derive it in their head.
