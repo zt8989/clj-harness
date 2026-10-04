@@ -179,10 +179,37 @@
   (let [[r _] (reasoning-field delta)]
     (when (seq r) (emit (ev/reasoning-delta r)))))
 
+;; A CALL THE VENDOR LEFT UNNAMED IS NAMED HERE, and this is the one place in the
+;; whole pipeline that can do it: this fold is where the deltas become WHOLE calls, it
+;; is where the id is first available, and everything downstream carries the id this
+;; returns -- the event (`:tool/call`), the history's `tool_calls`, and the frames
+;; `ag-ui` makes of the event. Mint it here and every reader below has a name;
+;; mint it anywhere later and the record's own row still says `""`.
+;;
+;; WHY A VENDOR CAN LEAVE IT BLANK (owner's report, 2026-10-04, session
+;; `71683598-…`): that run's FIRST call came back `call_function_imapxgsc8u1o_1` and
+;; every call after it came back `""`. An id is not decoration -- four readers assume
+;; one -- and none of them can report a blank: `ag-ui`'s `apply-frames` finds a call's
+;; ARGUMENTS by matching that id, so two calls sharing `""` append one call's JSON to
+;; the other's (measured: a `read` whose arguments had a `bash`'s spliced onto the end);
+;; `replay/park-on-call` finds the message a parked run's card belongs on the same way;
+;; `replay/prune-messages` keys a tool RESULT on it, so results land on the wrong call;
+;; and the client cannot match an interrupt to its call at all, which is how a parked
+;; `ask` came to draw NO CARD -- `ElicitationGate` returns null on a call whose id no
+;; interrupt names, and the question sat at 「待审批」 with nothing to click.
+;;
+;; THE ID IS INDEX-BASED AND RUN-SCOPED (`call-<index>`): the index is the vendor's own
+;; key for this call within this assistant message, it is unique within it BY
+;; CONSTRUCTION (the map above is keyed by it), and it is the same id the deltas were
+;; folded under -- so a vendor that NAMED some calls and left others blank gets a mix of
+;; its own names and ours, each still unique, which is all any reader asks. It is NOT
+;; namespaced by run id: this id never becomes an entry id (no reader folds a call to
+;; one), and a call is only ever looked up inside its own assistant message.
 (defn- fold-tool-calls [calls]
-  (mapv (fn [[_ t]] {:id (:id t) :type "function"
-                     :function {:name (:name t) :arguments (:arguments t)}})
-        (sort-by key calls)))
+(mapv (fn [[i t]] {:id (if (seq (:id t)) (:id t) (str "call-" i))
+:type "function"
+:function {:name (:name t) :arguments (:arguments t)}})
+(sort-by key calls)))
 
 (defn- telemetry-fields
   "The three things a chunk says ABOUT the call rather than IN it: the vendor's
