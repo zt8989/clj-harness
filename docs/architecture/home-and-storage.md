@@ -42,7 +42,7 @@
 ├── config.edn       用户级 harness 配置（围栏的 allow/strict、技能根、指令文件都在这）
 ├── hooks.edn         hook 声明（每轮重读；可以不存在）
 ├── .env              一家厂商一把钥匙：`<ID>_API_KEY`（如 `ACME_GATEWAY_API_KEY`），
-│                     外加全局 `HARNESS_API_KEY` 兜底与三个搜索键（Brave/Exa/Tavily）
+│                     外加三个搜索键（Brave/Exa/Tavily）
 │                     ——优先于真实环境变量，顺序见 harness.infra.home/env-source
 ├── harness.infra.db        sqlite：home 的元数据层
 └── projects/

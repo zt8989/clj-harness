@@ -992,39 +992,44 @@
            (providers/credential-name :a_b)
            (providers/credential-name :a.b)))))
 
-(deftest the-key-comes-from-the-providers-own-name-then-the-global-one
-  ;; One key per provider, with the global one as the floor: that is what lets this
-  ;; land on a home that only ever had HARNESS_API_KEY (every home, before this).
+(deftest a-key-comes-from-the-providers-own-name-and-nowhere-else
+  ;; THERE IS NO GLOBAL KEY (owner, 2026-10-03: 'clean out HARNESS_API_KEY entirely --
+  ;; there is no universal key, every vendor has its own'). A `HARNESS_API_KEY` used to
+  ;; serve every entry that had no line of its own, which is how a keyless vendor
+  ;; reported itself as keyed and turned up in the settings list.
   (with-home (cfg :alpha) reg
     (fn []
       (with-dotenv (str "HARNESS_API_KEY=the-global\n"
                         "ALPHA_API_KEY=alphas-own\n")
         (fn []
           (is (= "alphas-own" (:api-key (providers/effective-provider "t-cred")))
-              "the provider's own name wins")
-          (testing "a provider with no line of its own falls back to the global one"
+              "the provider's own name is what a run reads")
+          (testing "and a provider with no line of its own gets NOTHING -- not the global one"
             (providers/set-override! "t-cred" {:provider :beta})
-            (is (= "the-global" (:api-key (providers/effective-provider "t-cred"))))
+            (is (nil? (:api-key (providers/effective-provider "t-cred")))
+                "beta names itself BETA_API_KEY, and this home did not write that line")
             (providers/set-override! "t-cred" nil))))
-      (testing "and with neither name present the slot is nil rather than a guess"
+      (testing "with neither name present the slot is nil rather than a guess"
         (with-dotenv nil
           (fn []
             (is (nil? (:api-key (providers/effective-provider "t-cred")))
                 "no key configured is a normal state: offline tools run without one")))))))
 
-(deftest an-inline-provider-has-only-the-global-key
+(deftest an-inline-provider-has-no-key-because-it-has-no-id
   ;; A description has no NAME, so there is no credential name to derive -- and
-  ;; inventing one from the endpoint would be a line nobody could have known to
-  ;; write. The global fallback is what serves it, which is also what served every
-  ;; inline description before this rule existed.
+  ;; inventing one from the endpoint would be a line nobody could have known to write.
+  ;; With the global key gone, 'no name' means 'no key': a vendor never answers to a name
+  ;; this harness made up, and a description that needs one belongs in :providers under an
+  ;; id (owner: every provider has an ID, even a custom one).
   (with-home (pr-str {:protocol :fake :base-url "https://inline/v1" :model "flat"}) nil
     (fn []
       (with-dotenv (str "HARNESS_API_KEY=the-global\n"
                         "INLINE_API_KEY=nobody-writes-this\n")
         (fn []
-          (is (= "the-global" (:api-key (providers/effective-provider "t-inline")))))))))
+          (is (nil? (:api-key (providers/effective-provider "t-inline")))
+              "neither a global nor a derived name is in play"))))))
 
-(deftest api-key-source-names-the-line-either-way
+(deftest api-key-source-names-the-providers-own-line
   ;; The panel's answer: presence, origin, AND the name -- so the sentence a person
   ;; reads is "edit this line", not "derive this line yourself".
   (with-home (cfg :alpha) reg
@@ -1034,14 +1039,14 @@
           (is (= {:present? true :source :env-file :name "ALPHA_API_KEY"}
                  (providers/api-key-source :alpha))
               "the name that WON")))
-      (testing "no key at all still names the line that would be read first"
+      (testing "no key at all still names the provider's own line"
         (with-dotenv nil
           (fn []
             (is (= {:present? false :source nil :name "ALPHA_API_KEY"}
                    (providers/api-key-source :alpha)))
-            (is (= {:present? false :source nil :name "HARNESS_API_KEY"}
+            (is (= {:present? false :source nil :name nil}
                    (providers/api-key-source nil))
-                "an inline provider can only ever name the global one"))))
+                "an inline description has no id, so there is no line to name"))))
       (testing "and the name is a NAME -- never a value, a length or a prefix"
         (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
           (fn []
@@ -1195,7 +1200,7 @@
   ;; from every byte of the rendered answer.
   (fresh-home (cfg :alpha :reasoning-effort "low") reg
     (fn [_]
-      (with-dotenv (str "HARNESS_API_KEY=" sentinel "\n")
+      (with-dotenv (str "ALPHA_API_KEY=" sentinel "\n")
         (fn []
           (try
             (let [s      (providers/settings "st-1")
@@ -1234,11 +1239,10 @@
                   (is (= :catalog (:model (:tiers s3))))))
 
               (testing "the key is reported as presence and origin, and NOTHING else"
-                (is (= {:present? true :source "env-file" :name "HARNESS_API_KEY"}
+                (is (= {:present? true :source "env-file" :name "ALPHA_API_KEY"}
                        (:key parsed))
                     "the .env wins over the environment, which is api-key's own
-                     precedence -- and the name says WHICH line did it: alpha has no
-                     ALPHA_API_KEY here, so the global one is what this session reads")
+                    precedence -- and the name says WHICH line did it: the provider's own")
                 (is (not (contains? parsed :api-key))
                     "and no field is named after the secret at all"))
 
@@ -1372,9 +1376,9 @@
                (.redirectErrorStream true))]
     (when dir (.put (.environment pb) "CLJ_HARNESS_HOME" (.getAbsolutePath (io/file dir))))
     (when (nil? dir) (.remove (.environment pb) "CLJ_HARNESS_HOME"))
-    ;; The two names this repository reads for a provider key, always cleared
-    ;; first: a nil value REMOVES the name, so a child whose environment this test
-    ;; does not control cannot leak a key into the precedence it is measuring.
+    ;; Every name a provider key could come from is cleared first, and one of them is
+    ;; no longer read by anything (`HARNESS_API_KEY`) -- it stays in the list so a
+    ;; parent environment cannot leak it into a measurement about a name that IS read.
     (doseq [n ["HARNESS_API_KEY" "ALPHA_API_KEY"]]
       (if-some [v (get env n)]
         (.put (.environment pb) n v)
@@ -1413,11 +1417,17 @@
     (doseq [d [env-home def-home]]
       (spit (io/file d "config.edn") (support/config-text (cfg :alpha) reg) :encoding "UTF-8"))
 
-    (testing "with CLJ_HARNESS_HOME set, that is the rule named -- and the key
-              comes from the environment because that home has no .env"
+    (testing "with CLJ_HARNESS_HOME set, that is the rule named -- and a GLOBAL key in"
+              "the environment answers for NOTHING"
+      ;; ...and that home has no .env. The global name is exported here precisely to show
+      ;; it is not read: what comes back names the PROVIDER's own line, and the global
+      ;; name appears nowhere in the answer.
       (let [out (spawn-child env-home nil {"HARNESS_API_KEY" sentinel} report)]
-        (is (str/includes? out ":environment") out)
+        (is (str/includes? out ":environment") "home-origin still says CLJ_HARNESS_HOME")
         (is (str/includes? out (printed (.getAbsolutePath env-home))) out)
+        (is (str/includes? out ":name \"ALPHA_API_KEY\"") out)
+        (is (not (str/includes? out "HARNESS_API_KEY"))
+            "the global name is not even mentioned: nothing reads it")
         (is (not (str/includes? out sentinel)) "and the key's VALUE is printed nowhere")
         (is (not (str/includes? out (subs sentinel 0 12))) out)))
 
@@ -1430,18 +1440,19 @@
         (is (str/includes? out ":source :environment") out)
         (is (not (str/includes? out sentinel)) "and the value is still nowhere")))
 
-    (testing "the .env is consulted for EVERY name before the environment is asked
-              about any -- so a file's global key is not overridden by an exported
-              provider name"
-      ;; The source-major half, and it is the promise env-value has always made
-      ;; ("a shell variable does not override the file"), extended to the case this
-      ;; feature created: two names, two sources.
+    (testing "a GLOBAL key in the .env is not this provider's key, so the environment's"
+              "own name is what answers"
+      ;; The case this rule replaced: the file used to hold HARNESS_API_KEY and every
+      ;; provider fell back to it. Now the file's global line is simply not a credential
+      ;; for anything, and the provider's own name in the environment is what a run reads.
       (let [dotenv (io/file env-home ".env")]
         (spit dotenv "HARNESS_API_KEY=from-the-file\n" :encoding "UTF-8")
         (try
           (let [out (spawn-child env-home nil {"ALPHA_API_KEY" sentinel} report)]
-            (is (str/includes? out ":name \"HARNESS_API_KEY\"") out)
-            (is (str/includes? out ":source :env-file") out))
+            (is (str/includes? out ":name \"ALPHA_API_KEY\"") out)
+            (is (str/includes? out ":source :environment") out)
+            (is (not (str/includes? out "HARNESS_API_KEY"))
+                "the file's global line is not even mentioned"))
           (finally (io/delete-file dotenv true)))))
 
     (testing "with no CLJ_HARNESS_HOME, the default rule is named"
@@ -2513,13 +2524,16 @@
 ;; ------------------------------------------- what the outside facts fill in
 
 (defn- write-db!
-  "A models.dev cache file with ONE family in it, as harness.cap.model-data reads it:
-  `{id facts}` written as pairs, because a model id is a string and not a keyword."
-  [index]
-  (spit (home/modelsdev-cache-file)
-        (json/write-str {:fetched-at (System/currentTimeMillis)
-                         :models (vec index)})
-        :encoding "UTF-8"))
+  "A models.dev cache file, as harness.cap.model-data reads it: the model index (and,
+  when given, the vendor table) written as PAIRS, because an object's keys come back
+  through `:key-fn keyword` and neither a model id nor a provider id is a keyword."
+  ([index] (write-db! index nil))
+  ([index providers]
+   (spit (home/modelsdev-cache-file)
+         (json/write-str (cond-> {:fetched-at (System/currentTimeMillis)
+                           :models (vec index)}
+                           (some? providers) (assoc :providers (vec providers))))
+         :encoding "UTF-8")))
 
 (deftest a-model-that-names-only-an-id-takes-its-facts-from-the-database
   ;; THE WHOLE POINT OF THE FEATURE: an entry may be an id and a name. What the
@@ -2638,4 +2652,47 @@
         (testing "one row per vendor, and sorted the way the form draws it"
           (is (= (count rows) (count (distinct (map :id rows)))))
           (is (= (map :id rows) (sort (map :id rows)))
-              "ids arrive in the same order as the names they are sorted by here"))))))
+              "ids arrive in the same order as the names they are sorted by here")
+        (testing "and NOTHING is marked ready off a global key (the mistake this round fixed)"
+          ;; A universal HARNESS_API_KEY once made every row report itself keyed -- which
+          ;; is also what put keyless Ollama in the settings list. This home has no .env
+          ;; of its own for the name either, so nothing may be ready.
+          (with-dotenv "HARNESS_API_KEY=the-global\n"
+            (fn []
+              (let [rows2 (:known-providers (providers/registry-report))]
+                (is (empty? (filter :key-ready rows2))
+                    "a global key lights up no vendor")
+                (is (= "ZAI_API_KEY" (:name (:key (first (filter #(= "zai" (:id %)) rows2)))))
+                    "and the line it names is the one a run would read, derived from the id"))))))))))
+
+(deftest a-vendor-that-already-has-its-own-variable-exported-needs-no-new-line
+  ;; THE SECOND SPELLING (`.scratch/own-key-only`). `deepseek` derives `DEEPSEEK_API_KEY`,
+  ;; while the platform's own variable is whatever its document says -- and a person who
+  ;; already exported THAT one should not have to write the same secret twice. The lookup
+  ;; is `credential-names`, so the pick list's "already ready" mark and a run's own read
+  ;; are one answer.
+  (write-db! {} [["deepseek" {:name "DeepSeek" :base-url "https://api.deepseek.com"
+                              :model-count 4 :env ["DEEPSEEK_TOKEN"]}]])
+  (with-home (cfg :deepseek) nil
+    (fn []
+      (testing "the vendor's own name answers when the harness's derived one is absent"
+        (with-dotenv "DEEPSEEK_TOKEN=from-the-platform\n"
+          (fn []
+            (is (= "from-the-platform"
+                   (:api-key (providers/effective-provider "t-deep")))
+                "written where the platform says it lives, read by a run")
+            (is (= {:present? true :source :env-file :name "DEEPSEEK_TOKEN"}
+                   (providers/api-key-source :deepseek))
+                "and the panel names THAT line as the one in force"))))
+      (testing "and the name this harness derives still wins when both are there"
+        (with-dotenv (str "DEEPSEEK_API_KEY=ours\n"
+                          "DEEPSEEK_TOKEN=theirs\n")
+          (fn []
+            (is (= "ours" (:api-key (providers/effective-provider "t-deep")))
+                "the derived name is tried first -- it is the line this harness writes")
+            (is (= "DEEPSEEK_API_KEY" (:name (providers/api-key-source :deepseek)))))))
+      (testing "a global key is still nothing to anybody"
+        (with-dotenv "HARNESS_API_KEY=the-global\n"
+          (fn []
+            (is (nil? (:api-key (providers/effective-provider "t-deep"))))
+            (is (false? (:present? (providers/api-key-source :deepseek))))))))))

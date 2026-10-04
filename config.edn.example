@@ -257,9 +257,11 @@
 ;; Every entry is validated whenever the file is read, so a malformed one fails on
 ;; the next run BY NAME rather than quietly serving something else.
 ;;
-;; A LOCAL ENDPOINT NEEDS NO KEY, but harness.cap.providers still resolves
-;; HARNESS_API_KEY (from .env, then the environment) and attaches it -- the
-;; protocol module decides whether to use it. Nothing to configure for localhost.
+;; A LOCAL ENDPOINT NEEDS NO KEY, and there is no global one to attach by accident:
+;; harness.cap.providers resolves THIS ENTRY's own <ID>_API_KEY (from .env, then the
+;; environment) and the protocol module decides whether to use it. A description
+;; written inline in :default has no id, so it has no key at all -- name the entry
+;; here if it needs one.
 ;;
 ;; reasoning-effort is NOT a provider field. It is one of the three knobs, so it
 ;; belongs in :default (or in a POST /api/model call -- what the picker presses).
