@@ -1011,6 +1011,67 @@
             "its one cell is the question -- the prompt stands OUTSIDE the turn"))
       (finally (.delete f)))))
 
+(deftest a-call-id-the-record-REUSES-does-not-pile-its-life-onto-every-other-call
+  ;; THE THIRD READER THAT ASSUMES A CALL ID IS UNIQUE, and the one the owner saw last (2026-10-04):
+  ;; the trajectory's tool bars all overlapped, so several calls drew on top of each other.
+  ;;
+  ;; `tool-lifecycles` IS KEYED BY CALL ID, so 181 calls all named `call-0` share ONE life: the
+  ;; same arrivedAt, the same executedAt, the same closedAt, on every one of them. The lane's
+  ;; first-fit then stacks identical intervals it can never separate, and the strip turns into one
+  ;; thick mark. Measured on the record the owner was looking at (session `6f1986e9`): 190 tool cells,
+  ;; 180 of them sharing a single markset, 17 560 overlapping pairs, and only 11 distinct marksets for
+  ;; 190 calls.
+  ;;
+  ;; A CALL'S LIFE IS ITS OWN, and the record says which rows belong to it the only way it can -- by
+  ;; ORDER, since these are audit lines and no other field on them is unique. Two calls that share an id
+  ;; are two calls, and each has to read the life its OWN three lines describe."
+  (let [cells (ledger
+               [(client 0 (user "u1" "跑三个工具"))
+                (system-prompt 10 "S")
+                ;; THREE CALLS, ALL NAMED `call-0`, each with its own three moments -- a read that
+                ;; ran at once, a bash that took a while, and a write that was refused.
+                (pre-execute 20 "call-0" "read")
+                (executed 21 "call-0" "read")
+                (post-execute 25 "call-0" "read")
+                (pre-execute 30 "call-0" "bash")
+                (executed 39 "call-0" "bash")
+                (post-execute 40 "call-0" "bash")
+                (pre-execute 50 "call-0" "write")
+                (post-execute 55 "call-0" "write")
+                finished
+                (message 60 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "call-0" "read" "{\"path\":\"README.md\"}")]})
+                (message 61 (tool-msg "call-0" "# clj-harness"))
+                (message 62 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "call-0" "bash" "{\"command\":\"ls\"}")]})
+                (message 63 (tool-msg "call-0" "README.md"))
+                (message 64 {:role "assistant" :content ""
+                              :tool_calls [(tool-call "call-0" "write" "{\"path\":\"a\"}")]})
+                (message 65 (tool-msg "call-0" "not written"))])
+        tools (filterv #(= "tool" (:kind %)) cells)]
+    (is (= 3 (count tools)) "three calls the vendor named, so three bars")
+    (testing "each call reads the life its OWN audit lines describe"
+      (is (= [20 30 50] (mapv :arrivedAt tools))
+          "not the first call's arrival stamped on all three")
+      (is (= [21 39 nil] (mapv :executedAt tools))
+          "and the refused one has no executedAt, which is not the same as zero")
+      (is (= [true true false] (mapv :executed tools))
+          "a call that never ran is not 'it ran in zero seconds'"))
+    (testing "and the three bars do not sit on top of each other"
+      (is (= 3 (count (distinct (mapv :arrivedAt tools))))))
+    (testing "while calls the vendor named distinctly are untouched"
+      (let [rows [(client 0 (user "u1" "hi"))
+                   (system-prompt 10 "S")
+                   (pre-execute 20 "c1" "read")
+                   (executed 21 "c1" "read")
+                   (post-execute 25 "c1" "read")
+                   finished
+                   (message 30 {:role "assistant" :content ""
+                                 :tool_calls [(tool-call "c1" "read" "{}")]})
+                   (message 31 (tool-msg "c1" "ok"))]
+            named (first (filter #(= "tool" (:kind %)) (ledger rows)))]
+        (is (= {:arrivedAt 20 :executedAt 21 :closedAt 25}
+               (select-keys named [:arrivedAt :executedAt :closedAt])))))))
 (deftest an-enveloped-request-folds-to-the-same-conversation-as-a-plain-one
   ;; TICKET 04 of `.scratch/record-envelopes`: the rows a run writes FOR its first call -- the
   ;; prompt and the person's own words -- moved INSIDE `[model/start, model/end]` (the edge holds
