@@ -386,49 +386,88 @@
 
 (defn- life-step
   "ONE record into the tool-life map. See `tool-lifecycles` for the four moments and why
-  their names in the record do not say which is which."
+their names in the record do not say which is which.
+
+  EACH ID MAPS TO THE LIVES OF THE CALLS THAT WORE IT, IN ARRIVAL ORDER, and that is the whole fix.
+  A call id is NOT unique -- a vendor that numbers its calls from the start of the REQUEST calls every
+  call in the conversation `call-0` (owner's report, 2026-10-04, session `6f1986e9`: 181 of one run's 190
+  calls) -- and one life per id gave all of those calls the SAME marks. Every bar then drew the same
+  interval, the lane's first-fit stacked bars it could never separate, and a call that never ran read as
+  one that did (measured there: 190 tool cells, 180 of them sharing a single markset).
+
+  A VENDOR THAT NAMES ITS CALLS UNIQUELY GETS A ONE-ENTRY LIST per id, so every reader below -- which
+  asks for 'the nth call wearing this id' -- answers exactly what it did before. A RESUME OPENS NOTHING:
+  it is a second `pre-execute` for a life that has not been resumed yet, and it marks that one resumed."
   [acc record]
   (let [payload (replay/payload record)
         ts      (:ts record)
         id      (:toolCallId payload)
-        seen    (get acc id)
-        ;; THE TOOL'S OWN NAME IS ON EVERY AUDIT LINE (`:toolName`), and it is the only name a
-        ;; call has until the assistant message that asked for it lands -- that row is written
-        ;; at `:run/done` (see `pending-tool-items`). Read once here rather than by each item
-        ;; builder, and a later line of the same call leaves it alone.
+        lives   (get acc id)
+        ;; THE LIFE THIS LINE BELONGS TO: the last one this id opened, since a seam writes a call's
+        ;; three lines together and nothing else arrives under that id until the next call. NIL when
+        ;; this id has opened nothing -- a record whose first seam line was lost, or a line that
+        ;; belongs to no call here. Every write below is conditional on it, so nothing is invented.
+        k       (peek lives)
         acc     (cond-> acc
-                  (some? (:toolName payload)) (assoc-in [id :name] (:toolName payload)))]
+                  (and k (some? (:toolName payload)))
+                  (update-in [id (dec (count lives)) :name] (fnil identity (:toolName payload))))]
     (case (replay/kind record)
       "tools/pre-execute"
-      (-> acc
-          (update-in [id :arrivedAt] #(or % ts))
-          (assoc-in [id :outcome] (or (:outcome payload) "pass"))
-          ;; A second arrival for the same id is the resume, which marks the park's end.
-          ;; Later ones overwrite: the last word is the one that stuck.
-          (cond-> (some? (:arrivedAt seen)) (assoc-in [id :resumedAt] ts)))
+      ;; A SECOND ARRIVAL FOR A LIFE THAT IS STILL OPEN IS THE RESUME: it marks the park's end on that
+      ;; life and opens nothing. Anything else is a NEW CALL, even under a name already in use.
+      (let [;; A RESUME IS THE SECOND ARRIVAL OF A CALL THE SEAM PARKED -- the one whose first arrival
+            ;; asked a human, which the writer spells out in :outcome as `needs-approval`. A call that ran
+            ;; or was vetoed carries `pass` or a verdict instead, and a SECOND arrival for one of those
+            ;; is a NEW CALL -- even when the vendor gave it a name already in use, which is the fix.
+            resume? (and k (= "needs-approval" (:outcome k)) (not (:resumedAt k)))
+            ;; WHERE IN THE LIST THE WRITE LANDS: the life just peeked at, or -- when the list grew --
+            ;; the one the arrival opened. Computed once, so every write below names the same one.
+            at      (dec (count (get acc id (if resume? lives (conj lives nil)))))]
+        (if resume?
+          ;; THE RESUME LINE'S OWN VERDICT IS THE LAST WORD: a call parked as `needs-approval` and
+          ;; then vetoed reports `vetoed`, because what a reader wants to know is how it ended. The
+          ;; write is unconditional -- `fnil` would keep the first verdict, and the first verdict is
+          ;; the question, not the answer.
+          (-> acc (update-in [id at :resumedAt] (fnil identity ts))
+                (assoc-in [id at :outcome] (or (:outcome payload) "pass")))
+          ;; A NEW CALL OPENS A NEW LIFE under the same id, and the id's list is the order they
+          ;; arrived in -- which is what a reader asks for when it wants the nth one.
+          (-> acc
+              (update id (fnil conj []) (cond-> {:arrivedAt ts
+                                              :outcome  (or (:outcome payload) "pass")}
+                                       (:toolName payload) (assoc :name (:toolName payload)))))))
 
       "tools/execute"
-      (-> acc
-          (assoc-in [id :executedAt] ts)
-          (assoc-in [id :error] (:error payload)))
+      (cond-> acc
+        k (update-in [id (dec (count lives)) :executedAt] (fnil identity ts))
+        k (update-in [id (dec (count lives)) :error] (fnil identity (:error payload))))
 
       "tools/post-execute"
-      (assoc-in acc [id :closedAt] ts)
+      (cond-> acc k (update-in [id (dec (count lives)) :closedAt] (fnil identity ts)))
 
       acc)))
 
 (defn- tool-lifecycles
-  "toolCallId -> {:name :arrivedAt :resumedAt :executedAt :closedAt :outcome :error}, from the
-  audit lines the seam and the kernel leave behind.
+  "toolCallId -> THE LIVES OF THE CALLS THAT WORE IT, in arrival order, each
+{:name :arrivedAt :resumedAt :executedAt :closedAt :outcome :error} -- from the
+audit lines the seam and the kernel leave behind.
 
-  THE FOUR MARKS ARE FOUR DIFFERENT MOMENTS, and the reason this function exists is that
-  their NAMES in the record do not say which is which:
+WHY A LIST AND NOT ONE: A CALL ID IS NOT UNIQUE. A vendor that numbers its calls from the start
+of the REQUEST calls every call in the conversation `call-0` (owner's report, 2026-10-04,
+session `6f1986e9`: 181 of one run's 190 calls), and one life per id gave all of them the same
+marks -- every bar drew the same interval, 180 of 190 cells shared one markset, and a call that
+never ran read as one that did. A reader asks for 'the nth call wearing this id', which is a
+position the kernel already fixes: it writes one tool message per call, in call order.
 
-    `tools/pre-execute`  THE CALL ARRIVED at the seam. Its :outcome says what the seam
-                         decided -- absent means pass, because the writer spells out only
-                         the exceptions. A SECOND one for the same id is the park being
-                         resumed, after a human decided.
-    `tools/execute`      THE CALL LEFT EXECUTION -- this is when the tool FINISHED, not
+THE FOUR MARKS ARE FOUR DIFFERENT MOMENTS, and the reason this function exists is that
+their NAMES in the record do not say which is which:
+
+  `tools/pre-execute`  THE CALL ARRIVED at the seam. Its :outcome says what the seam
+                       decided -- absent means pass, because the writer spells out only
+                       the exceptions. A SECOND one for a life that is still open is the park being
+                       resumed, after a human decided; it opens no new life.
+
+  `tools/execute`      THE CALL LEFT EXECUTION -- this is when the tool FINISHED, not
                          when it started (see harness.kernel.event/tool-executed). So the
                          span of a tool call is arrivedAt -> executedAt, and reading this
                          line as a start makes every tool look instantaneous.
@@ -634,8 +673,10 @@
 
   `:executed` IS DERIVED FROM ONE OF THE MARKS, so the two cannot disagree about whether a
   call ran; every other mark is written only when there is something to write."
-  [item id life-of]
-  (let [lif (get life-of id)]
+  [item id life-of which]
+  (let [;; WHICH CALL OF THIS ID: the nth one that wore it. `which` rather than `nth`, because the
+        ;; name that walks a list is the same one that indexes it.
+        lif (clojure.core/nth (get life-of id) which nil)]
     (cond-> (assoc item :executed (some? (:executedAt lif)))
       (some? (:arrivedAt lif))  (assoc :arrivedAt (:arrivedAt lif))
       (some? (:resumedAt lif))  (assoc :resumedAt (:resumedAt lif))
@@ -643,7 +684,6 @@
       (some? (:closedAt lif))   (assoc :closedAt (:closedAt lif))
       (some? (:error lif))      (assoc :error (:error lif))
       (some? (:outcome lif))    (assoc :outcome (:outcome lif)))))
-
 (defn- returned-items
   "The items one run's RETURNED tail contributes, in order: assistant replies (with their
   reasoning, when the vendor reported any) and tool results. A user message in the tail
@@ -670,6 +710,10 @@
   it has started -- those are `pending-tool-items`' business, and reading the two together is
   what makes a call appear the moment it arrives and then read the same once it is answered."
   [tail call-of life-of offset]
+  (let [;; HOW MANY CALLS OF THIS ID HAVE BEEN ANSWERED SO FAR -- the count that says which of the
+        ;; lives of an id the n-th tool message is reading. The kernel writes one tool message per
+        ;; call, in call order, so this is a position, not a guess.
+        worn   (volatile! {})]
   (first
    (reduce (fn [[items next-call current] message]
              (case (:role message)
@@ -683,7 +727,14 @@
                   (or mine current)])
 
                "tool"
-               (let [id (:tool_call_id message)]
+               (let [id  (:tool_call_id message)
+                     ;; WHICH CALL OF THIS ID THIS ANSWER IS: the nth one, in the order the kernel wrote
+                     ;; them, counting what this tail has already answered under that id. A vendor that
+                     ;; never reuses an id always answers 0.
+                     ;; THE COUNT OF CALLS OF THIS ID THIS TAIL HAS ALREADY ANSWERED, which is the
+                     ;; position of the one being read: 0 for the first answer, 1 for the second.
+                     which (let [m (vswap! worn (fn [m] (update m id (fnil inc 0))))]
+                            (dec (get m id 1)))]
                  [(conj items
                         (cond-> (tool-marks
                                  {:kind      "tool"
@@ -691,7 +742,7 @@
                                   :name      (get-in call-of [id :name])
                                   :argsText  (get-in call-of [id :argsText])
                                   :result    (text-of (:content message))}
-                                 id life-of)
+                                 id life-of which)
                                 (some? current) (assoc :call current)))
                   next-call
                   current])
@@ -706,7 +757,7 @@
                ;; request carries reasoning INSIDE the assistant message.
                [items next-call current]))
            [[] 0 nil]
-           tail)))
+           tail))))
 
 (defn- answered-ids
   "The tool calls this run's RETURNED tail has already answered -- the ids its `tool` role
@@ -741,16 +792,21 @@
   `:toolName`, which is the only name a run in flight has left."
   [run life-of call-of]
   (when (:live? run)
-    (let [answered (answered-ids (:returned run))]
+    (let [answered (answered-ids (:returned run))
+          ;; HOW MANY CALLS OF EACH ID THE RUN'S RETURNED TAIL ALREADY ANSWERED, so the one still in
+          ;; flight is the nth life rather than the first. A vendor that never reuses an id is 0.
+          used    (frequencies (keep #(when (= "tool" (:role %)) (:tool_call_id %))
+                                (:returned run)))]
       (vec (keep (fn [id]
                    (when-not (contains? answered id)
-                     (let [lif  (get life-of id)
-                           name (or (get-in call-of [id :name]) (:name lif))
-                           args (get-in call-of [id :argsText])]
+                     (let [which (get used id 0)
+                           lif   (clojure.core/nth (get life-of id) which)
+                           name  (or (get-in call-of [id :name]) (:name lif))
+                           args  (get-in call-of [id :argsText])]
                        (tool-marks (cond-> {:kind "tool" :toolCallId id}
                                      (some? name) (assoc :name name)
                                      (some? args) (assoc :argsText args))
-                                   id life-of))))
+                                   id life-of which))))
                  (:tool-ids run))))))
 
 ;; ------------------------------------------------------------------- the answer
