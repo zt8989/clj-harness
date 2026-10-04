@@ -383,6 +383,24 @@
               (distinct))
         (range (count messages))))
 
+(defn- in-place?
+  "Is the tool message at INDEX one that already sits directly behind the assistant message which
+names its call id?
+
+  THE MESSAGE AN ANSWER IS DIRECTLY BEHIND is the nearest one above it that is not itself a tool
+message: a run of tool messages belongs to the assistant message in front of it. That is the same
+reading `unanswered-tool-calls` walks when it decides what a call is still waiting for, so the
+two agree about what 'answered' means."
+  [indexed i message]
+  (let [cid   (:tool_call_id message)
+        ;; THE NEAREST MESSAGE ABOVE THAT IS NOT A TOOL MESSAGE -- the last of them, which is why
+        ;; the scan is over the ones that are NOT tool messages rather than a run that ends at one:
+        ;; `take-while` would stop at the FIRST tool message in the history, not the last block.
+        owner (:message (last (remove (fn [e] (= "tool" (:role (:message e))))
+                                      (subvec indexed 0 i))))]
+    (and (= "assistant" (:role owner))
+         (some #(= cid (:id %)) (:tool_calls owner)))))
+
 (defn adjacent-answers
   "MESSAGES -> the same messages, with every recorded tool answer sitting DIRECTLY BEHIND
   the assistant message that named its call, in call order.
@@ -405,22 +423,42 @@
   directly behind its call is emitted where it was, and the rest of the list does not move."
   [messages]
   (let [msgs    (vec messages)
-        ;; THE ASSISTANT MESSAGE THAT NAMED EACH CALL, by call id -- the same reading
-        ;; `unanswered-tool-calls` walks, so the two cannot disagree about what a call is.
-        owner   (into {}
-                      (for [[i m] (map-indexed vector msgs)
-                            :when (= "assistant" (:role m))
-                            tc    (:tool_calls m)]
-                        [(:id tc) i]))
-        ;; CALL ID -> THE INDICES OF THE TOOL MESSAGES THAT ANSWER IT *and have a call here
-        ;; to sit behind*. An answer with no owner is not movable (see the docstring).
-        answers (reduce (fn [acc [i m]]
+        ;; THE MESSAGES WITH THEIR POSITIONS, for the one question below that has to look UP.
+        indexed (vec (map-indexed (fn [i m] {:index i :message m}) msgs))
+        ;; THE CALL IDS SOME ASSISTANT MESSAGE NAMED -- a SET, because the only question this
+        ;; function ever asked of the owners was 'is there a call here for this id to sit behind?'.
+        ;; It is the same reading `unanswered-tool-calls` walks, so the two cannot disagree about
+        ;; what a call is.
+        ;;
+        ;; IT IS NOT A MAP BECAUSE A CALL ID IS NOT UNIQUE. A vendor that numbers its calls from the
+        ;; START OF THE REQUEST names every call in the conversation `call-0`, `call-0`, `call-0`...
+        ;; (measured on a real record, session c8fab338, 2026-10-04: 227 calls sharing one id). Keying
+        ;; the owners by that id kept the LAST of them, and every answer was then emitted behind
+        ;; EVERY call that shared the id: a 501-message history came back 51 809 long -- a quadratic
+        ;; blow-up driven by the vendor's own numbering, on the request every further turn of that
+        ;; conversation had to carry.
+        named?  (into #{} (comp (filter (fn [m] (= "assistant" (:role m))))
+                           (mapcat :tool_calls)
+                           (map :id))
+                  msgs)
+        ;; AN ANSWER ALREADY IN PLACE IS LEFT WHERE IT IS. `settled?` is the set of tool messages
+        ;; sitting in the block DIRECTLY BEHIND an assistant message naming their id -- the shape the
+        ;; vendor accepts, and the only one worth not touching. A shared call id is what makes this
+        ;; the whole story: each of those calls is followed by its own answer, every one already home.
+        settled? (into #{} (keep-indexed (fn [i {:keys [message]}]
+                                            (when (in-place? indexed i message) i)))
+                       indexed)
+        ;; CALL ID -> THE INDICES OF THE ANSWERS THAT ARE NOT IN PLACE *and have a call here to sit
+        ;; behind*. An answer with no call is not movable (see the docstring).
+        answers  (reduce (fn [acc [i m]]
                           (let [cid (when (= "tool" (:role m)) (:tool_call_id m))]
-                            (if (and cid (contains? owner cid))
+                            (if (and cid (contains? named? cid) (not (contains? settled? i)))
                               (update acc cid (fnil conj []) i)
                               acc)))
                         {} (map-indexed vector msgs))
-        moved?  (into #{} (mapcat val answers))]
+        moved?   (into #{} (mapcat val answers))
+        ;; AN ANSWER IS EMITTED BEHIND ONE CALL, NOT BEHIND EVERY CALL THAT SHARES ITS ID.
+        emitted  (volatile! #{})]
     (vec
      (mapcat (fn [i]
                (let [m (nth msgs i)]
@@ -428,9 +466,14 @@
                    ;; THIS ONE IS EMITTED BEHIND ITS CALL, not here.
                    (contains? moved? i)
                    nil
-                   ;; THE CALL: itself, then its answers in call order.
+                   ;; THE CALL: itself, then the answers it has to pull back, in call order.
                    (= "assistant" (:role m))
-                   (cons m (mapcat (fn [tc] (map #(nth msgs %) (get answers (:id tc))))
+                   (cons m (mapcat (fn [tc]
+                                     (let [cid (:id tc)]
+                                       (if (contains? @emitted cid)
+                                         nil
+                                         (do (vswap! emitted conj cid)
+                                             (map #(nth msgs %) (get answers cid))))))
                                    (:tool_calls m)))
                    :else
                    [m])))

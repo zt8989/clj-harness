@@ -8,6 +8,7 @@
             [harness.kernel.llm :as llm]
             [harness.kernel.event :as ev]
             [harness.kernel.loop :as loop]
+            [harness.kernel.stop :as stop]
             [harness.cap.project :as project]
             [harness.kernel.tools :as tools]
             [harness.test-support :as support]))
@@ -877,6 +878,71 @@
         ;; THE DEADLINE'S OWN SHAPE IS UNCHANGED: a start/end pair per attempt, and one card.
         (is (= 1 (count (timeouts seen))))
         (is (= 2 (count (ends seen))))))))
+
+(deftest a-stopped-run-drops-its-abandoned-call-s-answer-whole
+  ;; THE STOP PATH IS THE TIMEOUT PATH'S UNTESTED TWIN, and it was missing the one thing that
+  ;; path's guard does. The deadline branch CLAIMS THE GATE before giving up (`(reset! gate
+  ;; :dropped)`), so the abandoned call's late answer cannot announce itself. The stop branch
+  ;; throws straight out of `await-call` and claims nothing -- and `call-emit` only stops the
+  ;; FRAMES on a rung switch, while `announced!` claims the gate on `:open`. So a call that answers
+  ;; after a person pressed stop wins the gate and writes its row, a whole turn after the terminal:
+  ;; an assistant message carrying `tool_calls` with no tool message behind it -- the request every
+  ;; OpenAI-shaped vendor refuses on the NEXT turn of that conversation -- plus a `message` row no
+  ;; frame carried, which is the fold's `replay/unpaired-model-row`.
+  ;;
+  ;; MEASURED on a real record: the run `92984e61` (session 01823b1e) wrote three model rows its
+  ;; frames had built messages for, and then a fourth -- carrying a `read` call and nothing else --
+  ;; AFTER its `RUN_ERROR`, which read 'a person pressed stop on this conversation'. That is the
+  ;; defect, not a mispairing: the warning the fold logs for it is the visible half.
+  (let [switch  (stop/handle)
+        wrote   (atom [])
+        ;; THE CALL IS ON THE WIRE AND THE PERSON PRESSES STOP. `on-the-wire` is delivered by the
+        ;; stub below, so the press lands in exactly the window a person creates: the request has
+        ;; gone out and the vendor has not answered yet. A vendor has no process to kill, so its
+        ;; answer arrives after the press rather than never -- and THAT is the whole case.
+        on-wire  (promise)
+        answered (promise)
+        ;; THE PERSON PRESSES STOP ONLY ONCE THE CALL IS ON THE WIRE: this future WAITS for the stub to
+        ;; deliver `on-wire` (below), so the order is fixed by the test rather than by how fast either thread
+        ;; happens to run. A press that lands before the call went out is a different case, and one that
+        ;; has no abandoned attempt to drop.
+        press   (future @on-wire (stop/ring! switch))
+        late    {:role "assistant" :content ""
+                 :tool_calls [{:id "call_late" :type "function"
+                               :function {:name "read" :arguments "{}"}}]}]
+    (with-redefs [llm/stream! (fn [_provider _messages _emit _thread-id]
+                                ;; THE REQUEST HAS GONE OUT AND THE VENDOR HAS NOT ANSWERED. It will: a vendor
+                                ;; has no process to kill, so stopping the run cannot stop the call, and what it
+                                ;; says arrives a moment later -- the only window there is.
+                                (deliver on-wire true)
+                                ;; ... and the press has now been rung, so the answer below is LATE.
+                                @press
+                                (deliver answered true)
+                                {:message late :telemetry {}})]
+
+      (let [{:keys [history added seen]} (drive {} [] {:thread-id "t-stop-drop"
+                                                 :cancel switch
+                                                 :write! (fn [m] (swap! wrote conj m))})]
+        (is (some? (deref press 10000 :never-rung)) "the press landed while the call was in flight")
+        ;; THE ABANDONED CALL HAS NOW FINISHED TALKING, and the run is over. The only thing left between
+        ;; its answer and the record is `announced!`'s barrier -- five seconds of `drained!` -- so the run is
+        ;; given that long before anything is asserted. Without this the test reads the record in the window
+        ;; where the late answer has been produced but not yet written, and passes for the wrong reason.
+        (is (some? (deref answered 10000 :never-answered))
+            "the abandoned call did answer, after the press")
+        (Thread/sleep 5500)
+        (is (= :run/stopped (:type (last seen)))
+            "the run ended as a STOP, not a failure -- the terminal a stopped run gets")
+        (is (str/includes? (str (:message (last seen))) "a person pressed stop")
+            "and says so in its own words")
+        (is (empty? @wrote)
+            "THE ABANDONED CALL WROTE NO ROW: a stopped run's last word is its own terminal")
+        (is (not-any? :tool_calls added)
+            "and its late answer never reached the run's account")
+        (is (not-any? :tool_calls history)
+            "nor the history the NEXT run is built from -- that is where the 400 would come from")
+        (is (empty? (llm/unanswered-tool-calls history))
+            "so the rebuilt conversation is a shape a vendor will accept")))))
 
 (deftest a-run-handed-no-knobs-is-not-guarded
   ;; 'NOBODY SAID' IS NOT 'ZERO MILLISECONDS': a run handed no idle knobs has no retry

@@ -51,9 +51,22 @@
   that lands after the deadline would otherwise poison the run: it appends an assistant message
   the frames never carried (the fold answers `replay/unpaired-model-row` about it) and, when that
   message carries `tool_calls`, it leaves the NEXT attempt sending a request the vendor refuses --
-  an HTTP 400 the harness inflicts on itself, with no tool message answering the call."
-  [barrier write! history added message gate]
-  (when (compare-and-set! gate :open :announcing)
+  an HTTP 400 the harness inflicts on itself, with no tool message answering the call.
+
+AND IT IS DROPPED WHENEVER THE RUN'S STOP SWITCH IS RUNG, which is the same rule read at the
+place the frames are stopped (`call-emit` asks `stop/rung?` for exactly this). A stopped run has
+said its last word -- it ends on `:run/stopped` -- and an answer that arrives after that is an
+answer nobody is waiting for, on the same grounds as one that arrives after the deadline.
+
+THE GATE IS NOT ENOUGH ON ITS OWN for a stop, and this is why: the switch is rung from outside the run
+(`harness.kernel.session/cancel!`), so the loop's own `(reset! gate :dropped)` -- which the timeout
+path does after the wait returns -- races the answer that was already on its way. Measured
+2026-10-04: with only the reset, the late answer won about one run in four, depending on which thread
+got there first, and a stopped run wrote the row anyway. The switch is the FACT, and a fact is not
+something to lose a race to."
+  [barrier write! history added message gate stopped?]
+  (when (and (not (stopped?))
+             (compare-and-set! gate :open :announcing))
     (added! history added message)
     ;; THE BARRIER IS THE RUN'S OWN CHANNEL, NOT THIS CALL'S GATED EMIT: the gate above stops
     ;; forwarding a call's FRAMES once its attempt is over, and a control event that asked the
@@ -540,13 +553,18 @@
             ;; THE ONE WAY AN ANSWER REACHES THE HISTORY, THE ACCOUNT AND THE RECORD, handed to
             ;; the call rather than reached from it because the gate above is the only thing that
             ;; decides whether this attempt is still being listened to (`announced!`).
-            announce! (fn [message] (announced! barrier write! history added message gate))
+            announce! (fn [message] (announced! barrier write! history added message gate
+                                                   #(stop/rung? cancel)))
             ;; WHAT AN ATTEMPT THAT WON THAT GATE IS ANSWERED WITH when the deadline was firing in
             ;; the same instant: its message is already in the history and on the record, so there
             ;; is no retry to make and nothing to throw away -- the run continues with the answer.
             late      (fn []
                         (let [reply (await-call [ch] cancel nil)]
-                          (when (:stopped? reply) (stopped!))
+                          ;; A STOP FOUND WHILE WAITING FOR THE LATE ANSWER IS A STOP ALL THE SAME, and it
+                          ;; claims the gate for the same reason as above: nobody is waiting for this answer.
+                          (when (:stopped? reply)
+                            (reset! gate :dropped)
+                            (stopped!))
                           (let [v (:value reply)]
                             (if (instance? Throwable v) (throw v) v))))
             _         (async/thread
@@ -554,7 +572,14 @@
                                                         (assoc opts :halted? #(stop/rung? cancel)))
                                            (catch Throwable t t))))
             answer    (await-call [ch] cancel {:idle-ms idle-ms :last-at last-at})]
-        (when (:stopped? answer) (stopped!))
+        ;; A STOP IS ALSO A CLAIM ON THE GATE, and it is what stops the abandoned attempt's FRAMES
+        ;; from reaching the record (`call-emit` above). The ANSWER is held off by `announced!` reading the
+        ;; switch itself rather than by this: the switch is rung from outside the run, so a reset here
+        ;; would be racing an answer that was already on its way. Both halves are needed and they are not
+        ;; the same half -- see `announced!`.
+        (when (:stopped? answer)
+          (reset! gate :dropped)
+          (stopped!))
         (let [value  (:value answer)
               timed? (or (:idle? answer) (llm/idle-timeout? value))]
           (cond

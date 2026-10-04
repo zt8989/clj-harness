@@ -333,7 +333,41 @@
       (let [orphan [{:role "user" :content "hi"} (answer "c9")]]
         (is (= orphan (llm/adjacent-answers orphan)))
         (is (empty? (llm/unanswered-tool-calls (llm/adjacent-answers orphan)))
-            "a stray answer is not a call, so the vendor's rule has nothing to say")))))
+            "a stray answer is not a call, so the vendor's rule has nothing to say")))
+
+    (testing "a call id NAMED BY SEVERAL CALLS copies no answer"
+      ;; A vendor that numbers its calls from the start of the REQUEST names every call in the
+      ;; conversation `call-0`, `call-0`, `call-0` ... (measured on a real record, session
+      ;; c8fab338, 2026-10-04: 227 calls sharing one id). Matching an answer to its owner by that
+      ;; id is ambiguous, and keeping the LAST owner made every answer sit behind EVERY call: a
+      ;; 501-message history came back 51 809 long. An answer is emitted ONCE, behind the first
+      ;; call that names it -- the vendor checks the block directly behind each assistant message,
+      ;; and one tool message in that block answers the id for every call which named it.
+      (let [history (vec (mapcat (fn [_] [{:role "assistant" :content ""
+                                           :tool_calls [(call "call-0")]}
+                                         (answer "call-0")])
+                               (range 3)))
+            after   (llm/adjacent-answers history)]
+        (is (= (count history) (count after))
+            "no message is copied: the row count is the conversation's own")
+        (is (= 3 (count (filter :tool_calls after))))
+        (is (= 3 (count (filter :tool_call_id after)))
+            "each answer appears once, not once per call that shares its id")
+        (is (= history after)
+            "and a history that is already well shaped is left alone")))
+
+    (testing "an answer is read as in place relative to ITS OWN call, not the first tool row"
+      ;; Reading the run of non-tool messages with `take-while` stops at the FIRST tool message in
+      ;; the history -- in a long conversation, nowhere near the answer being placed. Every answer
+      ;; then counts as late, and the repair hoists the tail of the conversation behind the first call.
+      (let [history [{:role "user" :content "hi"}
+                    {:role "assistant" :content "" :tool_calls [(call "c1")]}
+                    (answer "c1")
+                    {:role "user" :content "and this"}
+                    {:role "assistant" :content "" :tool_calls [(call "c2")]}
+                    (answer "c2")]]
+        (is (= history (llm/adjacent-answers history))
+            "an answer in the second round stays behind the call of that round")))))
 
 ;; ----------------------------------------- the wire, and the traffic log
 
