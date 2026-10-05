@@ -769,3 +769,31 @@
                :content [{:type "data" :name ag/compacted-part-name
                           :data {:summary "WHAT WAS FOLDED" :tokens 1234 :messages 3}}]}]
              (frames/apply-frames [frame]))))))
+
+(deftest a-compaction-that-failed-is-a-card-saying-why
+  ;; THE CASE THE OWNER HIT (2026-10-05), from the builder's side. On a real session a
+  ;; run-triggered compaction at 74% of a 1M window died on `HTTP 429 rate_limit_exceeded`
+  ;; (`compaction/end` carried the error), and the page showed a red context ring and nothing
+  ;; else for two whole runs -- because the frame was only ever built on the success path.
+  (let [frame (ag/compacted-failed-frame {:compactionId "c-9"
+                                           :error       "HTTP 429: rate_limit_exceeded"})]
+    (is (= {:type "CUSTOM" :name ag/compacted-part-name :messageId "c-9"
+            :value {:outcome "failed" :error "HTTP 429: rate_limit_exceeded"}}
+           frame))
+    (testing "and it names the compaction, so a rebuild hands back the same card under the same name"
+      (is (= [{:id "c-9" :role "assistant"
+               :content [{:type "data" :name ag/compacted-part-name
+                          :data {:outcome "failed" :error "HTTP 429: rate_limit_exceeded"}}]}]
+             (frames/apply-frames [frame]))))
+    (testing "and it carries NO SIZE AND NO NODE COUNT, which is the half that is easy to get wrong"
+      ;; A failed attempt never got as far as a range -- `perform!` throws before it answers -- so
+      ;; any number here would be one this edge invented, and the card exists to report measurements.
+      (is (nil? (get-in frame [:value :summary])))
+      (is (nil? (get-in frame [:value :tokens])))
+      (is (nil? (get-in frame [:value :messages]))))
+    (testing "and the SUCCESS frame is unchanged by its existence"
+      ;; No `:outcome` on a success: the value this card has carried since
+      ;; `.scratch/compaction-frames` is byte-for-byte what it always sent, so a reader that knows
+      ;; nothing about a failure reads it exactly as before. The case above pins that too.
+      (is (nil? (get-in (ag/compacted-frame {:compactionId "c-1" :summary "S" :tokens 1 :shadowed [0]})
+                       [:value :outcome]))))))

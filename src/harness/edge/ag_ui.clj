@@ -241,35 +241,94 @@
   [message]
   (boolean (re-matches counter-spelling (str (:id message)))))
 
+(defn compacted-failed-frame
+  "The CUSTOM frame for ONE compaction that was ATTEMPTED and DID NOT LAND: the id the attempt was
+  given, and the reason it failed.
+
+  SPLIT OUT FROM `compacted-frame` RATHER THAN FOLDED INTO IT, for two reasons. One: a card that has
+  to read two shapes to know which one it drew is a card whose two branches drift. Two, and it is the
+  one that decided it: a caller whose attempt FAILED knows NOTHING about the range -- it never got an
+  answer from `perform!`, which throws before returning one -- so the folded size and the node count
+  would have to be invented, and the card would be drawing a measurement nobody took.
+
+  THE ID IS STILL A COMPACTION'S OWN, which is what keeps the fold from needing a second id space: the
+  caller hands the one the attempt was given. So the record folds one card per attempt and a rebuild
+  hands back the same one under the same name.
+
+  THE `:outcome` KEY IS THE WHOLE DISCRIMINANT (`ui/src/lib/compactions.ts`), and it is absent on
+  a success -- so a reader that knows nothing about this change reads a success exactly as it
+  always has, byte for byte.
+
+  (Spelled without its quotes on purpose: a Clojure string ends at the first unescaped quote, and a
+  docstring that quoted its own key ends there -- the param vector that follows is then read as the
+  argument list.)"
+  [{:keys [compactionId error]}]
+  {:type "CUSTOM" :name compacted-part-name
+   :messageId compactionId
+   :value {:outcome "failed" :error error}})
+
+(defn compacted-pending-frame
+  "The CUSTOM frame for a compaction that is HAPPENING RIGHT NOW: the row a person sees while the
+  summary call is in flight (owner, 2026-10-05).
+
+  IT IS AN ANNOUNCEMENT AND NOT A SPINNER, and that is the whole of what this frame is for. A
+  compaction is a model call over the conversation's own front, and on a real session it took
+  96 SECONDS (measured, `b0501b4a-…`, 2026-10-05: `compaction/start` 17:08:55,
+  `compaction/end` 17:10:31) -- so a page that says nothing until the answer arrives leaves a
+  person watching a full context ring for a minute and a half with no idea whether anything is
+  happening. Bash's row says this is running; this one says the same about a compaction.
+
+  THE ROW DOES NOT SPIN, AND THAT IS NOT TIDINESS. This frame is folded into the session's
+  conversation like any other card, so the row it draws is STILL THERE after the compaction
+  lands -- a spinner on a row that outlives the work would be a claim that is false from the
+  moment the result row appears beside it. What tells a person it is still going is the
+  ABSENCE of the result row below it, which is exactly how a bash row reads too.
+
+  IT IS NEVER RECORDED (`harness.edge.http/in-flight-frame?`), and that is what a rebuild needs:
+  a conversation handed back after a reload must not open on a compaction that is not running,
+  because the process that was running it is gone. The two terminal frames ARE recorded, so the
+  result is there after a refresh and only the start is not -- which is the honest half.
+
+  THE ID IS THE ATTEMPT'S OWN, and it is minted by the CALLER rather than here, because `perform!`
+  mints the id only once it is about to write the pair of rows -- a caller that announced first has
+  nothing to name it with, and an id invented here would not be the one the result carries. So this
+  row and the result row are not joined by their ids: they are two rows about one compaction, and
+  what puts them together on screen is the order they arrived in."
+  [{:keys [compactionId]}]
+  {:type "CUSTOM" :name compacted-part-name
+   :messageId compactionId
+   :value {:outcome "pending"}})
+
 (defn compacted-frame
-  "The CUSTOM frame for ONE compaction the harness ran on THIS run's conversation: the head of
-  that conversation was folded into one summary, and it is the MODEL's view -- not the
-  conversation -- that changed.
+  "The CUSTOM frame for ONE compaction the harness ATTEMPTED on this conversation: the head of that
+  conversation was meant to be folded into one summary, and it is the MODEL's view -- not the
+  conversation -- that a compaction changes.
 
-  THE CONTRAST WITH `injected-frame` ABOVE IS THE WHOLE OF IT. An injection is a message the MODEL
-  was handed and the client never sent; a compaction is nothing the model was handed at all -- the
-  record changed under it, and the summary that stands where the folded range stood reaches the
-  model through the projection of the `context/compacted` fact
-  (`harness.edge.replay/model-nodes`), never through this frame. What this frame says is what the
-  screen was missing: this conversation is not what it was a moment ago.
+  A COMPACTION THAT FAILED IS ALSO A FACT ABOUT THE CONVERSATION, and it is said out loud in this same
+  vocabulary (owner, 2026-10-05) -- `compacted-failed-frame` above is the other half of the pair, and
+  both are emitted. The difference between them is whether a summary exists.
 
-  ONE PLACE BUILDS THIS SHAPE, because three do emit it -- the edge's run-start trigger, a run's
-  mid-run pressure relief, and the recovery after a vendor refused the request for its length (see
-  `harness.edge.http`). All three hand in what `harness.edge.compaction/perform!` answered, and
-  the `:messageId` is that compaction's OWN id: unique without a counter, deterministic without a
-  clock, so the record folds one card per compaction and a rebuild hands back the same one.
+  THE CONTRAST WITH `injected-frame` ABOVE IS THE WHOLE OF WHAT ELSE IT IS. An injection is a message
+  the MODEL was handed and the client never sent; a compaction is nothing the model was handed at all --
+  the record changed under it, and the summary that stands where the folded range stood reaches the
+  model through the projection of the `context/compacted` fact (`harness.edge.replay/model-nodes`),
+  never through this frame.
 
-  WHAT IT VIEWS IS NOT A MESSAGE, so it keeps three fields of its own rather than the
-  `{role, text}` an injection card carries: the summary, what the folded range was estimated at,
-  and how many nodes went into it. The UI's arithmetic reads exactly these keys
-  (`ui/src/lib/compactions.ts`)."
+  ONE PLACE BUILDS THIS SHAPE, because three do emit it -- the edge's run-start trigger, a run's mid-run
+  pressure relief, and the recovery after a vendor refused the request for its length (see
+  `harness.edge.http`). All three hand in what `harness.edge.compaction/perform!` answered, and the
+  `:messageId` is that compaction's OWN id: unique without a counter, deterministic without a clock, so
+  the record folds one card per compaction and a rebuild hands back the same one.
+
+  WHAT IT VIEWS IS NOT A MESSAGE, so it keeps three fields of its own rather than the `{role, text}`
+  an injection card carries: the summary, what the folded range was estimated at, and how many nodes
+  went into it. The UI's arithmetic reads exactly these keys (`ui/src/lib/compactions.ts`)."
   [compaction]
   {:type "CUSTOM" :name compacted-part-name
    :messageId (:compactionId compaction)
    :value {:summary  (:summary compaction)
            :tokens   (:tokens compaction)
            :messages (count (:shadowed compaction))}})
-
 (defn- step [s ev]
   (case (:type ev)
     :run/start

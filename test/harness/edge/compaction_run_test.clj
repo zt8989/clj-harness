@@ -244,6 +244,100 @@
               (io/delete-file log true)))))
       (finally (stop)))))
 
+(deftest a-compaction-the-vendor-refused-is-announced-as-well-as-one-that-worked
+  ;; THE OWNER'S INCIDENT (2026-10-05), asserted as the function that now carries it. The trigger
+  ;; fired at 74% of a 1M window, the summary call was refused (HTTP 429 rate_limit_exceeded on a
+  ;; real session, the words of an exhausted quota), compaction/end recorded the failure -- and the
+  ;; page showed a red context ring and NOTHING else for two whole runs. The gap was that each of
+  ;; the three call sites wrapped a BARE call: a throw unwound past the announce, so the failure was
+  ;; recorded in the log and nowhere a person could see it.
+  (let [stop (http/start! {:port 0})]
+    (try
+      (testing "a refused one announces the start and then the failure, in that order"
+        (let [thread-id "auto-refused"
+              log       (plant! thread-id (auto-rows 8000))]
+          ;; A TURN THAT REFUSES IS A VENDOR SAYING NO BEFORE THE STREAM OPENS (harness.fake), which
+          ;; is exactly the shape a 429 on the summary call has.
+          (pin! thread-id 8000 [{:refuse {:status 429 :body "rate_limit_exceeded"}}])
+          (try
+            (let [said   (atom [])
+                  answer (#'http/announce-compaction! thread-id (providers/current-provider thread-id)
+                                                         (replay/read-records log) 8000
+                                                         (compaction/config thread-id)
+                                                         (fn [frame] (swap! said conj frame))
+                                                         nil)]
+              (is (nil? answer) "a caller that folded nothing has no shorter view to be handed")
+              ;; THE ORDER IS THE FEATURE (owner, 2026-10-05): the start row goes out BEFORE the
+              ;; summary call and the result after it, so the page shows two rows about one compaction
+              ;; in the order they happened. A compaction took 96 SECONDS on the session this was
+              ;; measured on, and a page that said nothing until the answer arrived was unreadable
+              ;; for all of it.
+              (is (= ["compacted-context" "compacted-context"] (mapv :name @said))
+                  "two rows, and both are the card the success path already uses -- same part name")
+              (is (= ["pending" "failed"] (mapv #(get-in % [:value :outcome]) @said))
+                  "the first says it is happening, the second says it did not land")
+              (is (nil? (get-in (first @said) [:value :error]))
+                  "and the start row names no reason, because at that moment there is not one yet")
+              (is (str/includes? (str (get-in (second @said) [:value :error])) "rate_limit_exceeded")
+                  "carrying the vendor's own words, which are the difference between try-later and buy-more")
+              (let [ids (mapv :messageId @said)]
+                ;; ONE COMPACTION, ONE ID, on both rows: two ids for one compaction is two card
+                ;; identities, and a rebuild draws those as two things rather than one.
+                (is (= 2 (count ids)))
+                (is (= 1 (count (distinct ids))))
+                (is (every? string? ids)
+                    (str "AND BOTH HAVE A NAME: a failure never gets one from perform!, and a card "
+                         "folded under no id is one a rebuild draws a second time"))))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (testing "the record still says what happened, whatever the card says"
+        (let [thread-id "auto-refused-record"
+              log       (plant! thread-id (auto-rows 8000))]
+          (pin! thread-id 8000 [{:refuse {:status 429 :body "rate_limit_exceeded"}}])
+          (try
+            (#'http/announce-compaction! thread-id (providers/current-provider thread-id)
+                                        (replay/read-records log) 8000
+                                        (compaction/config thread-id)
+                                        (fn [_]) nil)
+            (let [rows  (wait-for-rows log "compaction/end")
+                  ends  (filter #(= "compaction/end" (replay/kind %)) rows)
+                  kinds (mapv replay/kind rows)]
+              (is (some #{"compaction/start"} kinds) "the attempt is on the record")
+              (is (not (some #{"context/compacted"} kinds))
+                  "and nothing was landed: the conversation keeps its history")
+              (is (str/includes? (str (:error (replay/payload (last ends)))) "rate_limit_exceeded")
+                  "the failure is recorded as one, which it always was"))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (testing "and a compaction that worked announces the same way, with an unchanged result frame"
+        (let [thread-id "auto-folded"
+              log       (plant! thread-id (auto-rows 8000))]
+          (pin! thread-id 8000 [{:content "A SUMMARY"}])
+          (try
+            (let [said   (atom [])
+                  answer (#'http/announce-compaction! thread-id (providers/current-provider thread-id)
+                                                         (replay/read-records log) 8000
+                                                         (compaction/config thread-id)
+                                                         (fn [frame] (swap! said conj frame))
+                                                         nil)]
+              (is (some? answer) "the compaction's own map, which the caller goes on with")
+              ;; THE SUCCESS ROW'S OUTCOME IS NIL, NOT "folded", and that is the compatibility
+              ;; guarantee stated as a test: `compacted-frame` has carried no `outcome` key since the
+              ;; card existed, so a reader that knows nothing about this change reads it as before.
+              (is (= ["pending" nil] (mapv #(get-in % [:value :outcome]) @said))
+                  "the start row, then the result -- and the result says nothing about its outcome")
+              (is (= "A SUMMARY" (get-in (second @said) [:value :summary])))
+              (is (nil? (get-in (second @said) [:value :outcome]))
+                  "and NO outcome key on the result, so the success frame is byte-for-byte what it always was")
+              (is (= (:compactionId answer) (:messageId (second @said)))
+                  "and it is folded under the compaction's own id, the one a rebuild hands back"))
+            (finally
+              (providers/use-provider! thread-id nil)
+              (io/delete-file log true)))))
+      (finally (stop)))))
+
 (deftest the-trigger-measures-the-window-the-run-goes-out-under-not-the-records
   ;; THE 2026-10-02 INCIDENT, thread `88f8d8eb-…`: the record's newest call declared 256k (the
   ;; session's in-memory override was dropped by a restart, so the record still ends on the

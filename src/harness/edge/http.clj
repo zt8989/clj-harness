@@ -1070,6 +1070,31 @@
   [frame]
   (and (= "CUSTOM" (:type frame)) (contains? wire-only-frames (:name frame))))
 
+(def ^:private wire-only-outcomes
+  "The `outcome` values a CUSTOM frame may carry and still be a fact about something that has
+  ALREADY HAPPENED. A compaction's row is the worked example: the two terminal ones (`compacted-frame`
+  says a summary landed, `compacted-failed-frame` says one did not) are facts a rebuild must hand back,
+  and the third -- the row that says a compaction is happening RIGHT NOW -- is not, for the reason
+  `wire-only-frame?`'s own docstring gives about the idle guard's frame: it is about a thing in FLIGHT,
+  and a reload that rebuilt a conversation out of it would carry a spinner that never resolves."
+  ;;
+  ;; ASKED BY VALUE BECAUSE THE NAME CANNOT ANSWER IT: the in-flight row is a compaction's card --
+  ;; same part, same renderer, same place in the conversation -- so a name-based rule would take the
+  ;; two terminal cards with it, and a rebuild would then draw nothing at all for a compaction that
+  ;; really did happen."
+  #{"pending"})
+
+(defn- in-flight-frame?
+  "Is FRAME one the wire carries about something happening NOW, which no reader should rebuild from?
+
+THE PREDICATE IS SPELLED ONCE for the same reason `wire-only-frame?` is: there are two frame sinks
+(the agent route and a subagent's), and a second spelling would be a second rule. It is asked over
+the WHOLE FRAME rather than over what `text-lines` answered, because this one is a whole frame and
+not a line -- the reasoning family below says which of the two it is."
+  [frame]
+  (and (= "CUSTOM" (:type frame))
+       (contains? wire-only-outcomes (get-in frame [:value :outcome]))))
+
 ;; BOTH EXCEPTIONS ARE NOW THE SAME KIND OF THING (`reasoning-frame?` and
 ;; `wire-only-frame?`): one says which LINES a frame becomes, the other says whether the
 ;; harness's own frame about a call in flight may become a line at all. `runner` below and
@@ -1177,8 +1202,14 @@
     ;; BOTH EXCEPTIONS APPLY TO WHAT `text-lines` ANSWERED, not to FRAME: the text family
     ;; is one of the lines a frame becomes (`text-lines`), and a frame the record never
     ;; keeps is a whole frame rather than a line -- so the wire-only test reads ROW.
+    ;;
+    ;; THE IN-FLIGHT ROW IS THE THIRD OF THE SAME KIND, and it is the one that is a WHOLE FRAME by
+    ;; name rather than by line: a compaction's "this is happening now" card. It still goes to the
+    ;; bus and into the session's memory -- the page draws the spinner -- and no line, because a
+    ;; rebuild that found one would draw a compaction that is still running after the process that was
+    ;; running it is gone (`in-flight-frame?`).
     (doseq [row (text-lines state frame)]
-      (when-not (or (reasoning-frame? row) (wire-only-frame? row))
+      (when-not (or (reasoning-frame? row) (wire-only-frame? row) (in-flight-frame? row))
         (let [offset (log! thread-id run-id "event" row
                            (when (contains? terminal (:type row))
                              (fn [offset] (swap! state assoc :terminal-line offset))))]
@@ -1499,7 +1530,9 @@
           ;; compaction changed what the model will read on this very run, and a person watching has
           ;; no other way to be told. It cannot be said HERE either -- a frame before RUN_STARTED is
           ;; a frame the client has no run to hang it on -- so it rides the run's first frames
-          ;; (the `:run/start` branch below, beside the injections).
+          ;; (the `:run/start` branch below, beside the injections). A trigger that FIRED AND FAILED
+          ;; is kept in the same key, because "the fold did not happen" is a thing this run has to
+          ;; carry to the page too (owner, 2026-10-05).
           (swap! state assoc :compacted (compact-if-pressured! thread-id))
           (let [history  (sessions/messages thread-id)
                 born?    (empty? history)
@@ -2228,7 +2261,7 @@
                                                 ;; `pre` = folded in BEFORE the first call; the
                                                 ;; kernel's keep `ctx`, which is the name of the
                                                 ;; event they answer (`:context/injected`).
-                                                (cond-> (into (if-some [compacted (:compacted @state)]
+                                                (cond-> (into (if-some [attempt (:compacted @state)]
                                                                 ;; THE COMPACTION THIS RUN WOKE UP TO ALREADY RIDES FIRST,
                                                                 ;; because it happened FIRST: the trigger at the run's head
                                                                 ;; (`compact-if-pressured!`, whose answer this key holds)
@@ -2236,7 +2269,28 @@
                                                                 ;; so the summary the model is now reading stands in front of
                                                                 ;; material derived after it. A run the trigger left alone has
                                                                 ;; no such key and this is the empty vector it takes instead.
-                                                                [(ag/compacted-frame compacted)]
+                                                                ;;
+                                                                ;; AND A COMPACTION THAT FAILED RIDES THE SAME PLACE, IN THE
+                                                                ;; SAME SHELL (owner, 2026-10-05). It is the one card that has to exist:
+                                                                ;; a trigger that fired and was refused used to leave the page
+                                                                ;; showing a full context ring and no reason for it, which is the one
+                                                                ;; thing a person watching cannot work out.
+                                                                (cond
+                                                                  (:folded attempt)
+                                                                  [(ag/compacted-frame (:folded attempt))]
+                                                                  (:failed attempt)
+                                                                  ;; THE ID IS MINTED HERE BESIDE THE FAILURE: `perform!`
+                                                                  ;; throws before it answers, so this attempt never had
+                                                                  ;; one, and a card folded under no name is one a rebuild
+                                                                  ;; draws a second time (`harness.kernel.frames/apply-frames`
+                                                                  ;; keys a card by its id).
+                                                                  [(ag/compacted-failed-frame
+                                                                    {:compactionId (str (java.util.UUID/randomUUID))
+                                                                     :error       (:failed attempt)})]
+                                                                  ;; NO TRAILING `nil`: `cond` reads its forms as test/answer PAIRS, so a
+                                                                  ;; bare `nil` at the end is an unpaired test and the macro refuses
+                                                                  ;; the form. With no match it simply answers nil.
+                                                                  )
                                                                 [])
                                                               (map-indexed
                                                                (fn [i message]
@@ -2838,13 +2892,16 @@
                         ;; subagent thread runs exactly ONE delegation, so the run is
                         ;; the thread here). See `follow-get`.
                         (let [f (assoc frame :seq (swap! frame-seq inc))]
-                          ;; THE SAME TWO EXCEPTIONS AS THE AGENT ROUTE (`reasoning-frame?`,
-                          ;; `wire-only-frame?`), over the same helper: a subagent's reasoning
-                          ;; frames are broadcast and kept in memory and NOT recorded -- the
-                          ;; delegation's own `message` rows carry the text back -- and the idle
-                          ;; guard's frame is the wire's alone in a delegation too.
+                          ;; THE SAME EXCEPTIONS AS THE AGENT ROUTE (`reasoning-frame?`,
+                          ;; `wire-only-frame?`, `in-flight-frame?`), over the same helper: a subagent's
+                          ;; reasoning frames are broadcast and kept in memory and NOT recorded -- the
+                          ;; delegation's own `message` rows carry the text back -- the idle guard's
+                          ;; frame is the wire's alone in a delegation too, and so is the row that says a
+                          ;; compaction is happening right now (a delegation's context is folded the
+                          ;; same way, and a spinner outlives the process that started it just as badly).
                           (doseq [row (text-lines text f)]
-                            (when-not (or (reasoning-frame? row) (wire-only-frame? row))
+                            (when-not (or (reasoning-frame? row) (wire-only-frame? row)
+                                         (in-flight-frame? row))
                               (let [offset (log! thread-id run-id "event" row
                                                 (when (contains? terminal (:type row))
                                                   (fn [offset] (reset! terminal-line offset))))]
@@ -7205,6 +7262,53 @@
       (hook/emit :post-compact {:thread-id stem})
       result)))
 
+(defn- announce-compaction!
+  "Run one compaction and tell the run about it, WHICHEVER WAY IT WENT (owner, 2026-10-05).
+
+  THE CARD IS THE WHOLE OF THIS FUNCTION, and it is here rather than at each of the three call
+  sites because those three are exactly the three places that used to be silent on failure: the
+  run-start trigger (`compact-if-pressured!`), the mid-run relief (`relieve-pressure!`) and the
+  overflow recovery (`recover-overflow!`). Each of them wrapped a bare call whose answer was a map
+  or nil, so a throw unwound past the emit and NOTHING reached the page -- a compaction that was
+  refused, which is the one thing a person watching cannot work out from a red context ring.
+
+  IT ANNOUNCES THE START BEFORE IT MAKES THE CALL, and that is the other half of what this
+  function is for (owner, 2026-10-05). A compaction is a model call over the conversation's own
+  front -- 96 seconds on the real session this was measured on -- and a page that says
+  nothing until the answer arrives is a page a person cannot read. So the row goes out first,
+  BEFORE `run-compaction!` is called, and the result row goes out after: two rows about one
+  compaction, in the order they happened.
+
+  IT DOES NOT KNOW WHETHER THERE WILL BE A RESULT, and says nothing about that: a plan that
+  answers nil (no range, a held lock) is a compaction that was never going to happen, and a row
+  announcing one would be a claim the record then contradicts. So the announcement is made
+  here -- where the caller is about to try -- rather than inside `run-compaction!`, which
+  knows.
+
+  Answers whatever the call should go on with: the compaction's own map, or nil when there was
+  nothing to fold."
+  [stem provider records window ratios emit opts]
+  (let [attempt-id (str (java.util.UUID/randomUUID))
+        attempt    (try
+                    (do
+                      (emit (ag/compacted-pending-frame {:compactionId attempt-id}))
+                      {:folded (run-compaction! stem provider records window ratios opts)})
+                    (catch Throwable t {:failed (ex-message t)}))]
+    (cond
+      (:folded attempt)
+      (do
+        (emit (ag/compacted-frame (:folded attempt)))
+        (:folded attempt))
+      ;; NO TRAILING `nil` HERE EITHER -- `cond` reads its forms as PAIRS, so a bare `nil` at
+      ;; the end is an unpaired test and the macro refuses the form.
+      (:failed attempt)
+      ;; THE ID IS THE ANNOUNCEMENT'S OWN, not a second one: the start row already carries it,
+      ;; and two ids for one compaction is two card identities a rebuild would draw as two.
+      (do (emit (ag/compacted-failed-frame
+                 {:compactionId attempt-id
+                  :error       (:failed attempt)}))
+          nil))))
+
 (defn- prune-results!
   "Elide the oversized TOOL RESULTS in RECORDS (ticket 06): a local, deterministic cut that
   spends NOTHING -- no model call, no window, no estimate. One `context/pruned` receipt per
@@ -7256,11 +7360,11 @@
   actually sent, whose derived injections would make any view look shorter. A pass that removed
   nothing answers nil rather than retrying the same overflowing request.
 
-  WHAT IT FOLDED AWAY IS SAID OUT LOUD (`emit`): the vendor refused this request for its length,
-  so the run has just taken the front of the conversation off the model's view, and that is
-  precisely the moment a person watching needs to be told about. A PASS THAT ONLY PRUNED EMITS
-  NOTHING -- pruning is a different fact with its own name (`context/pruned`), and a `compacted`
-  card over it would be a card about work that did not happen."
+  WHAT IT FOLDED AWAY IS SAID OUT LOUD (`emit`), AND SO IS A COMPACTION THAT FAILED (owner,
+  2026-10-05): the card is ONE card, and it says which of the two this was
+  (`harness.edge.ag-ui/compacted-frame`). A PASS THAT ONLY PRUNED EMITS NOTHING -- pruning is a
+  different fact with its own name (`context/pruned`), and a `compacted` card over it would be a
+  card about work that did not happen."
   [stem provider history _t emit]
   (try
     (locking compaction-lock
@@ -7271,23 +7375,21 @@
               pruned  (prune-results! stem records)
               records (or (:records pruned) records)
               ratios  (compaction/config stem)
-              ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress.
               ;; 2. THE AGGRESSIVE SUMMARY. Its failure is not fatal while pruning made progress,
-              ;;    and its success is SAID OUT LOUD before the retry goes out: the run has just
+              ;;    and BOTH OUTCOMES ARE SAID OUT LOUD before the retry goes out: the run has just
               ;;    folded the front of this conversation away, and that card belongs on screen
-              ;;    whether or not the shorter view survives the check below.
-              _       (when-some [compacted (try
-                                            (run-compaction! stem provider records
-                                                             (:context-window provider) ratios
-                                                             ;; THE ARRAY THIS RUN WAS HANDED, so the
-                                                             ;; summary call is a genuine prefix of it
-                                                             ;; (`:prefix` / `:tools` in
-                                                             ;; `run-compaction!`).
-                                                             {:aggressive? true
-                                                              :prefix (summary-prefix history)
-                                                              :tools  (tools/specs stem)})
-                                            (catch Throwable _ nil))]
-                        (emit (ag/compacted-frame compacted)))
+              ;;    whether or not the shorter view survives the check below. A summary the vendor
+              ;;    REFUSED is the one thing a person watching cannot work out from a ring (owner,
+              ;;    2026-10-05: `b0501b4a-…` sat at 74% for two whole runs because a 429 on the summary
+              ;;    call was recorded in the log and nowhere else).
+              ;;    call was recorded in the log and nowhere else).
+              _       (announce-compaction!
+                       stem provider records (:context-window provider) ratios emit
+                       ;; THE ARRAY THIS RUN WAS HANDED, so the summary call is a genuine prefix of
+                       ;; it (`:prefix` / `:tools` in `run-compaction!`).
+                       {:aggressive? true
+                        :prefix (summary-prefix history)
+                        :tools  (tools/specs stem)})
               system  (vec (take-while #(= "system" (:role %)) history))
               after   (sessions/messages stem)]
           (when (< (pressure/estimate-messages after) (pressure/estimate-messages before))
@@ -7331,11 +7433,14 @@
   IT NEVER THROWS AND NEVER SHORTENS NOTHING: a failure answers nil, and so does a view the
   estimator says is not shorter. The run then carries on with the array it had.
 
-  ITS SUCCESS IS SAID OUT LOUD (`emit`), AND NOT CONDITIONALLY ON THE VIEW IT ANSWERS: the rows are
-  written and the session's own model view has already moved, so the conversation IS compacted even
-  when the shorter array is one this call declines to take (the loop refuses a view that would
-  leave a tool call unanswered). A card withheld in that case would be the harness hiding
-  something it had already done."
+  BOTH OUTCOMES ARE SAID OUT LOUD (`emit`), AND A SUCCESS IS NOT CONDITIONALLY ON THE VIEW IT
+  ANSWERS: the rows are written and the session's own model view has already moved, so the
+  conversation IS compacted even when the shorter array is one this call declines to take (the loop
+  refuses a view that would leave a tool call unanswered). A card withheld in that case would be the
+  harness hiding something it had already done -- and a FAILURE gets a card for the same reason,
+  which is the whole of this ticket (owner, 2026-10-05): this trigger is the one that fires on a
+  conversation that is simply too full, so its summary call is the one that hits an exhausted quota,
+  and the person watching could see the ring stay red with nothing to explain it."
   [stem provider history emit]
   (try
     (let [ratios (compaction/config stem)
@@ -7350,24 +7455,18 @@
           (when-some [f (replay/find-log (home/projects-dir) stem)]
             (let [records (vec (replay/read-records f))
                   before  (pressure/estimate-messages history)]
-              (when-some [compacted (run-compaction! stem provider records window ratios
-                                                   ;; THE RELIEF THIS TRIGGER ASKS FOR, off the very
-                                                   ;; reading that fired it: what is over the threshold
-                                                   ;; is what has to come off (`plan`'s `:min-head-tokens`),
-                                                   ;; or the fold would buy nothing and burn a summary call.
-                                                   {:min-head-tokens (- (:pressureTokens answer)
-                                                                        (:thresholdTokens answer))
-                                                    :prefix (summary-prefix history)
-                                                    :tools  (tools/specs stem)})]
-                ;; AND THE CARD GOES OUT THE MOMENT IT IS TRUE -- not when the view below survives.
-                ;; The rows are written and the session's own model view has already moved, so the
-                ;; conversation IS compacted; the comparison below only decides whether THIS call
-                ;; takes the shorter array.
-                (emit (ag/compacted-frame compacted))
-                (let [system (vec (take-while #(= "system" (:role %)) history))
-                      view   (into system (ag/provider-messages (sessions/messages stem)))]
-                  (when (< (pressure/estimate-messages view) before)
-                    view))))))))
+              (announce-compaction!
+                stem provider records window ratios emit
+                ;; THE RELIEF THIS TRIGGER ASKS FOR, off the very reading that fired it:
+                ;; what is over the threshold is what has to come off (`plan`'s
+                ;; `:min-head-tokens`), or the fold would buy nothing and burn a summary call.
+                {:min-head-tokens (- (:pressureTokens answer) (:thresholdTokens answer))
+                 :prefix (summary-prefix history)
+                 :tools  (tools/specs stem)})
+              (let [system (vec (take-while #(= "system" (:role %)) history))
+                    view   (into system (ag/provider-messages (sessions/messages stem)))]
+                (when (< (pressure/estimate-messages view) before)
+                  view)))))))
     (catch Throwable _ nil)))
 
 (defn- compact-if-pressured!
@@ -7393,8 +7492,15 @@
   IT ANSWERS WHAT IT COMPACTED, or nil, where it used to answer nothing at all: this compaction
   happens BEFORE the run has emitted anything, so its card cannot go out from here -- a frame
   before RUN_STARTED has no run to hang on -- and `run-agent!` holds this answer until the run's
-  first frames (see the `:run/start` branch there). Failing soft still answers nil, which draws no
-  card."
+  first frames (see the `:run/start` branch there).
+
+  AND IT ANSWERS A FAILURE TOO, IN THE SAME SHAPE (owner, 2026-10-05), which is the one this
+  trigger is most likely to produce: it fires on a conversation that is simply too full, so its summary
+  call is the one that meets an exhausted quota. Measured on `b0501b4a-…`, 2026-10-05: pressure 74%,
+  `compaction/start`, then 96 seconds later `compaction/end` carrying `HTTP 429` -- and a person
+  watching saw a red ring and nothing else for two whole runs. The answer is `{:folded ..}` or
+  `{:failed ..}` rather than the bare map, so the caller can tell the two apart; nil still means
+  'nothing to do' and draws no card."
   [stem]
   (try
     (locking compaction-lock
@@ -7432,17 +7538,24 @@
                          (>= (:pressureTokens answer) (:thresholdTokens answer))
                          (not (compaction/lock-active? records)))
                 (when provider
-                  (run-compaction! stem provider records (:windowTokens answer) ratios
-                                   ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
-                                   ;; threshold must be what comes off, or the compaction is not
-                                   ;; worth a summary call (`plan`'s `:min-head-tokens`).
-                                   ;; THE PREFIX IS THE REQUEST THE NEXT CALL WOULD CARRY (the
-                                   ;; live surface: system message first), so the summary call reuses
-                                   ;; the provider's cache for everything but its own tail.
-                                   {:min-head-tokens (- (:pressureTokens answer)
+                  ;; A THROW IS AN ANSWER, NOT AN ABSENCE: the whole of this branch used to be the bare
+                  ;; call, so a summary the vendor refused (or that came back no smaller than what it
+                  ;; would replace) answered nil -- indistinguishable from 'nothing to fold' -- and
+                  ;; `run-agent!` therefore held nothing and the page drew no card at all.
+                  (try
+                    {:folded (run-compaction! stem provider records (:windowTokens answer) ratios
+                                           ;; AND THE RELIEF THIS TRIGGER ASKS FOR: what is over the
+                                           ;; threshold must be what comes off, or the compaction is
+                                           ;; not worth a summary call (`plan`'s `:min-head-tokens`).
+                                           ;; THE PREFIX IS THE REQUEST THE NEXT CALL WOULD CARRY
+                                           ;; (the live surface: system message first), so the summary
+                                           ;; call reuses the provider's cache for everything but its
+                                           ;; own tail.
+                                           {:min-head-tokens (- (:pressureTokens answer)
                                                         (:thresholdTokens answer))
-                                    :prefix (summary-prefix (pressure/live-surface stem))
-                                    :tools  (tools/specs stem)}))))))))
+                                            :prefix (summary-prefix (pressure/live-surface stem))
+                                            :tools  (tools/specs stem)})}
+                    (catch Throwable t {:failed (ex-message t)})))))))))
     (catch Throwable t
       (log/warn! :compaction/auto-failed {:thread-id stem :reason (ex-message t)})
       nil)))

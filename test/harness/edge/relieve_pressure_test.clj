@@ -77,17 +77,20 @@
                 (str "and it is the compacted conversation, not the one handed in -- the checkpoint",
                      " opens by saying it condenses an EARLIER span and that the messages after it",
                      " are the newer half"))
-            ;; AND THE RUN IS TOLD IN THE SAME BREATH (`.scratch/compaction-frames`): the frame
-            ;; names the compaction the ROWS name, so the card a client draws is the one a rebuild
-            ;; hands back afterwards.
-            (let [fact (first (filter #(contains? % :compactionId)
-                                     (map replay/payload (replay/read-records log))))
-                  card (first @said)]
-              (is (= ["compacted-context"] (mapv :name @said))
-                  "one card frame, named for the card")
+            ;; AND THE RUN IS TOLD IN THE SAME BREATH (`.scratch/compaction-frames`): TWO rows now --
+            ;; the start and then the result -- and the result names the compaction the ROWS name, so
+            ;; the card a client draws is the one a rebuild hands back afterwards.
+            (let [fact  (first (filter #(contains? % :compactionId)
+                                      (map replay/payload (replay/read-records log))))
+                  start (first @said)
+                  card  (second @said)]
+              (is (= ["compacted-context" "compacted-context"] (mapv :name @said))
+                  "two card frames, both named for the card: the start, then the result")
+              (is (= "pending" (get-in start [:value :outcome]))
+                  "the first says the compaction is happening, before its model call is made")
               (is (= "MID SUMMARY" (get-in card [:value :summary])))
               (is (= (:compactionId fact) (:messageId card))
-                  "and it is folded under the id the rows carry")))
+                  "and the RESULT is folded under the id the rows carry, which is what a rebuild returns")))
           (finally
             (providers/use-provider! thread-id nil)
             (io/delete-file log true))))
@@ -203,7 +206,8 @@
             (is (some? view) "and a compaction happens at all")
             (is (some #{"context/compacted"} (mapv replay/kind (replay/read-records log)))
                 "the summary reached the record")
-            (is (= ["compacted-context"] (mapv :name @said)) "one card, named for the card")
+            (is (= ["compacted-context" "compacted-context"] (mapv :name @said))
+                "two cards, the start and then the result -- one compaction, two rows")
             (let [after (pressure/estimate-messages (sessions/messages thread-id))]
               (is (< after (* 0.5 before))
                   "the array the model is handed really did shrink -- the fold took the live excess")

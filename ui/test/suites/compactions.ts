@@ -42,9 +42,11 @@ const cases: readonly Case[] = [
         messages: 21,
       });
       expect(view).toEqual({
+        outcome: "folded",
         preview: "folded: the first twenty turns",
         tokens: 12345,
         messages: 21,
+        error: null,
       });
       // AND THE BODY IS THE WHOLE SUMMARY, not the row's one line -- including the leading blank
       // lines the preview skipped.
@@ -53,15 +55,24 @@ const cases: readonly Case[] = [
       // A FRAME THAT DID NOT SAY MUST NOT BECOME A ZERO. `0 tok` is a claim about the size of the
       // folded range, and a card that invented one would be lying about the one thing it reports.
       expect(compactionView({ summary: "S" })).toEqual({
+        outcome: "folded",
         preview: "S",
         tokens: null,
         messages: null,
+        error: null,
       });
       expect(compactionView({ summary: "S", tokens: -1, messages: 1.5 })).toEqual({
+        outcome: "folded",
         preview: "S",
         tokens: null,
         messages: null,
+        error: null,
       });
+
+      // AND THE SUCCESS CARRIES NO `outcome` AT ALL, which is the whole of the wire compatibility:
+      // `compacted-frame` is byte-for-byte what it always sent, so a reader that knows nothing about
+      // a failure reads a success exactly as before.
+      expect(compactionView({ summary: "S" })?.outcome).toBe("folded");
 
       // AND A FRAME WITH NOTHING TO SAY IS NOT A CARD: a row drawn for it would claim a compaction
       // nobody can check, so the answer is null and the caller draws nothing.
@@ -71,6 +82,114 @@ const cases: readonly Case[] = [
       expect(compactionView("not a value")).toBeNull();
       expect(compactionText(null)).toBe("");
       expect(compactionText({ summary: 42 })).toBe("");
+    },
+  },
+  {
+    name: "a-compaction-in-flight-is-a-row-before-it-is-a-result",
+    run: async () => {
+      // A COMPACTION IS A MODEL CALL OVER THE WHOLE FRONT OF THE CONVERSATION, and on the real
+      // session this was measured on it took 96 SECONDS. A page that says nothing until the answer
+      // arrives is a page nobody can read for a minute and a half, so the start goes out as its OWN
+      // row. Two rows rather than one that changes, because a `data` part can only be appended to
+      // the conversation and never updated in place (see @assistant-ui/react-ag-ui's aggregator).
+      const view = compactionView({ outcome: "pending" });
+      expect(view).toEqual({
+        outcome: "pending",
+        preview: "",
+        tokens: null,
+        messages: null,
+        error: null,
+      });
+
+      // NO NUMBERS AND NO PREVIEW, and both are the same discipline the failure row follows: there is
+      // no range and no summary yet, so a card that drew either would be reporting something that had
+      // not happened. The row says what IS happening, which is the sentence the component renders.
+      expect(view?.preview).toBe("");
+      expect(view?.tokens).toBeNull();
+      expect(compactionText({ outcome: "pending" })).toBe("");
+
+      // A START ROW CARRIES A SUMMARY AND STILL IS NOT A RESULT: the discriminant is the outcome, so a
+      // frame that says both is refused rather than drawn as a fold. Nothing else in the wire format
+      // would produce that, and a card that guessed would be drawing a compaction that never landed.
+      expect(compactionView({ outcome: "pending", summary: "S" })).toEqual({
+        outcome: "pending",
+        preview: "",
+        tokens: null,
+        messages: null,
+        error: null,
+      });
+
+      // IT IS A CARD AND NEVER A BUBBLE, and like the other two it is never sent back: the start of a
+      // compaction is a fact about this process, not a message the next request carries.
+      expect(isCardOnly([card({ outcome: "pending" })])).toBe(true);
+      expect(toAgUiMessages([{ id: "c-1", role: "assistant", content: [card({ outcome: "pending" })] }] as never)).toEqual(
+        [],
+      );
+
+      // AND ALL THREE STACK IN ONE CONVERSATION in the order they arrived: start, then result. A
+      // rebuild hands all three back, because two of the three are recorded.
+      const three = [
+        { id: "u1", role: "user" as const, content: "hi" },
+        { id: "c-1", role: "assistant" as const, content: [card({ outcome: "pending" })] },
+        { id: "c-2", role: "assistant" as const, content: [card({ summary: "the head", tokens: 12 })] },
+      ];
+      expect(three.map((m) => m.id)).toEqual(["u1", "c-1", "c-2"]);
+      expect(compactionView((three[1].content as { data: unknown }[])[0]!.data)?.outcome).toBe("pending");
+      expect(compactionView((three[2].content as { data: unknown }[])[0]!.data)?.outcome).toBe("folded");
+    },
+  },
+  {
+    name: "a-compaction-that-failed-is-the-same-card-and-says-why",
+    run: async () => {
+      // THE CASE THIS EXISTS FOR (owner, 2026-10-05). A trigger fires, the summary call is made,
+      // and the vendor refuses it: two whole runs on a real session sat at 74% of a 1M window with an
+      // `HTTP 429` in the log and NOTHING on screen, because the frame was only built on success.
+      const view = compactionView({
+        outcome: "failed",
+        error: "HTTP 429: rate_limit_exceeded",
+      });
+      expect(view).toEqual({
+        outcome: "failed",
+        preview: "HTTP 429: rate_limit_exceeded",
+        tokens: null,
+        messages: null,
+        error: "HTTP 429: rate_limit_exceeded",
+      });
+
+      // NO NUMBERS, AND THAT IS THE POINT. A failed attempt never got as far as a range, so a card
+      // showing a size would be reporting a measurement nobody took -- the same rule that keeps a
+      // silent field null on the success half.
+      expect(view?.tokens).toBeNull();
+      expect(view?.messages).toBeNull();
+
+      // THE DISCRIMINANT IS THE SERVER'S `outcome`, NEVER THE MISSING SUMMARY. A frame with no
+      // `outcome` and no summary is a malformed frame and stays null -- reading it as a failure
+      // would draw a red card for a compaction that never happened.
+      expect(compactionView({ error: "boom" })).toBeNull();
+      expect(compactionView({ summary: "   \n\n", outcome: "failed" })).toEqual({
+        outcome: "failed",
+        preview: "",
+        tokens: null,
+        messages: null,
+        error: null,
+      });
+      // AND A FAILURE THAT NAMED NOBODY IS STILL A CARD: the row says what happened with an empty
+      // preview, which the component draws as a sentence rather than as a truncated nothing.
+      expect(compactionView({ outcome: "failed" })?.error).toBeNull();
+      // AN `outcome` WE DO NOT KNOW IS NOT A CARD EITHER -- the same discipline as a summary of the
+      // wrong type: a value that arrived is not a value we can draw.
+      expect(compactionView({ outcome: "weird", summary: "S" })).toBeNull();
+
+      // THE BODY IS THE SUMMARY AND ONLY THE SUMMARY, so a failure has none: the card draws its own
+      // sentence and the reason.
+      expect(compactionText({ outcome: "failed", error: "boom" })).toBe("");
+
+      // IT IS STILL A CARD AND NEVER A BUBBLE, and it is still never sent back to the model: the
+      // failure is a fact about the surface, and a `data` part is a view of one.
+      expect(isCardOnly([card({ outcome: "failed", error: "boom" })])).toBe(true);
+      expect(toAgUiMessages([{ id: "c-1", role: "assistant", content: [card({ outcome: "failed" })] }] as never)).toEqual(
+        [],
+      );
     },
   },
   {
