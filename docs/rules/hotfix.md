@@ -99,7 +99,7 @@
 | `prompt.md`（冻结的开头） | `(harness.kernel.llm/reset-prompt!)`——一次冷 prefill |
 | `harness.kernel/*` 的机制（`loop` / `llm` / `frames` …） | `(require 'harness.kernel.loop :reload)` 这样重编译即可：那份代码没有注册表要重装。但**已经在跑的 run 仍跑旧栈帧**，新轮次才吃到 |
 | 别的能力（`cap.hooks` / `cap.mcp` / `cap.system-prompt` / `cap.subagents`） | 各有自己的 `install!`——`harness.edge.http` 的 `start!` 就是照这份名单装的。**先读它的 docstring**：有的要参数，有的把整张表重装一遍 |
-| `ui/src` | 不适用：vite / `npm run build` |
+| `ui/src` | 不适用：vite / `pnpm run build` |
 
 拿不准就**重启**。热修省的是那一次重启，不是那一次核对——每一步都回头对着上面「怎么验」看一眼。
 

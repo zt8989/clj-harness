@@ -8,7 +8,7 @@ import { defineConfig } from "vite";
 //   @vitejs/plugin-react  compiles the TSX and drives Fast Refresh
 //   @tailwindcss/vite     compiles the stylesheet (./src/styles.css) and scans
 //                         the source tree for the utility classes it uses
-//   tsc --noEmit          is the type gate, and runs as part of `npm run build`
+//   tsc --noEmit          is the type gate, and runs as part of `pnpm run build`
 //
 // Vite bundles npm and serves the page; there is no second compiler in the loop
 // any more, so the page's dependencies all arrive through Vite's normal
@@ -49,7 +49,7 @@ import { defineConfig } from "vite";
 // server's -- they are two processes that need not be told about each other.
 // `node scripts/dev.mjs` does not even reach this default: it hands vite a port the
 // OS picked (`--ui-port` pins one), so the `port` below is only what a hand-run
-// `npm run dev` takes. `strictPort` stays because a second dev server quietly
+// `pnpm run dev` takes. `strictPort` stays because a second dev server quietly
 // landing on 5174 is a worse surprise than a failed start -- and it is what makes a
 // port handed over by dev.mjs a loud failure rather than a silent drift.
 const backend = process.env.HARNESS_BACKEND_URL ?? "http://127.0.0.1:8080";

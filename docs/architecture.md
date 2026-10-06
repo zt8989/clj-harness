@@ -98,7 +98,7 @@ model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文�
 |---|---|
 | `edge.ag-ui` | 内核事件 → AG-UI 帧（唯一一处做这个转换）；`inbound` 也在这里，**user 侧开场块**由它拼在**这场对话之后**；注入物发的是一条 **`CUSTOM` 帧**（客户端画成一张卡，而**卡不进对话**——只给屏幕，见 [client](architecture/client.md#注入物在会话栏里的一张卡)） |
 | `edge.http` | **AG-UI 边** + 管理边（JSON 端点）+ jsonl 审计写入，并且是**组合根**：`start!` 把上面那些能力装上，`stop` 再把它们撤回去 |
-| `edge.ui` | **根上那一页**：把 `ui/dist`（`npm run build` 的产物）当静态资源发出去（只 `GET`/`HEAD`、只在 `/api` 之外、不回落 `index.html`），以及没有构建时那句指名道姓的 404。`clojure -M:run` 因此不用另外起 vite 也是一个完整应用 |
+| `edge.ui` | **根上那一页**：把 `ui/dist`（`pnpm run build` 的产物）当静态资源发出去（只 `GET`/`HEAD`、只在 `/api` 之外、不回落 `index.html`），以及没有构建时那句指名道姓的 404。`clojure -M:run` 因此不用另外起 vite 也是一个完整应用 |
 | `edge.replay` | **对话那一半**的记录读侧：重建对话、续跑一场记录。run 外的显式管理动作 |
 | `edge.stats` | **审计那一半**的记录读侧：`input` 与 `model/*` 折成一条会话的几个数（轮 / 模型调用 / 用量 / 缓存命中 / 输出速度），composer 下面那条状态条读它。`records->stats` 是对记录的纯函数，`log-stats` 接一个 File——**它不知道 home 在哪**，与 `replay` 同一立场。**端点那条载荷里还带着 `edge.context` 那一节**（一次读盘、两个折） |
 | `edge.context` | 记录的第**四**个读侧（`message` 那一半的第二个读者）：最近一次模型调用把上下文窗口填到了多少——分子是那次调用报的 `prompt_tokens`，分母是**那一次调用自己行上**的 `:context-window`——以及填进去的三样各占多少（按记录的字符数**摊**出来的估算，因此三块恰好加起来等于分子）。`records->context` 是对记录的纯函数，**没有自己的端点**：那一节并进 `GET /api/threads/<stem>/stats` 的载荷，composer 里 model 左边那颗圈与它的面板读它。见 [edge](architecture/edge.md) |
@@ -106,7 +106,7 @@ model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文�
 
 作者/测试工具（`dev/harness/`，不在生产路径上）：`wire`（SSE 解析 + 帧结构校验）、
 `evals`（把某 thread 跑过的 `eval` 读出来，供人决定晋升）、`repl`（起服务后落进 REPL）、
-`e2e_server`（`npm test` 起的那个后端）。
+`e2e_server`（`pnpm test` 起的那个后端）。
 
 ## 章节
 
@@ -127,8 +127,8 @@ model 左边那颗圈，以及 [client](architecture/client.md) 里「上下文�
 
 ```bash
 clojure -M:test -m harness.test-runner   # 后端离线全量；只跑几个命名空间就把名字接在后面
-cd ui && npm test                        # 前端端到端全量（自带后端，不需要 api-key / 模型）
-cd ui && npm run build                   # tsc --noEmit + vite build
+cd ui && pnpm test                        # 前端端到端全量（自带后端，不需要 api-key / 模型）
+cd ui && pnpm run build                   # tsc --noEmit + vite build
 ```
 
 **定向跑也要走 runner 的那扇门**：`(isolate!)` 加 `run-tests` 只抄了协议的前半截——不查判据，

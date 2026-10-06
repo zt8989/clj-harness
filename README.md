@@ -31,7 +31,7 @@ node scripts/dev.mjs --scripted  # 脚本厂商替身：默认回放 scripts/exa
 **只起后端，页面发构建产物**（一个进程、一个地址）：
 
 ```bash
-cd ui && npm install && npm run build   # 前置：一次性；改过 ui/src 要重跑
+cd ui && pnpm install && pnpm run build   # 前置：一次性；改过 ui/src 要重跑
 cd .. && clojure -M:run                 # http://localhost:8080 既是页面也是 API
 ```
 
@@ -70,13 +70,13 @@ node scripts/run.mjs --restart --port 8081 --detach --grace 30
 
 ```bash
 clojure -M:run --port 0   # 启动横幅会打印真正绑到的端口，以及发的是哪份 dist
-cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> npm run dev
+cd ui && HARNESS_BACKEND_URL=http://127.0.0.1:<那个端口> pnpm run dev
 ```
 
 停止：`Ctrl+C`，或 `node scripts/run.mjs --stop --port <端口>`，或 `Get-Process clojure,node | Stop-Process`。
 
 验证：`clojure -M:test -m harness.test-runner`（后端；只跑几个命名空间就把名字接在后面）、
-`cd ui && npm test`（前端 vitest）。**别自己拼 `(isolate!)` + `run-tests`**——家目录隔离、判据、
+`cd ui && pnpm test`（前端 vitest）。**别自己拼 `(isolate!)` + `run-tests`**——家目录隔离、判据、
 跑完删临时目录都挂在 runner 上，理由见 `AGENTS.md`。
 
 ## 配置说明

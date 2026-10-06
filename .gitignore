@@ -20,3 +20,7 @@ ui/dist-profile/
 .worktrees/
 # Playwright CLI output (may contain credentials)
 .playwright-cli/
+
+# npm is no longer the package manager for `ui/` (pnpm is, 2026-10-06); the stale
+# lock file stays on disk but out of the index.
+ui/package-lock.json

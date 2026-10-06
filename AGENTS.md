@@ -23,13 +23,19 @@ Single-context: `CONTEXT.md` at repo root + `docs/adr/`. See `docs/agents/domain
 
 ```bash
 git worktree add .worktrees/<slug> -b <slug> main   # 开工
-cd .worktrees/<slug>/ui && npm i --offline          # 新树没有 node_modules；只吃本机 npm 缓存
+cd .worktrees/<slug>/ui && pnpm install --prefer-offline   # 新树没有 node_modules；吃 pnpm store
 ```
 
 新树看不见主检出里**未提交**的改动（它从 `main` 切出）——主检出那份是权威，别两头改同一处。
-`npm i --offline` 不联网、也不碰主检出那份 `node_modules`：缓存缺哪个包就点名报错，不许改成联网装。
-装完照旧 `npm run build` / `npm run typecheck` / `npm test`。
-只改文档、不动代码的那种不必开树——直接在主检出改、提交，省一趟 `npm i --offline`。
+**包管理是 pnpm**（`ui/`，`packageManager` 钉在 `package.json` 里，锁文件是 `pnpm-lock.yaml`）。
+`pnpm install --prefer-offline` 走本机 store，不联网、也不碰主检出那份 `node_modules`：store 缺哪个包
+就点名报错，不许改成联网装。装完照旧 `pnpm run build` / `pnpm run typecheck` / `pnpm test`。
+只改文档、不动代码的那种不必开树——直接在主检出改、提交，省一趟安装。
+
+pnpm 的 `node_modules` 是**严格**的：只有写在 `package.json` 里的包能 import。npm 会顺手把传递依赖
+提升到顶层，于是「代码 import 了某个传递依赖」在 npm 下能过、换 pnpm 就报 module not found——
+这类不是迁移要修的东西，是迁移**照出来**的欠账（2026-10-06：`@ag-ui/core` 与 `@assistant-ui/core`
+本来就被 import 却没被声明，补进 `dependencies` 才是修法）。
 
 **先验收，再合并**（owner 定的规矩，2026-10-03）：活干完**不等于**该合进 `main`。干完就停下，把现场
 交代清楚——工作树在哪、分支叫什么、怎么看（起服务的命令、要看的那一页、你测过的数字）——然后
@@ -74,9 +80,9 @@ clojure -M:test -m harness.test-runner
 clojure -M:test -m harness.test-runner harness.cap.todos-test harness.infra.db-test
 
 # 前端
-cd ui && npm test          # vitest
-cd ui && npm run typecheck # tsc
-cd ui && npm run build     # tsc + vite
+cd ui && pnpm test          # vitest
+cd ui && pnpm run typecheck # tsc
+cd ui && pnpm run build     # tsc + vite
 ```
 
 **后端一轮跑有硬限制**：一个命名空间超 **300s**（`CLJ_HARNESS_TEST_NAMESPACE_TIMEOUT_SECS`）、整轮超
@@ -94,7 +100,7 @@ cd ui && npm run build     # tsc + vite
 
 ```bash
 node scripts/dev.mjs --scripted                  # 起一个走查用的服务：隔离家、OS 分配端口、默认回放
-                                                 # scripts/example.json —— 先 npm run build，页面由后端
+                                                 # scripts/example.json —— 先 pnpm run build，页面由后端
                                                  # 从 ui/dist 发出。**它不驱动浏览器**（见下）
 node scripts/dev.mjs --scripted my.json          # 换脚本（照 scripts/example.json 的形状改）
 

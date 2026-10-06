@@ -22,7 +22,7 @@
 //   * `@` resolves here the way it does in vite.config.js, because a component
 //     imports its neighbours that way.
 //   * the JSX compiles through esbuild, which reads tsconfig.json's `jsx` -- the
-//     same setting `npm run build` gates.
+//     same setting `pnpm run build` gates.
 //
 // A SUITE'S OWN IMPORTS STAY RELATIVE (`../../src/lib/format`), so which files a
 // suite reaches for is read off its import list rather than out of the alias.

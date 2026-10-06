@@ -5,7 +5,7 @@
 // ~/.clj-harness, an api-key, or a model. So this spawns one whose provider is
 // `harness.fake`'s scripted double, on a port the OS picks, writing its logs into
 // a temp directory. Two consequences worth stating because they are what makes
-// the suite trustworthy: every run replays identically, and `npm test` cannot be
+// the suite trustworthy: every run replays identically, and `pnpm test` cannot be
 // satisfied by a stale server that happened to be listening on 8080.
 //
 // The control channel is a FILE, not an endpoint. The server re-reads it whenever
@@ -171,7 +171,7 @@ export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number
   const env = { ...process.env, CLJ_HARNESS_HOME: home };
 
   // stdio: the child's startup output is captured for the failure message rather
-  // than streamed, so `npm test` output stays the tests'. Its stderr is kept
+  // than streamed, so `pnpm test` output stays the tests'. Its stderr is kept
   // separate for the same reason -- a Clojure warning must not look like a test
   // problem.
   const proc = spawn(
@@ -193,7 +193,7 @@ export async function startHarness({ timeoutMs = 120_000 }: { timeoutMs?: number
   const { port, output } = await waitForReady(proc, timeoutMs);
 
 
-  // A SIGNAL IS NOT AN `afterAll`. `npm test` interrupted never reaches the hook that calls
+  // A SIGNAL IS NOT AN `afterAll`. `pnpm test` interrupted never reaches the hook that calls
   // `stop`, and the server has no reason to mind: it keeps serving a run nobody is watching.
   // So a signal stops the tree -- and RE-RAISES rather than exiting here, because a listener is
   // what stops Node from killing the process on its own, and a test run that cannot be
