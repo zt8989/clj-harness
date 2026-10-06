@@ -528,6 +528,23 @@ const shortCount = (n: number | undefined): string => {
   return String(n);
 };
 
+/// THE OPTION'S OWN WORDS, PLUS THE ENUM NAME UNLESS THEY ALREADY ARE IT. One line of
+/// policy for the two faces: English reads `in-place`, Chinese reads `原位追加`, and only the
+/// second needs the first alongside it. `includes` rather than `===` so a translation that
+/// wraps the name (`in-place（…）`) still counts as already naming it.
+///
+/// THE KEY IS TYPED, not `string`: `TFunction<"settings">` is what makes a missing catalog
+/// entry a compile error here rather than a raw key drawn on somebody's screen, and a
+/// `string` parameter would throw that away for the sake of one helper.
+const enumBeside = (
+  t: Translate,
+  key: "form.instructionUpdatesInPlace" | "form.instructionUpdatesReplace",
+  enumName: string,
+): string => {
+  const word: string = t(key);
+  return word.includes(enumName) ? word : `${word} · ${enumName}`;
+};
+
 const modelFactsSummary = (row: ModelRow, t: Translate): string => {
   const f = modelFactsOf(row);
   const modality = (dirs: readonly string[]): string => {
@@ -653,10 +670,15 @@ const ModelRowEditor: FC<{
                 that never touched this control leaves every other model's line alone. */}
             {/* ONE LINE, NOT TWO (owner, 2026-10-03: 'instruction-updates must not wrap onto a
                 second line'): the LABEL TEXT moves into the select's accessible name, so
-                what stays in the flow is the control alone -- no wrapping label beside it. */}
+                what stays in the flow is the control alone -- no wrapping label beside it.
+                That is why the option words are SHORT ('原位追加' / '整条替换') rather than
+                the sentences that explain them: the whole explanation is the `title`, so it
+                is one hover away and costs the row no width. A row whose label read the
+                sentence out loud is what the rule was written against. */}
             <select
               data-slot="settings-provider-model-instruction-updates"
               aria-label={t("form.instructionUpdatesLabel")}
+              title={t("form.instructionUpdatesHint")}
               className={`${inputClass} w-auto`}
               value={row["instruction-updates"] ?? ""}
               onChange={(e) => {
@@ -668,8 +690,17 @@ const ModelRowEditor: FC<{
               }}
             >
               <option value="">{t("form.instructionUpdatesUndeclared")}</option>
-              <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
-              <option value="replace">{t("form.instructionUpdatesReplace")}</option>
+              {/* THE ENUM NAME RIDES ALONGSIDE THE WORD WHERE THE WORD IS NOT ALREADY THE
+                  NAME, because the two are one fact said twice: a person who has read
+                  docs/architecture/providers.md is looking for `in-place`, and one who has not
+                  is looking for what it does. The English face already reads as the enum, so
+                  saying it there would print `in-place · in-place`. */}
+              <option value="in-place">
+                {enumBeside(t, "form.instructionUpdatesInPlace", "in-place")}
+              </option>
+              <option value="replace">
+                {enumBeside(t, "form.instructionUpdatesReplace", "replace")}
+              </option>
             </select>
           </div>
           <div className="flex items-center gap-2">
