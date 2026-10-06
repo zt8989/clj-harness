@@ -129,7 +129,7 @@
     "limitsNote": "只是报出来，不强制执行。拿不准的就别填。",
     "instructionUpdatesLabel": "指令变了怎么送达",
     "instructionUpdatesUndeclared": "未声明",
-    "instructionUpdatesHint": "这个端点在对话开始之后，还收不收 system / developer 消息。收（原位追加）：开头的 system 不动，变化作为末尾一条 developer 送出去；不收（整条替换）：照旧重写开头那条 system。拿不准就别声明——服务端默认走「整条替换」那一档，它是能恢复的那一半。"
+    "instructionUpdatesHint": "这个端点在对话开始之后，还收不收 system / developer 消息。收得住（in-place）：开头的 system 不动，变化作为末尾一条 developer 送出去。收不住（replace）：照旧重写开头那条 system。拿不准就别声明——服务端默认走 replace，那是能恢复的那一半。"
   },
   "mcp": {
     "heading": "MCP 服务器",
