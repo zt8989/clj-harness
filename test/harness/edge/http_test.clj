@@ -6823,6 +6823,56 @@
            (is (some #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames)
                "the model got its turn: the vendor accepted the history")))))))
 
+(deftest a-run-that-closes-a-dead-run-off-talks-to-the-conversation-it-holds
+  ;; THE HALF OF THE REPAIR THAT WAS MISSING, and it is the one that BRICKS A CONVERSATION
+  ;; rather than merely reading a record right. The run edge repairs a dead run before it
+  ;; starts (`close-off-open-run!`, the `:else` branch of `handle-run`), and what that repair
+  ;; wrote was the FILE. But a session this process holds is not read from its file: the run
+  ;; continues from `sessions/messages`, which is memory. So the repair left the cut-off call
+  ;; unanswered in exactly the array every OpenAI-shaped vendor refuses, and the run was
+  ;; refused by name before the provider was ever called. Measured on two real sessions
+  ;; (2026-10-06, 4c775868 / 47599dbe): each repair landed, and each very next run died with
+  ;; `unanswered .. call-199` / `call_01a10ea4948875759610402d`. Nothing a person can press
+  ;; gets a conversation out of that.
+  ;;
+  ;; The premise is therefore a session this process HOLDS whose last call has no answer --
+  ;; the shape a page that reopened a truncated thread leaves it in -- and a run edge that is
+  ;; about to repair it and start the next turn.
+  (wipe-dir! (log-dir))
+  (with-vendor-shaped
+   "close-off-live"
+   (fn []
+     (let [tid  "close-off-live"
+           f    (log-file tid)
+           ;; THE RECORD AS A KILLED PROCESS LEFT IT: the person's turn and a call the run
+           ;; never returned from, so the log ends with that call open.
+           rows (concat (action-rows 1 "r1" [{:id "u1" :role "user" :content "看看这个项目"}])
+                        (map (fn [frame]
+                               (row-json {:ts 2 :runId "r1" :kind "event" :payload frame}))
+                             (mapcat (ag/outbound tid "r1")
+                                     [(ev/run-start) (ev/tool-call "c1" "read" "{}")])))]
+       (io/delete-file f true)
+       (.mkdirs (.getParentFile f))
+       (spit f (str (str/join "\n" rows) "\n") :encoding "UTF-8")
+       ;; AND THIS PROCESS IS HOLDING THE CONVERSATION, which is the half the file cannot
+       ;; reach: it is holding it WITH the call still unanswered, as the run that died did.
+       (sessions/append! tid "r1" [{:id "u1" :role "user" :content "看看这个项目"}])
+       (testing "the premise: the conversation this process holds owes an answer"
+         (is (seq (sessions/messages tid))))
+       (testing "and the next run -- whose edge closes the dead run off first -- reaches the model"
+         (let [resp   (post-run tid {:append [{:id "u2" :role "user" :content "继续"}]})
+               frames (wire/frames-from-sse (.body resp))]
+           (is (= 200 (.statusCode resp)))
+           (is (not-any? #(= "RUN_ERROR" (:type %)) frames)
+               (str "saw " (pr-str (mapv :type frames))))
+           (is (some #(= "TEXT_MESSAGE_CONTENT" (:type %)) frames)
+               "the vendor accepted the history, so the model got its turn")))
+       (testing "which it can ONLY do if the repair reached the conversation, not just the file"
+         (is (= [] (vec (llm/unanswered-tool-calls (sessions/messages tid))))))
+       (testing "and the record the repair wrote still says it"
+         (let [records (replay/lines->records (str/split-lines (slurp f :encoding "UTF-8")))]
+           (is (= 1 (count (filter #(= "session/closed-off" (replay/kind %)) records))))))))))
+
 (deftest a-rebuild-during-a-live-run-leaves-the-record-alone
   ;; THE CASE THAT MOTIVATED THE REGISTRY. A client that refreshed into a running
   ;; session has a fresh runtime, so its own `isRunning` is false and it may well aim

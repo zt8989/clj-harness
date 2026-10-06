@@ -4559,9 +4559,20 @@ not a line -- the reasoning family below says which of the two it is."
   and the caller of this function -- a rebuild, today -- goes on to refuse the log by
   name, which is the honest answer for a conversation that has not stopped yet.
 
-  BEST EFFORT ON PURPOSE. A corrupt log throws here and is left to `rebuild` to
-  refuse by name -- repairing is what this does, and the reader that follows says
-  precisely what is wrong with a log nobody can repair."
+  IT REPAIRS THE MEMORY TOO, AND THAT HALF WAS MISSING FOR A WEEK (owner, 2026-10-06).
+  The repair above writes the FILE, but a conversation this process holds is not read
+  from its file: `rebuild-post` answers a live session from memory (`sessions/drawn`), and
+  the next run of it continues from memory too. So a log closed off while the session was
+  here left the cut-off call unanswered in exactly the array the vendor refuses -- measured
+  on two real sessions twenty seconds after each repair had landed (`call-199` and
+  `call_01a10ea4948875759610402d`). The appended frames are therefore also folded into
+  the conversation (`sessions/settle!`, below), so both readers carry the same answers and
+  a conversation that is repaired is repairable TWICE over: once in the file for the next
+  process, once in memory for the run that is about to start.
+
+  BEST EFFORT ON PURPOSE. A corrupt log throws here and is left to `rebuild` to refuse by
+  name -- repairing is what this does, and the reader that follows says precisely what is
+  wrong with a log nobody can repair."
   [stem ^java.io.File path]
   (when-not (running? stem)
     (try
@@ -4579,7 +4590,28 @@ not a line -- the reasoning family below says which of the two it is."
           ;; what happened and the rows are what every reader folds into the conversation, and a
           ;; record missing one is not normalized -- so the repair that exists to make a killed
           ;; session continuable would leave it read-only instead (`.scratch/record-normalization`).
-          (log-messages! stem run-id messages))
+          (log-messages! stem run-id messages)
+          ;; AND THE SAME ANSWERS INTO THE CONVERSATION THIS PROCESS IS HOLDING, which is the half
+          ;; that was missing (owner, 2026-10-06). THE REPAIR IS THE FILE'S UNTIL IT IS ALSO THE
+          ;; MEMORY'S: `rebuild-post` answers a LIVE session from memory (`sessions/drawn`) and never
+          ;; repairs it, so the frames written just above went into the file ALONE -- and the next run
+          ;; of that conversation read the memory, where the cut-off call was still unanswered, so it
+          ;; was refused by name (`harness.kernel.llm/unanswered-tool-calls`) before the provider was
+          ;; called at all. Measured that day on two sessions: 4c775868 refused `call-199` and 47599dbe
+          ;; refused `call_01a10ea4948875759610402d`, twenty seconds after the repair had written the
+          ;; answer for each into its file.
+          ;;
+          ;; `settle!` IS THE FOLD RATHER THAN A COPY: these are the frames the run would have
+          ;; emitted, put in by the same function every run's own ending goes through, and the tool
+          ;; message each one yields is the SAME `frames/tool-message` row the record now carries -- so
+          ;; what memory holds is what the record says, which is the only way its two readers can be
+          ;; said to agree.
+          ;;
+          ;; AND IT IS A NO-OP FOR A CONVERSATION NOBODY HERE HOLDS, because `settle!` folds into the
+          ;; table and the table has to be there: repairing a record this process does not serve must
+          ;; not BIRTH a session (`live-entry`'s own prohibition), and the next reader builds from the
+          ;; repaired file instead.
+          (sessions/settle! stem run-id frames nil))
         (mapv (fn [{:keys [run-id frames]}] {:run-id run-id :frames (mapv :type frames)})
               closures))
       (catch Throwable t
