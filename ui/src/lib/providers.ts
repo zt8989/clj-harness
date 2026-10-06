@@ -12,6 +12,7 @@
 import type { TFunction } from "i18next";
 
 import type { ProviderKey } from "@/lib/provider-key";
+import type { ModelEntry } from "@/lib/model-entry";
 
 import { API_BASE } from "@/lib/threads";
 
@@ -162,19 +163,13 @@ export type ProviderPayload = {
   /// THE DEFAULT MODEL, when the form has one to name. It may be left OUT: the
   /// server then takes the first id the vendor's own listing answers with.
   model?: string;
-  /// MAY BE EMPTY, and that is a complete provider: its ids come from its own
-  /// `/models` listing (`harness.cap.providers/vendor-model-tables`).
-  models: readonly {
-    id: string;
-    /// EMPTY ARRAYS ARE 'THE FILE SAID NOTHING' -- the server reads them as
-    /// silence, fills the modalities from the database, and floors at text.
-    input: readonly string[];
-    output: readonly string[];
-    name?: string;
-    "context-window"?: number;
-    "max-output-tokens"?: number;
-    "instruction-updates"?: "in-place" | "replace";
-  }[];
+  /// MODEL ENTRIES, NOT REPORT ROWS, and the two are not the same thing: what a write
+  /// carries is what config.edn may say about a model (`lib/model-entry.ts`, and the
+  /// server's `model-keys` is the list it enforces). A report row carries the database's
+  /// answers BESIDE that under `-suggested` keys, which is what a form shows and what it
+  /// must never send back -- one of them arriving here is a refused write. `entryOf` is
+  /// the projection, and the form's save goes through it.
+  models: readonly ModelEntry[];
   "api-key"?: string;
 };
 

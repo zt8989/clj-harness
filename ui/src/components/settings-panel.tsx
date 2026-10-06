@@ -86,6 +86,7 @@ import {
   type ProviderRow,
   type Registry,
 } from "@/lib/providers";
+import { entryOf } from "@/lib/model-entry";
 import { drawnInSettings, hasKey } from "@/lib/provider-key";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
@@ -153,6 +154,30 @@ const Field: FC<{
 
 const inputClass =
   "h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:border-ring";
+
+/// A LABEL AND ITS CONTROL, side by side, in the one row's rhythm (owner, 2026-10-06).
+/// NOT the page's `Field`, and the difference is the axis: `Field` stacks a label ABOVE a
+/// full-width input, which is the right shape for a value you type into and the wrong one
+/// here -- inside the facts fold the controls are checkboxes and a short select, so a label
+/// above each would spend four lines saying 输入 / 输出 / 对话中途系统么送达 before the
+/// first tick box appeared.
+///
+/// THE LABEL COLUMN IS FIXED (`w-28`) so every row's control STARTS IN THE SAME PLACE.
+/// Without it the boxes line up under a ragged edge and the eye reads the fold as one
+/// paragraph again -- the thing the labels were added to end.
+///
+/// `w-28` AND NOT `w-20`, because the column has to hold the LONGEST label the fold draws
+/// on ONE line (owner, 2026-10-06: '对话中途系统消息'). It was `w-20` when the labels were
+/// 输入 / 输出 / 指令变了怎么送达 / 上下限, and eight characters do not fit in eighty
+/// pixels: the longest label wrapped onto a second line and pushed its control down, so
+/// the very row the fixed column was added to straighten was the one row that broke it.
+/// The column is sized by its longest word, so that word is the one worth picking short.
+const FactRow: FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="flex w-full items-center gap-3">
+    <span className="w-28 shrink-0 text-xs font-medium">{label}</span>
+    {children}
+  </div>
+);
 
 // ------------------------------------------------------------------- General
 
@@ -551,10 +576,14 @@ const ModelRowEditor: FC<{
   onRemove: () => void;
 }> = ({ row, canRemove, onChange, onRemove }) => {
   const { t } = useTranslation("settings");
-  // WHAT THE DATABASE SAYS, as the fold's summary and the two placeholders read it.
-  // Computed once here rather than inside the summary helper so the placeholders and
-  // the summary cannot disagree about which row they are describing.
-  const factHint = row["name-suggested"] ?? "";
+  // WHAT models.dev ANSWERS FOR THE TWO COUNTS, as this row's placeholder state -- what
+  // the fold would fill in where the file is silent. The summary above shows the RESOLVED
+  // answer (file first, database second); these are the database's half on its own.
+  //
+  // IT WAS ALSO, until owner, 2026-10-06 ('上下限后面的文字描述直接去掉'), the `title` of
+  // a sentence drawn under these boxes explaining where they come from. That sentence is
+  // gone; the placeholders still carry the same fact, which is the half that was doing the
+  // real work anyway.
   const countFacts: Record<"context-window" | "max-output-tokens", number | undefined> = {
     "context-window": row["context-window-suggested"],
     "max-output-tokens": row["max-output-tokens-suggested"],
@@ -573,7 +602,9 @@ const ModelRowEditor: FC<{
         />
         {/* THE NAME IS OPTIONAL, and it is the ONE fact the form offers from the
             outside: the database's own name for this id (`name-suggested`) shows as
-            the placeholder, and typing over it is the only way a name is written.
+            the placeholder, and typing over it is the only way a name is written. It is
+            also the LAST of the outside world's three suggestions still on screen -- the
+            counts' placeholders beside it -- now that the sentence under them is gone.
             Leaving it empty keeps the file silent and the resolution answers the
             database's name -- or the id -- when somebody asks what this model is
             called. */}
@@ -622,64 +653,112 @@ const ModelRowEditor: FC<{
           {modelFactsSummary(row, t)}
         </summary>
         <div className="mt-2 flex flex-col gap-2">
+          {/* A LABEL BESIDE EVERY CONTROL (owner, 2026-10-06: '改成 label+input 的形式').
+              The fold used to be one strip of bare checkboxes whose only names were the
+              catalog's own `text` / `image`, then a `输出：文本` SPAN that was not a control
+              at all, then a select with no label but a hover title. Four controls, no
+              questions attached to them. Each is now a row that can be answered: 输入 /
+              输出 / 对话中途系统消息 / 上下限. */}
           <div className="flex items-center gap-3">
-            {(["text", "image"] as const).map((modality) => (
-              <label key={modality} className="flex items-center gap-1 text-xs">
-                <input
-                  type="checkbox"
-                  // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
-                  // vocabulary ("text" / "image") and is printed as-is, while the
-                  // accessible name is a sentence, so each branch names its own key.
-                  aria-label={
-                    modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
-                  }
-                  checked={row.input.includes(modality)}
-                  onChange={(e) => {
-                    const next = e.target.checked
-                      ? [...row.input, modality]
-                      : row.input.filter((m) => m !== modality);
-                    onChange({ ...row, input: next });
-                  }}
-                />
-                {modality}
-              </label>
-            ))}
-            <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
-            {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
-                as one whose line says `replace`: the first is silence the server fills
-                with the conservative default, the second is something a person wrote. So
-                the empty option DELETES the key rather than writing `replace`, and a save
-                that never touched this control leaves every other model's line alone. */}
-            {/* ONE LINE, NOT TWO (owner, 2026-10-03: 'instruction-updates must not wrap onto a
-                second line'): the LABEL TEXT moves into the select's accessible name, so
-                what stays in the flow is the control alone -- no wrapping label beside it. */}
-            <select
-              data-slot="settings-provider-model-instruction-updates"
-              aria-label={t("form.instructionUpdatesLabel")}
-              className={`${inputClass} w-auto`}
-              value={row["instruction-updates"] ?? ""}
-              onChange={(e) => {
-                const next = { ...row };
-                const value = e.target.value;
-                if (value === "") delete next["instruction-updates"];
-                else next["instruction-updates"] = value as "in-place" | "replace";
-                onChange(next);
-              }}
-            >
-              <option value="">{t("form.instructionUpdatesUndeclared")}</option>
-              <option value="in-place">{t("form.instructionUpdatesInPlace")}</option>
-              <option value="replace">{t("form.instructionUpdatesReplace")}</option>
-            </select>
+            <FactRow label={t("form.inputLabel")}>
+              {(["text", "image"] as const).map((modality) => (
+                <label key={modality} className="flex items-center gap-1 text-xs">
+                  <input
+                    type="checkbox"
+                    // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
+                    // vocabulary ("text" / "image") and is printed as-is, while the
+                    // accessible name is a sentence, so each branch names its own key.
+                    aria-label={
+                      modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
+                    }
+                    checked={row.input.includes(modality)}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...row.input, modality]
+                        : row.input.filter((m) => m !== modality);
+                      onChange({ ...row, input: next });
+                    }}
+                  />
+                  {modality}
+                </label>
+              ))}
+            </FactRow>
           </div>
-          <div className="flex items-center gap-2">
-            {(["context-window", "max-output-tokens"] as const).map((count) => (
-              <label key={count} className="flex items-center gap-1 text-xs">
-                {count === "context-window" ? t("form.context") : t("form.maxOut")}
+          {/* OUTPUT IS ITS OWN ROW WITH A REAL CHECKBOX. It was a span saying `输出：文本`
+              because text is the only output type the catalog carries (`output-types` is
+              `#{:text}`) -- so the fact was constant. A constant still belongs beside its
+              name, and one day the vocabulary grows a second type: the control is already
+              where that fact belongs, and `output-types` is the only place to add the word. */}
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.outputLabel")}>
+              {(["text"] as const).map((modality) => (
+                <label key={modality} className="flex items-center gap-1 text-xs">
+                  <input
+                    type="checkbox"
+                    aria-label={t("form.givesText")}
+                    checked
+                    disabled
+                    onChange={() => undefined}
+                  />
+                  {modality}
+                </label>
+              ))}
+            </FactRow>
+          </div>
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.instructionUpdatesLabel")}>
+              {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
+                  as one whose line says `replace`: the first is silence the server fills
+                  with the conservative default, the second is something a person wrote. So
+                  the empty option DELETES the key rather than writing `replace`, and a save
+                  that never touched this control leaves every other model's line alone. */}
+              {/* THE OPTION WORDS ARE THE ENUM NAMES, UNTRANSLATED (owner, 2026-10-06:
+                  'select 直接显示英文就行，不用翻译'). They are two short tokens from
+                  `cap/providers.clj`, and translating them made the row WIDER than the
+                  question it answers -- a select whose label is longer than its longest
+                  option reads as a control for something bigger than it is. What each one
+                  means is the LABEL's job and the `title`'s; the option only has to be the
+                  value a person finds written in config.edn. */}
+              <select
+                data-slot="settings-provider-model-instruction-updates"
+                aria-label={t("form.instructionUpdatesLabel")}
+                title={t("form.instructionUpdatesHint")}
+                className={`${inputClass} w-auto`}
+                value={row["instruction-updates"] ?? ""}
+                onChange={(e) => {
+                  const next = { ...row };
+                  const value = e.target.value;
+                  if (value === "") delete next["instruction-updates"];
+                  else next["instruction-updates"] = value as "in-place" | "replace";
+                  onChange(next);
+                }}
+              >
+                <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+                <option value="in-place">in-place</option>
+                <option value="replace">replace</option>
+              </select>
+            </FactRow>
+          </div>
+          {/* THE TWO COUNTS, LABELLED LIKE THE ROWS ABOVE. They were one row of two
+              bare number boxes each preceded by its own word (`上下文 1000000`), which read
+              as two fields rather than the pair they are -- and `上下文` is the file's
+              `:context-window` under a different name, while the accessible name said the
+              raw key. Label and accessible name are the same string here, and the raw key
+              is what it says: it names the config.edn key itself. */}
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.countsLabel")}>
+              {(["context-window", "max-output-tokens"] as const).map((count) => (
                 <Input
+                  key={count}
                   // The accessible name keeps the field's raw key, which is what the
                   // English aria-label was; it is the one string here that does not
                   // translate, because it names the config.edn key itself.
                   aria-label={
+                    count === "context-window"
+                      ? t("form.contextWindow")
+                      : t("form.maxOutputTokens")
+                  }
+                  title={
                     count === "context-window"
                       ? t("form.contextWindow")
                       : t("form.maxOutputTokens")
@@ -696,19 +775,8 @@ const ModelRowEditor: FC<{
                     onChange(next);
                   }}
                 />
-              </label>
-            ))}
-            {/* THE MODALITY CHECKBOXES carry the same suggestion in their PLACEHOLDER
-                state (the `title`, since a checkbox has none): what models.dev says this
-                model takes, so an unticked pair reads as 'the file is silent' rather than
-                'it takes nothing'. The resolution's own answer is what the summary
-                already shows. */}
-            <span
-              className="text-muted-foreground text-xs"
-              title={factHint}
-            >
-              {t("form.factsHint")}
-            </span>
+              ))}
+            </FactRow>
           </div>
           <p className="text-muted-foreground text-[10px]">{t("form.limitsNote")}</p>
         </div>
@@ -723,6 +791,10 @@ type Draft = {
   baseUrl: string;
   protocol: string;
   apiKey: string;
+  /// REPORT ROWS, AS THE DRAFT HOLDS THEM -- not entries, and the difference is the
+  /// whole of `lib/model-entry.ts`: the report offers the database's answers beside
+  /// the file's, and only the file's may be written. The draft is therefore a draft of
+  /// what a SAVE projects, not of what a save sends -- `entryOf` is what crosses.
   models: ModelRow[];
   editing: boolean;
 };
@@ -825,7 +897,16 @@ const ProviderForm: FC<{
         // NAMED model, and came back as "it does not declare one" for a vendor that had
         // never been asked.
         ...(draft.models[0] !== undefined ? { model: draft.models[0].id } : {}),
-        models: draft.models,
+        // AND THE ROWS CROSS AS ENTRIES, not as the report's rows. The report RIDES five
+        // suggested keys beside what the file said (`name-suggested` and the four beside
+        // it) so a form can show them; a config.edn model entry may carry none of them,
+        // and the server refuses the whole write when one arrives. That refusal is what a
+        // person met on a provider the database knows, having changed nothing: "model
+        // \"cn:deepseek-v4.1-flash\" of provider :workbuddy carries [:name-suggested], which it
+        // does not understand". `entryOf` is the projection, and it is a FUNCTION rather
+        // than a type because only a function keeps a key added to the report next month
+        // from reaching the writer by accident -- see `lib/model-entry.ts`.
+        models: draft.models.map(entryOf),
         // ABSENT when the field is empty: that means "leave .env alone", which is
         // what an untouched key field means. (The server refuses an empty string.)
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),

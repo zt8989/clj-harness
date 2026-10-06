@@ -93,8 +93,11 @@
 答案，而一次解析要的是能撑一周的答案。
 
 **报告照文件说，解析才补。** `registry-report` 的 model 行给的是文件里写的样子（没写的模态渲染成空数组，
-并另带一个 `name-suggested` 建议），`active-provider` / `GET /api/model` 给的才是补过的事实
-（多一个 `:model-name`）。
+并另带五个建议键：`name-suggested` / `input-suggested` / `output-suggested` /
+`context-window-suggested` / `max-output-tokens-suggested`），`active-provider` / `GET /api/model`
+给的才是补过的事实（多一个 `:model-name`）。**建议只走展示这条路**：`model-keys` 不认它们，
+表单保存时必须先过一遍投影（`ui/src/lib/model-entry.ts` 的 `entryOf`）——报告的行原样发回去，
+整个写入会被 `check-model` 按未知键退回（2026-10-06：什么都没改的人保存不了）。
 
 词汇表就是本 harness 真搬得动的类型（`:input` ⊆ `#{:text :image}`，`:output` ⊆ `#{:text}`）：
 数据库说这个模型收 `:video`，进到解析里也只剩 `:text` / `:image`。声明一个搬不动的东西仍然是谎话。
