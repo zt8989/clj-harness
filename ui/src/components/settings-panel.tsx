@@ -155,6 +155,23 @@ const Field: FC<{
 const inputClass =
   "h-8 w-full rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:border-ring";
 
+/// A LABEL AND ITS CONTROL, side by side, in the one row's rhythm (owner, 2026-10-06).
+/// NOT the page's `Field`, and the difference is the axis: `Field` stacks a label ABOVE a
+/// full-width input, which is the right shape for a value you type into and the wrong one
+/// here -- inside the facts fold the controls are checkboxes and a short select, so a label
+/// above each would spend three lines saying 输入 / 输出 / 指令变了怎么送达 before the
+/// first tick box appeared.
+///
+/// THE LABEL COLUMN IS FIXED (`w-20`) so the three rows' controls START IN THE SAME PLACE.
+/// Without it the boxes line up under a ragged edge and the eye reads the fold as one
+/// paragraph again -- the thing the labels were added to end.
+const FactRow: FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className="flex w-full items-center gap-3">
+    <span className="w-20 shrink-0 text-xs font-medium">{label}</span>
+    {children}
+  </div>
+);
+
 // ------------------------------------------------------------------- General
 
 /// The three knobs, editable. What makes this different from the composer's
@@ -528,23 +545,6 @@ const shortCount = (n: number | undefined): string => {
   return String(n);
 };
 
-/// THE OPTION'S OWN WORDS, PLUS THE ENUM NAME UNLESS THEY ALREADY ARE IT. One line of
-/// policy for the two faces: English reads `in-place`, Chinese reads `原位追加`, and only the
-/// second needs the first alongside it. `includes` rather than `===` so a translation that
-/// wraps the name (`in-place（…）`) still counts as already naming it.
-///
-/// THE KEY IS TYPED, not `string`: `TFunction<"settings">` is what makes a missing catalog
-/// entry a compile error here rather than a raw key drawn on somebody's screen, and a
-/// `string` parameter would throw that away for the sake of one helper.
-const enumBeside = (
-  t: Translate,
-  key: "form.instructionUpdatesInPlace" | "form.instructionUpdatesReplace",
-  enumName: string,
-): string => {
-  const word: string = t(key);
-  return word.includes(enumName) ? word : `${word} · ${enumName}`;
-};
-
 const modelFactsSummary = (row: ModelRow, t: Translate): string => {
   const f = modelFactsOf(row);
   const modality = (dirs: readonly string[]): string => {
@@ -640,78 +640,112 @@ const ModelRowEditor: FC<{
           {modelFactsSummary(row, t)}
         </summary>
         <div className="mt-2 flex flex-col gap-2">
+          {/* A LABEL BESIDE EVERY CONTROL (owner, 2026-10-06: '改成 label+input 的形式').
+              The fold used to be one strip of bare checkboxes whose only names were the
+              catalog's own `text` / `image`, then a `输出：文本` SPAN that was not a control
+              at all, then a select with no label but a hover title. Four controls, no
+              questions attached to them. Each is now a row that can be answered: 输入 /
+              输出 / 指令变了怎么送达 / 上下限. */}
           <div className="flex items-center gap-3">
-            {(["text", "image"] as const).map((modality) => (
-              <label key={modality} className="flex items-center gap-1 text-xs">
-                <input
-                  type="checkbox"
-                  // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
-                  // vocabulary ("text" / "image") and is printed as-is, while the
-                  // accessible name is a sentence, so each branch names its own key.
-                  aria-label={
-                    modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
-                  }
-                  checked={row.input.includes(modality)}
-                  onChange={(e) => {
-                    const next = e.target.checked
-                      ? [...row.input, modality]
-                      : row.input.filter((m) => m !== modality);
-                    onChange({ ...row, input: next });
-                  }}
-                />
-                {modality}
-              </label>
-            ))}
-            <span className="text-muted-foreground text-xs">{t("form.outText")}</span>
-            {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
-                as one whose line says `replace`: the first is silence the server fills
-                with the conservative default, the second is something a person wrote. So
-                the empty option DELETES the key rather than writing `replace`, and a save
-                that never touched this control leaves every other model's line alone. */}
-            {/* ONE LINE, NOT TWO (owner, 2026-10-03: 'instruction-updates must not wrap onto a
-                second line'): the LABEL TEXT moves into the select's accessible name, so
-                what stays in the flow is the control alone -- no wrapping label beside it.
-                That is why the option words are SHORT ('原位追加' / '整条替换') rather than
-                the sentences that explain them: the whole explanation is the `title`, so it
-                is one hover away and costs the row no width. A row whose label read the
-                sentence out loud is what the rule was written against. */}
-            <select
-              data-slot="settings-provider-model-instruction-updates"
-              aria-label={t("form.instructionUpdatesLabel")}
-              title={t("form.instructionUpdatesHint")}
-              className={`${inputClass} w-auto`}
-              value={row["instruction-updates"] ?? ""}
-              onChange={(e) => {
-                const next = { ...row };
-                const value = e.target.value;
-                if (value === "") delete next["instruction-updates"];
-                else next["instruction-updates"] = value as "in-place" | "replace";
-                onChange(next);
-              }}
-            >
-              <option value="">{t("form.instructionUpdatesUndeclared")}</option>
-              {/* THE ENUM NAME RIDES ALONGSIDE THE WORD WHERE THE WORD IS NOT ALREADY THE
-                  NAME, because the two are one fact said twice: a person who has read
-                  docs/architecture/providers.md is looking for `in-place`, and one who has not
-                  is looking for what it does. The English face already reads as the enum, so
-                  saying it there would print `in-place · in-place`. */}
-              <option value="in-place">
-                {enumBeside(t, "form.instructionUpdatesInPlace", "in-place")}
-              </option>
-              <option value="replace">
-                {enumBeside(t, "form.instructionUpdatesReplace", "replace")}
-              </option>
-            </select>
+            <FactRow label={t("form.inputLabel")}>
+              {(["text", "image"] as const).map((modality) => (
+                <label key={modality} className="flex items-center gap-1 text-xs">
+                  <input
+                    type="checkbox"
+                    // THE WORD IS OURS, THE KEY IS NOT: `modality` is the catalog's own
+                    // vocabulary ("text" / "image") and is printed as-is, while the
+                    // accessible name is a sentence, so each branch names its own key.
+                    aria-label={
+                      modality === "text" ? t("form.acceptsText") : t("form.acceptsImage")
+                    }
+                    checked={row.input.includes(modality)}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...row.input, modality]
+                        : row.input.filter((m) => m !== modality);
+                      onChange({ ...row, input: next });
+                    }}
+                  />
+                  {modality}
+                </label>
+              ))}
+            </FactRow>
           </div>
-          <div className="flex items-center gap-2">
-            {(["context-window", "max-output-tokens"] as const).map((count) => (
-              <label key={count} className="flex items-center gap-1 text-xs">
-                {count === "context-window" ? t("form.context") : t("form.maxOut")}
+          {/* OUTPUT IS ITS OWN ROW WITH A REAL CHECKBOX. It was a span saying `输出：文本`
+              because text is the only output type the catalog carries (`output-types` is
+              `#{:text}`) -- so the fact was constant. A constant still belongs beside its
+              name, and one day the vocabulary grows a second type: the control is already
+              where that fact belongs, and `output-types` is the only place to add the word. */}
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.outputLabel")}>
+              {(["text"] as const).map((modality) => (
+                <label key={modality} className="flex items-center gap-1 text-xs">
+                  <input
+                    type="checkbox"
+                    aria-label={t("form.givesText")}
+                    checked
+                    disabled
+                    onChange={() => undefined}
+                  />
+                  {modality}
+                </label>
+              ))}
+            </FactRow>
+          </div>
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.instructionUpdatesLabel")}>
+              {/* THREE STATES, NOT TWO. An endpoint no line has spoken for is NOT the same
+                  as one whose line says `replace`: the first is silence the server fills
+                  with the conservative default, the second is something a person wrote. So
+                  the empty option DELETES the key rather than writing `replace`, and a save
+                  that never touched this control leaves every other model's line alone. */}
+              {/* THE OPTION WORDS ARE THE ENUM NAMES, UNTRANSLATED (owner, 2026-10-06:
+                  'select 直接显示英文就行，不用翻译'). They are two short tokens from
+                  `cap/providers.clj`, and translating them made the row WIDER than the
+                  question it answers -- a select whose label is longer than its longest
+                  option reads as a control for something bigger than it is. What each one
+                  means is the LABEL's job and the `title`'s; the option only has to be the
+                  value a person finds written in config.edn. */}
+              <select
+                data-slot="settings-provider-model-instruction-updates"
+                aria-label={t("form.instructionUpdatesLabel")}
+                title={t("form.instructionUpdatesHint")}
+                className={`${inputClass} w-auto`}
+                value={row["instruction-updates"] ?? ""}
+                onChange={(e) => {
+                  const next = { ...row };
+                  const value = e.target.value;
+                  if (value === "") delete next["instruction-updates"];
+                  else next["instruction-updates"] = value as "in-place" | "replace";
+                  onChange(next);
+                }}
+              >
+                <option value="">{t("form.instructionUpdatesUndeclared")}</option>
+                <option value="in-place">in-place</option>
+                <option value="replace">replace</option>
+              </select>
+            </FactRow>
+          </div>
+          {/* THE TWO COUNTS, LABELLED LIKE THE ROWS ABOVE. They were one row of two
+              bare number boxes each preceded by its own word (`上下文 1000000`), which read
+              as two fields rather than the pair they are -- and `上下文` is the file's
+              `:context-window` under a different name, while the accessible name said the
+              raw key. Label and accessible name are the same string here, and the raw key
+              is what it says: it names the config.edn key itself. */}
+          <div className="flex items-center gap-3">
+            <FactRow label={t("form.countsLabel")}>
+              {(["context-window", "max-output-tokens"] as const).map((count) => (
                 <Input
+                  key={count}
                   // The accessible name keeps the field's raw key, which is what the
                   // English aria-label was; it is the one string here that does not
                   // translate, because it names the config.edn key itself.
                   aria-label={
+                    count === "context-window"
+                      ? t("form.contextWindow")
+                      : t("form.maxOutputTokens")
+                  }
+                  title={
                     count === "context-window"
                       ? t("form.contextWindow")
                       : t("form.maxOutputTokens")
@@ -728,8 +762,8 @@ const ModelRowEditor: FC<{
                     onChange(next);
                   }}
                 />
-              </label>
-            ))}
+              ))}
+            </FactRow>
             {/* THE MODALITY CHECKBOXES carry the same suggestion in their PLACEHOLDER
                 state (the `title`, since a checkbox has none): what models.dev says this
                 model takes, so an unticked pair reads as 'the file is silent' rather than
