@@ -569,10 +569,14 @@ const ModelRowEditor: FC<{
   onRemove: () => void;
 }> = ({ row, canRemove, onChange, onRemove }) => {
   const { t } = useTranslation("settings");
-  // WHAT THE DATABASE SAYS, as the fold's summary and the two placeholders read it.
-  // Computed once here rather than inside the summary helper so the placeholders and
-  // the summary cannot disagree about which row they are describing.
-  const factHint = row["name-suggested"] ?? "";
+  // WHAT models.dev ANSWERS FOR THE TWO COUNTS, as this row's placeholder state -- what
+  // the fold would fill in where the file is silent. The summary above shows the RESOLVED
+  // answer (file first, database second); these are the database's half on its own.
+  //
+  // IT WAS ALSO, until owner, 2026-10-06 ('上下限后面的文字描述直接去掉'), the `title` of
+  // a sentence drawn under these boxes explaining where they come from. That sentence is
+  // gone; the placeholders still carry the same fact, which is the half that was doing the
+  // real work anyway.
   const countFacts: Record<"context-window" | "max-output-tokens", number | undefined> = {
     "context-window": row["context-window-suggested"],
     "max-output-tokens": row["max-output-tokens-suggested"],
@@ -591,7 +595,9 @@ const ModelRowEditor: FC<{
         />
         {/* THE NAME IS OPTIONAL, and it is the ONE fact the form offers from the
             outside: the database's own name for this id (`name-suggested`) shows as
-            the placeholder, and typing over it is the only way a name is written.
+            the placeholder, and typing over it is the only way a name is written. It is
+            also the LAST of the outside world's three suggestions still on screen -- the
+            counts' placeholders beside it -- now that the sentence under them is gone.
             Leaving it empty keeps the file silent and the resolution answers the
             database's name -- or the id -- when somebody asks what this model is
             called. */}
@@ -764,17 +770,6 @@ const ModelRowEditor: FC<{
                 />
               ))}
             </FactRow>
-            {/* THE MODALITY CHECKBOXES carry the same suggestion in their PLACEHOLDER
-                state (the `title`, since a checkbox has none): what models.dev says this
-                model takes, so an unticked pair reads as 'the file is silent' rather than
-                'it takes nothing'. The resolution's own answer is what the summary
-                already shows. */}
-            <span
-              className="text-muted-foreground text-xs"
-              title={factHint}
-            >
-              {t("form.factsHint")}
-            </span>
           </div>
           <p className="text-muted-foreground text-[10px]">{t("form.limitsNote")}</p>
         </div>

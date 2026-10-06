@@ -116,7 +116,6 @@
     "removeTitle": "Takes this entry out of config.edn. config.edn.bak holds the file as it was, and the .env line stays.",
     "modelId": "Model id",
     "factsUnknown": "unknown",
-    "factsHint": "Answered from models.dev for this id; what the file says wins, and leaving a field empty keeps the file silent.",
     "modelName": "Model name",
     "modelNamePlaceholder": "Leave empty for the database's name, or the id",
     "removeModel": "Remove model",
