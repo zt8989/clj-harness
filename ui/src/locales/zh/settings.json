@@ -126,9 +126,9 @@
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
     "limitsNote": "只是报出来，不强制执行。拿不准的就别填。",
-    "instructionUpdatesLabel": "指令变了怎么送达",
+    "instructionUpdatesLabel": "对话中途系统消息",
     "instructionUpdatesUndeclared": "未声明",
-    "instructionUpdatesHint": "这个端点在对话开始之后，还收不收 system / developer 消息。收得住（in-place）：开头的 system 不动，变化作为末尾一条 developer 送出去。收不住（replace）：照旧重写开头那条 system。拿不准就别声明——服务端默认走 replace，那是能恢复的那一半。"
+    "instructionUpdatesHint": "对话开始之后，这个端点还收不收 system / developer 消息。收得住（in-place）：开头的 system 不动，变化作为末尾一条 developer 送出去。收不住（replace）：照旧重写开头那条 system。拿不准就别声明——服务端默认走 replace，那是能恢复的那一半。"
   },
   "mcp": {
     "heading": "MCP 服务器",

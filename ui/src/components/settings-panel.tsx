@@ -159,15 +159,22 @@ const inputClass =
 /// NOT the page's `Field`, and the difference is the axis: `Field` stacks a label ABOVE a
 /// full-width input, which is the right shape for a value you type into and the wrong one
 /// here -- inside the facts fold the controls are checkboxes and a short select, so a label
-/// above each would spend three lines saying 输入 / 输出 / 指令变了怎么送达 before the
+/// above each would spend four lines saying 输入 / 输出 / 对话中途系统么送达 before the
 /// first tick box appeared.
 ///
-/// THE LABEL COLUMN IS FIXED (`w-20`) so the three rows' controls START IN THE SAME PLACE.
+/// THE LABEL COLUMN IS FIXED (`w-28`) so every row's control STARTS IN THE SAME PLACE.
 /// Without it the boxes line up under a ragged edge and the eye reads the fold as one
 /// paragraph again -- the thing the labels were added to end.
+///
+/// `w-28` AND NOT `w-20`, because the column has to hold the LONGEST label the fold draws
+/// on ONE line (owner, 2026-10-06: '对话中途系统消息'). It was `w-20` when the labels were
+/// 输入 / 输出 / 指令变了怎么送达 / 上下限, and eight characters do not fit in eighty
+/// pixels: the longest label wrapped onto a second line and pushed its control down, so
+/// the very row the fixed column was added to straighten was the one row that broke it.
+/// The column is sized by its longest word, so that word is the one worth picking short.
 const FactRow: FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className="flex w-full items-center gap-3">
-    <span className="w-20 shrink-0 text-xs font-medium">{label}</span>
+    <span className="w-28 shrink-0 text-xs font-medium">{label}</span>
     {children}
   </div>
 );
@@ -651,7 +658,7 @@ const ModelRowEditor: FC<{
               catalog's own `text` / `image`, then a `输出：文本` SPAN that was not a control
               at all, then a select with no label but a hover title. Four controls, no
               questions attached to them. Each is now a row that can be answered: 输入 /
-              输出 / 指令变了怎么送达 / 上下限. */}
+              输出 / 对话中途系统消息 / 上下限. */}
           <div className="flex items-center gap-3">
             <FactRow label={t("form.inputLabel")}>
               {(["text", "image"] as const).map((modality) => (

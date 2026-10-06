@@ -129,7 +129,7 @@
     "contextWindow": "context-window",
     "maxOutputTokens": "max-output-tokens",
     "limitsNote": "Reported, not enforced. Omit what you have not verified.",
-    "instructionUpdatesLabel": "How a changed instruction is delivered",
+    "instructionUpdatesLabel": "mid-conversation system message",
     "instructionUpdatesUndeclared": "not declared",
     "instructionUpdatesHint": "Whether this endpoint still accepts a system / developer message once the conversation has begun. Accepts it (in-place): the opening system message stays put and the change rides in as a trailing developer message. Does not (replace): the opening system message is rewritten, as it always was. Declare nothing if you are unsure \u2014 the server defaults to replace, which is the half that recovers."
   },
