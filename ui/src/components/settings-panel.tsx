@@ -86,6 +86,7 @@ import {
   type ProviderRow,
   type Registry,
 } from "@/lib/providers";
+import { entryOf } from "@/lib/model-entry";
 import { drawnInSettings, hasKey } from "@/lib/provider-key";
 import { effortsForModel, effortsOffered } from "@/lib/efforts";
 import { providerLabel } from "@/lib/provider-label";
@@ -723,6 +724,10 @@ type Draft = {
   baseUrl: string;
   protocol: string;
   apiKey: string;
+  /// REPORT ROWS, AS THE DRAFT HOLDS THEM -- not entries, and the difference is the
+  /// whole of `lib/model-entry.ts`: the report offers the database's answers beside
+  /// the file's, and only the file's may be written. The draft is therefore a draft of
+  /// what a SAVE projects, not of what a save sends -- `entryOf` is what crosses.
   models: ModelRow[];
   editing: boolean;
 };
@@ -825,7 +830,16 @@ const ProviderForm: FC<{
         // NAMED model, and came back as "it does not declare one" for a vendor that had
         // never been asked.
         ...(draft.models[0] !== undefined ? { model: draft.models[0].id } : {}),
-        models: draft.models,
+        // AND THE ROWS CROSS AS ENTRIES, not as the report's rows. The report RIDES five
+        // suggested keys beside what the file said (`name-suggested` and the four beside
+        // it) so a form can show them; a config.edn model entry may carry none of them,
+        // and the server refuses the whole write when one arrives. That refusal is what a
+        // person met on a provider the database knows, having changed nothing: "model
+        // \"cn:deepseek-v4.1-flash\" of provider :workbuddy carries [:name-suggested], which it
+        // does not understand". `entryOf` is the projection, and it is a FUNCTION rather
+        // than a type because only a function keeps a key added to the report next month
+        // from reaching the writer by accident -- see `lib/model-entry.ts`.
+        models: draft.models.map(entryOf),
         // ABSENT when the field is empty: that means "leave .env alone", which is
         // what an untouched key field means. (The server refuses an empty string.)
         ...(draft.apiKey === "" ? {} : { "api-key": draft.apiKey }),

@@ -67,6 +67,7 @@ import { composerContextBarSuite } from "./suites/composer-context-bar";
 import { sessionErrorSuite } from "./suites/session-error";
 import { settingsSessionsSuite } from "./suites/settings-sessions";
 import { securityPathsSuite } from "./suites/security-paths";
+import { modelEntrySuite } from "./suites/model-entry";
 /// Every suite, in the order the runner reports them. A suite that is not listed
 /// here is not run, so this is the one place a new one has to be added.
 ///
@@ -83,8 +84,11 @@ import { securityPathsSuite } from "./suites/security-paths";
 /// `refreshed-turn-keeps-growing` is the seventh: it appended `threadMessagesSuite` -- the suite
 /// for the module that builds the page's copy of a conversation out of the server's messages,
 /// where a tool call still in flight used to lose the server's word (`state: running`) and come
-/// back 待审批. APPENDED, like every side before it.
-const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, securityPathsSuite, sessionErrorSuite, goalSuite, trajectorySuite];
+/// back 待审批. `a-model-row-cannot-be-saved-back` is the ninth: it appended `modelEntrySuite`,
+/// for the module that projects a report row into the entry a write carries -- the report's five
+/// `-suggested` keys used to be POSTed straight back and the save refused. APPENDED, like every
+/// side before it.
+const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalSuite, skillsSuite, statsSuite, contextSuite, elicitationSuite, elicitationCardSuite, attachmentsSuite, turnsSuite, injectionSuite, compactionSuite, pickerSuite, i18nSuite, restoreSuite, runningSuite, concurrentSuite, sidebarSuite, sessionTitleSuite, relativeTimeSuite, idSuite, sidebarRowsSuite, sidebarRefetchSuite, recordSuite, windowSuite, reasoningRowSuite, toolRowSuite, subagentsSuite, subagentViewSuite, muxSuite, rightPaneSuite, threadMessagesSuite, coalesceSuite, markdownCommitSuite, timeoutSuite, normalizationSuite, composerTodosSuite, composerStateSuite, composerContextBarSuite, settingsSessionsSuite, securityPathsSuite, sessionErrorSuite, goalSuite, trajectorySuite, modelEntrySuite];
 
 /// The number of cases the suites are expected to contribute, pinned. The count
 /// is a contract, not bookkeeping: it is what makes a suite silently dropping out
@@ -614,7 +618,13 @@ const SUITES: readonly Suite[] = [framesSuite, clientSuite, turnSuite, approvalS
 /// the literal `tool` -- a wire tool message carries no name at all -- which the page draws as a
 /// card for a tool that does not exist. The case pins that invention and the new rule side by
 /// side, plus the two shapes the rule must not touch.
-const EXPECTED_CASES = 232;
+/// 232 -> 237: the `model-entry` suite's five, for THE PROJECTION A SAVE MAKES. The report
+/// rides five `-suggested` keys beside what the file said, and the form posted its draft back
+/// verbatim: a person who opened a vendor the database knows and pressed save without touching
+/// anything was refused with `model "cn:deepseek-v4.1-flash" of provider :workbuddy carries
+/// [:name-suggested], which it does not understand`. The cases pin that none of the five cross,
+/// that what the file DID say crosses untouched, and that a fresh row stays empty.
+const EXPECTED_CASES = 237;
 
 
 let total = 0;
