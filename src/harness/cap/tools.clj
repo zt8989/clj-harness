@@ -1106,12 +1106,14 @@
        " many there are in all, so a long record can be walked in order. Nothing is ever lost:"
        " when that window is not the whole record, the answer also names the record's path, so"
        " the rest can be `read` / `grep` / `bash`ed instead of paged through. "
-       "`wait: true` blocks until the command is over -- or until `timeout` (default "
-       jobs/job-output-default-timeout-ms "ms) runs out, and that is not an error: the answer"
-       " is `[running]` with whatever the command has said so far. A job that ends while you"
-       " are busy is announced to you before your next model call (see `job`), and that"
-       " announcement is what names this verb -- so `wait` is for standing still and waiting"
-       " for it now. "
+       "`timeout` is itself a request to wait: naming one waits up to that many milliseconds, "
+       "so `timeout: 5000` stands still on its own and `wait` alongside it is only for saying so "
+       "plainly. The wait ends when the command is over or when the timeout (default "
+       jobs/job-output-default-timeout-ms "ms, used when `wait` is said without one) runs out, "
+       "and running out is not an error: the answer is `[running]` with whatever the command has "
+       "said so far. A job that ends while you are busy is announced to you before your next model "
+       "call (see `job`), and that announcement is what names this verb -- so waiting is for "
+       "standing still and waiting for it now. "
        "A job that is over still answers -- but only inside the process that started it: an"
        " id does not survive a restart, though the record it left is still a file on disk. A"
        " record this call cannot reach is therefore not a record that is gone."))
@@ -1171,11 +1173,14 @@
          "limit"   {:type "integer" :minimum 1
                     :description "How many lines to return at most."}
          "wait"    {:type "boolean"
-                    :description (str "Wait for the command to finish (or for `timeout`) before"
-                                      " answering. Default false: answer now.")}
+                    :description (str "Wait for the command to finish before answering."
+                                      " Naming a `timeout` already means this, so `wait` is only"
+                                      " for saying so plainly. Default false: answer now.")}
          "timeout" {:type "integer" :minimum 1
-                    :description (str "How long `wait` waits, in milliseconds. Default "
-                                      jobs/job-output-default-timeout-ms ".")}}
+                    :description (str "How long to wait, in milliseconds -- NAMING ONE WAITS,"
+                                      " whether or not `wait` was said. Default "
+                                      jobs/job-output-default-timeout-ms
+                                      " when `wait` is said without one.")}}
         [:job] t-job-output))
 
 ;; -------------------------------------------------------------------- job_list

@@ -965,7 +965,7 @@
       (is (str/includes? (spec "job") "WHEN IT ENDS YOU ARE TOLD"))
       (is (str/includes? (spec "job") "`job_output`") "and names the verb that reads it"))
     (testing "`job_output` is the one that can wait, and the one that says how it went"
-      (is (str/includes? (spec "job_output") "`wait: true` blocks"))
+      (is (str/includes? (spec "job_output") "`timeout` is itself a request to wait"))
       ;; THE RIGHT-HAND SIDE IS A LITERAL, and that is the whole point of this line.
       ;; The description is part of the bytes that go out, so an assertion that
       ;; recomputed the expected text from the very expression under test would pass

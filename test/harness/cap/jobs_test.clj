@@ -899,6 +899,33 @@
       (is (< elapsed (quot (long jobs/job-output-default-timeout-ms) 2))
           (str "elapsed " elapsed "ms, default " jobs/job-output-default-timeout-ms "ms")))))
 
+
+(deftest a-timeout-alone-is-enough-to-wait
+  ;; A NUMBERED WAIT IS A WAIT: `timeout` says how long to stand still FOR, so naming one
+  ;; says it -- `wait: true` beside it is the same intent spelled twice, not a stricter one.
+  ;; The shape that must NOT wait is the one that says nothing at all: that is "answer now".
+  (let [t      "jt-timeout-implies-wait"
+        long-id (:id (jobs/start! t {:command "sleep 30"}))
+        {:keys [id]} (jobs/start! t {:command "echo done; sleep 1; echo later"})]
+    (let [started (System/currentTimeMillis)
+          {:keys [status lines]} (jobs/output t id {:timeout 20000})
+          elapsed (- (System/currentTimeMillis) started)]
+      (is (= "[exit 0]" status) "the wait ended on the job's own ending")
+      (is (= ["done" "later"] lines))
+      (is (>= elapsed 900) (str "it really waited rather than answering at once: " elapsed "ms")))
+    (let [started (System/currentTimeMillis)
+          {:keys [status]} (jobs/output t long-id {:timeout 300})
+          elapsed (- (System/currentTimeMillis) started)]
+      (is (= "[running]" status) "a timeout on a job that will not end is not an error")
+      (is (>= elapsed 250) (str "it stood still for the timeout it named: " elapsed "ms"))
+      (is (< elapsed 10000) (str "and came back there, not at the command's end: " elapsed "ms")))
+    (testing "while naming neither answers now, however long the job runs on"
+      (let [started (System/currentTimeMillis)
+            {:keys [status]} (jobs/output t long-id {})
+            elapsed (- (System/currentTimeMillis) started)]
+        (is (= "[running]" status))
+        (is (< elapsed 500) (str "no wait was asked for, so none happened: " elapsed "ms"))))))
+
 (deftest a-reading-walks-a-record-with-offset-and-limit
   ;; The window is the TAIL by default -- what a job has just said -- and `offset`
   ;; asks for a stretch that begins somewhere, the way `read` does. The numbers in the

@@ -1042,11 +1042,16 @@
   caps how many lines come back. Both are bounded by `answer-budget-bytes` -- the
   same ceiling a `bash` answer has, from the same place.
 
-  WAIT MEANS WAIT FOR IT TO BE OVER: `wait: true` blocks until the record is closed
-  or `timeout` runs out, and a timeout is an ordinary answer (`[running]` plus
-  whatever it has said so far), never an error. There is nothing to poll and no way
-  to be notified otherwise -- a job is a command nobody is waiting for, and this is
-  how a caller decides to wait anyway.
+  A TIMEOUT IS A REQUEST TO WAIT: `timeout` is a number of milliseconds to wait FOR, so naming
+  one is naming an intent to stand still -- `timeout: 5000` waits whether or not `wait` was said,
+  and a caller that means `answer now` says no timeout at all. This is the one place a defaulted
+  argument overrides another, and it is deliberate: the two spell one intent (`stand still for
+  this long`) in two halves.
+
+  WHAT WAITING WAITS FOR: `wait: true` blocks until the record is closed or `timeout` runs out, and
+  a timeout is an ordinary answer (`[running]` plus whatever it has said so far), never an error.
+  There is nothing to poll and no way to be notified otherwise -- a job is a command nobody is
+  waiting for, and this is how a caller decides to wait anyway.
 
   IT WAITS FOR THE ENDING LINE, NOT FOR THE STREAM: a command that lets go of its
   stdout and lives on (`exec 1>&-`) has an ended stream and no ending line, and no
@@ -1059,7 +1064,10 @@
   on disk, and `job_output` answers `unknown job` about it."
   [thread-id job-id {:keys [offset limit wait timeout]}]
   (let [job (with-job thread-id job-id (fn [reg _] reg))]
-    (when (and wait (not (terminal? job)))
+    ;; A NAMED TIMEOUT IS ALREADY THE INTENT TO WAIT: `timeout: 5000` says `stand still for up
+    ;; to five seconds" in one number, so `wait` need not be said alongside it -- saying it is
+    ;; redundant, not wrong. Not naming one and not saying `wait` is how a caller answers NOW.
+    (when (and (or wait timeout) (not (terminal? job)))
       (deref (:ended job) (long (or timeout job-output-default-timeout-ms)) ::timeout))
     ;; HANDING BACK AN ENDING IS TELLING. A job whose ending the model has just been
     ;; shown -- by a read, or by a wait that ended while it waited -- has no notice
